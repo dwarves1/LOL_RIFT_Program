@@ -3,7 +3,6 @@ import {
   asc,
   desc,
   eq,
-  inArray,
   ne,
   sql,
 } from "drizzle-orm";
@@ -33,7 +32,24 @@ export type RequestUser = {
 
 type Actor = Pick<RequestUser, "id" | "displayName">;
 
-const COLORS = ["#60a5fa", "#f97316", "#a78bfa", "#34d399", "#f43f5e", "#facc15"];
+const COLORS = [
+  "#60a5fa",
+  "#f97316",
+  "#a78bfa",
+  "#34d399",
+  "#f43f5e",
+  "#facc15",
+  "#22d3ee",
+  "#fb7185",
+  "#818cf8",
+  "#4ade80",
+  "#f472b6",
+  "#fbbf24",
+  "#2dd4bf",
+  "#c084fc",
+  "#38bdf8",
+  "#a3e635",
+];
 const POSITIONS = ["TOP", "JGL", "MID", "ADC", "SUP"];
 
 const uid = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
@@ -207,8 +223,10 @@ async function createTournamentInternal(
 ) {
   const name = input.name.trim();
   if (!name) throw new Error("대회명을 입력해 주세요.");
-  if (input.teams.length !== 5) throw new Error("현재 토너먼트 템플릿은 5개 팀이 필요합니다.");
-  if (input.teams.some((team) => !team.name.trim() || team.members.filter(Boolean).length !== 5)) {
+  if (!Array.isArray(input.teams) || input.teams.length < 2 || input.teams.length > 16) {
+    throw new Error("참가 팀 수는 2팀부터 16팀까지 선택할 수 있습니다.");
+  }
+  if (input.teams.some((team) => !team.name.trim() || !Array.isArray(team.members) || team.members.filter(Boolean).length !== 5)) {
     throw new Error("각 팀의 팀명과 선수 5명을 모두 입력해 주세요.");
   }
   const matchesPerPair = Math.min(10, Math.max(1, Math.floor(input.matchesPerPair)));
@@ -362,8 +380,13 @@ export async function createBracket(tournamentId: string, seedOrder: string[], a
 async function createBracketInternal(tournamentId: string, seedOrder: string[], actor: Actor) {
   const db = getDb();
   const tournamentTeams = await db.select().from(teams).where(eq(teams.tournamentId, tournamentId));
-  if (tournamentTeams.length !== 5 || seedOrder.length !== 5 || new Set(seedOrder).size !== 5) {
-    throw new Error("1위부터 5위까지 다섯 팀의 순서를 확인해 주세요.");
+  if (
+    tournamentTeams.length < 2 ||
+    tournamentTeams.length > 16 ||
+    seedOrder.length !== tournamentTeams.length ||
+    new Set(seedOrder).size !== tournamentTeams.length
+  ) {
+    throw new Error(`1위부터 ${tournamentTeams.length}위까지 모든 팀의 순서를 확인해 주세요.`);
   }
   if (seedOrder.some((id) => !tournamentTeams.some((team) => team.id === id))) {
     throw new Error("이 대회에 속하지 않은 팀이 포함되어 있습니다.");
@@ -393,16 +416,18 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
     .limit(1);
   if (!tournament) throw new Error("대회를 찾을 수 없습니다.");
   const bracketStart = isoAfter(tournament.startAt, leagueMatches.length * 60 + 180);
-  const definitions = [
-    ["G1", "1경기", `seed:${seedOrder[0]}`, `seed:${seedOrder[2]}`],
-    ["G2", "2경기", `seed:${seedOrder[1]}`, `seed:${seedOrder[3]}`],
-    ["G3", "3경기 · 패자전", "loser:G1", "loser:G2"],
-    ["G4", "4경기 · 5위 결정", "loser:G3", `seed:${seedOrder[4]}`],
-    ["G5", "5경기 · 승자전", "winner:G1", "winner:G2"],
-    ["G6", "6경기 · 패자부활", "winner:G3", "winner:G4"],
-    ["G7", "7경기 · 3위 결정", "loser:G5", "winner:G6"],
-    ["F", "결승", "winner:G5", "winner:G7"],
-  ] as const;
+  const definitions: Array<[string, string, string, string]> = tournamentTeams.length === 5
+    ? [
+        ["G1", "1경기", `seed:${seedOrder[0]}`, `seed:${seedOrder[2]}`],
+        ["G2", "2경기", `seed:${seedOrder[1]}`, `seed:${seedOrder[3]}`],
+        ["G3", "3경기 · 패자전", "loser:G1", "loser:G2"],
+        ["G4", "4경기 · 5위 결정", "loser:G3", `seed:${seedOrder[4]}`],
+        ["G5", "5경기 · 승자전", "winner:G1", "winner:G2"],
+        ["G6", "6경기 · 패자부활", "winner:G3", "winner:G4"],
+        ["G7", "7경기 · 3위 결정", "loser:G5", "winner:G6"],
+        ["F", "결승", "winner:G5", "winner:G7"],
+      ]
+    : buildSingleEliminationDefinitions(seedOrder);
 
   const bracketRows = definitions.map(([matchNo, roundLabel, sourceA, sourceB], index) => ({
       id: uid("match"),
@@ -423,7 +448,49 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
   await db.update(tournaments).set({ status: "bracket" }).where(eq(tournaments.id, tournamentId));
   await audit(actor, "bracket_created", "tournament", tournamentId, tournamentId, null, {
     seedOrder,
+    format: tournamentTeams.length === 5 ? "five_team_loser_bracket" : "single_elimination",
   });
+}
+
+function buildSingleEliminationDefinitions(seedOrder: string[]) {
+  let bracketSize = 2;
+  while (bracketSize < seedOrder.length) bracketSize *= 2;
+
+  let seedPositions = [1, 2];
+  while (seedPositions.length < bracketSize) {
+    const nextSize = seedPositions.length * 2;
+    seedPositions = seedPositions.flatMap((seed) => [seed, nextSize + 1 - seed]);
+  }
+
+  let sources: Array<string | null> = seedPositions.map((seed) =>
+    seed <= seedOrder.length ? `seed:${seedOrder[seed - 1]}` : null,
+  );
+  const definitions: Array<[string, string, string, string]> = [];
+  let round = 1;
+
+  while (sources.length > 1) {
+    const nextSources: Array<string | null> = [];
+    const isFinal = sources.length === 2;
+    const roundLabel = isFinal ? "결승" : sources.length === 4 ? "준결승" : `${sources.length}강`;
+
+    for (let index = 0; index < sources.length; index += 2) {
+      const sourceA = sources[index];
+      const sourceB = sources[index + 1];
+      if (!sourceA || !sourceB) {
+        nextSources.push(sourceA ?? sourceB);
+        continue;
+      }
+
+      const matchNo = isFinal ? "F" : `R${round}M${index / 2 + 1}`;
+      definitions.push([matchNo, roundLabel, sourceA, sourceB]);
+      nextSources.push(`winner:${matchNo}`);
+    }
+
+    sources = nextSources;
+    round += 1;
+  }
+
+  return definitions;
 }
 
 function resolveSource(

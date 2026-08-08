@@ -3,7 +3,7 @@ import { headers } from "next/headers";
 import "./globals.css";
 
 const title = "RIFT FIVE | 롤 대회 운영 허브";
-const description = "5팀 리그와 패자부활 토너먼트, 승리팀 예측을 한곳에서 운영하세요.";
+const description = "팀 수를 선택해 리그와 토너먼트, 승리팀 예측을 한곳에서 운영하세요.";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -19,13 +19,13 @@ export async function generateMetadata(): Promise<Metadata> {
       locale: "ko_KR",
       title,
       description,
-      images: [{ url: "/og.png", width: 1745, height: 909, alt: "RIFT FIVE 5팀 롤 대회 운영 허브" }],
+      images: [{ url: "/og-v2.png", width: 1536, height: 1024, alt: "RIFT FIVE 롤 대회 운영 허브" }],
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
-      images: ["/og.png"],
+      images: ["/og-v2.png"],
     },
   };
 }
