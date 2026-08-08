@@ -215,6 +215,13 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void load(selectedTournament || undefined);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [load, selectedTournament]);
+
   async function command(payload: Record<string, unknown>, successMessage: string) {
     setBusy(true);
     setMessage(null);
