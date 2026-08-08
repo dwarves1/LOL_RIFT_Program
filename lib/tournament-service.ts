@@ -7,7 +7,7 @@ import {
   ne,
   sql,
 } from "drizzle-orm";
-import { ensureSchema, getDb } from "../db";
+import { ensureSchema, getConfiguredOwnerEmail, getDb } from "../db";
 import {
   auditLogs,
   bets,
@@ -76,11 +76,8 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
   const [existing] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
 
   if (!existing) {
-    const [adminCount] = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(users)
-      .where(eq(users.role, "admin"));
-    const role: UserRole = isLocalDemo || Number(adminCount?.count ?? 0) === 0 ? "admin" : "viewer";
+    const ownerEmail = getConfiguredOwnerEmail();
+    const role: UserRole = isLocalDemo || email.toLowerCase() === ownerEmail ? "admin" : "viewer";
     await db.insert(users).values({
       id: userId,
       email,
