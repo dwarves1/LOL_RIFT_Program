@@ -105,10 +105,14 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
     return { id: userId, email, displayName, role, pointsBalance: 0, isLocalDemo };
   }
 
-  await db
-    .update(users)
-    .set({ email, displayName, lastSeenAt: new Date().toISOString() })
-    .where(eq(users.id, userId));
+  // Dashboard polling should remain read-only for existing users. Writing a
+  // last-seen timestamp on every refresh creates unnecessary D1 contention.
+  if (existing.email !== email || existing.displayName !== displayName) {
+    await db
+      .update(users)
+      .set({ email, displayName })
+      .where(eq(users.id, userId));
+  }
 
   return {
     id: existing.id,

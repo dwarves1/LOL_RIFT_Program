@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
-import { shouldSwapLeagueSides } from "../lib/match-rules";
 
 export function getRawDb(): D1Database {
   if (!env.DB) {
@@ -69,82 +68,28 @@ async function migrateMatchScheduleConfirmation(raw: D1Database) {
   }
 }
 
-async function normalizeLeagueSides(raw: D1Database) {
-  type LeagueSideRow = {
-    id: string;
-    tournament_id: string;
-    round_label: string;
-    match_no: string;
-    team_a_id: string;
-    team_b_id: string;
-  };
-  const rows = await raw.prepare(`
-    SELECT id, tournament_id, round_label, match_no, team_a_id, team_b_id
-    FROM matches
-    WHERE phase = 'league' AND team_a_id IS NOT NULL AND team_b_id IS NOT NULL
-  `).all<LeagueSideRow>();
-  const pairGroups = new Map<string, LeagueSideRow[]>();
-  for (const row of rows.results) {
-    const pair = [row.team_a_id, row.team_b_id].sort().join(":");
-    const key = `${row.tournament_id}:${pair}`;
-    pairGroups.set(key, [...(pairGroups.get(key) ?? []), row]);
-  }
-
-  const updates: D1PreparedStatement[] = [];
-  for (const pairMatches of pairGroups.values()) {
-    const legNumber = (row: LeagueSideRow) => Number(row.round_label.match(/^(\d+)/)?.[1] ?? 0);
-    pairMatches.sort((a, b) => legNumber(a) - legNumber(b) || a.match_no.localeCompare(b.match_no));
-    const base = pairMatches.find((row) => legNumber(row) % 2 === 1) ?? pairMatches[0];
-    if (!base) continue;
-    const baseA = base.team_a_id;
-    const baseB = base.team_b_id;
-    pairMatches.forEach((row, index) => {
-      const leg = legNumber(row);
-      const shouldSwap = leg > 0 ? shouldSwapLeagueSides(leg) : index % 2 === 1;
-      const expectedA = shouldSwap ? baseB : baseA;
-      const expectedB = shouldSwap ? baseA : baseB;
-      if (row.team_a_id !== expectedA || row.team_b_id !== expectedB) {
-        updates.push(raw.prepare("UPDATE matches SET team_a_id = ?, team_b_id = ? WHERE id = ?").bind(expectedA, expectedB, row.id));
-      }
-    });
-  }
-  for (let index = 0; index < updates.length; index += 50) {
-    await raw.batch(updates.slice(index, index + 50));
-  }
-}
-
-async function removeLegacyDemoTournament(raw: D1Database) {
-  const demoName = "2026 서머 소환사의 컵";
-  const demoIds = await raw
-    .prepare("SELECT id FROM tournaments WHERE created_by = 'system' AND name = ?")
-    .bind(demoName)
-    .all<{ id: string }>();
-  for (const demo of demoIds.results) {
-    await raw.batch([
-      raw.prepare("DELETE FROM point_ledger WHERE tournament_id = ?").bind(demo.id),
-      raw.prepare("DELETE FROM bets WHERE tournament_id = ?").bind(demo.id),
-      raw.prepare("DELETE FROM tournament_entries WHERE tournament_id = ?").bind(demo.id),
-      raw.prepare("DELETE FROM audit_logs WHERE tournament_id = ?").bind(demo.id),
-      raw.prepare("DELETE FROM players WHERE team_id IN (SELECT id FROM teams WHERE tournament_id = ?)").bind(demo.id),
-      raw.prepare("DELETE FROM matches WHERE tournament_id = ?").bind(demo.id),
-      raw.prepare("DELETE FROM teams WHERE tournament_id = ?").bind(demo.id),
-      raw.prepare("DELETE FROM tournaments WHERE id = ?").bind(demo.id),
-    ]);
-  }
-}
-
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
     schemaReady = raw
-      .batch(schemaStatements.map((statement) => raw.prepare(statement)))
-      .then(async () => {
+      .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
+      .first<{ name: string }>()
+      .then(async (usersTable) => {
+        if (!usersTable) {
+          await raw.batch(schemaStatements.map((statement) => raw.prepare(statement)));
+        }
         await migrateTournamentPoints(raw);
         await migrateMatchScheduleConfirmation(raw);
-        await raw.prepare("CREATE INDEX IF NOT EXISTS idx_entries_tournament_balance ON tournament_entries(tournament_id, points_balance)").run();
-        await removeLegacyDemoTournament(raw);
-        await normalizeLeagueSides(raw);
-        await raw.prepare("PRAGMA optimize").run();
+        const balanceIndex = await raw
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
+          .first<{ name: string }>();
+        if (!balanceIndex) {
+          await raw.prepare("CREATE INDEX idx_entries_tournament_balance ON tournament_entries(tournament_id, points_balance)").run();
+        }
+      })
+      .catch((error) => {
+        schemaReady = null;
+        throw error;
       });
   }
   return schemaReady!;

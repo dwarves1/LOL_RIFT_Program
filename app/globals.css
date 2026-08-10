@@ -305,6 +305,7 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
 .first-tournament-screen > p:not(.eyebrow) { margin: 0 0 24px; color: var(--muted); font-size: 12px; }
 .first-tournament-help { color: var(--muted); font-size: 11px; }
 .loading-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }.loading-screen .brand-mark { width: 58px; height: 58px; }.loading-screen p { color: var(--muted); font-size: 11px; }.loader { width: 120px; height: 1px; overflow: hidden; background: #1d2a3c; }.loader::after { content: ""; display: block; width: 40%; height: 100%; background: var(--gold); animation: loading 1.2s ease-in-out infinite; }@keyframes loading { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
+.loading-error { padding: 24px; text-align: center; }.loading-error h1 { margin: 0; font-size: clamp(22px, 4vw, 32px); }.loading-error p { max-width: 430px; line-height: 1.7; }.loading-error .primary-button { margin-top: 4px; }
 
 .modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(1,6,12,.86); backdrop-filter: blur(12px); }
 .create-modal { width: min(1180px, 100%); max-height: calc(100vh - 48px); display: flex; flex-direction: column; border: 1px solid rgba(233,185,73,.25); background: #0c1727; box-shadow: 0 35px 100px rgba(0,0,0,.55); }

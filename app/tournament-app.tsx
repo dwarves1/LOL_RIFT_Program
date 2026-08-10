@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isPredictionOpen } from "../lib/match-rules";
 
 type Role = "viewer" | "operator" | "admin";
@@ -180,6 +180,17 @@ function LoadingScreen() {
   );
 }
 
+function LoadErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <main className="loading-screen loading-error" role="alert">
+      <div className="brand-mark">LR</div>
+      <h1>데이터 연결이 지연되고 있습니다</h1>
+      <p>{message}</p>
+      <button className="primary-button" type="button" onClick={onRetry}>다시 시도</button>
+    </main>
+  );
+}
+
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="empty-state">
@@ -197,21 +208,40 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const activeLoad = useRef<AbortController | null>(null);
 
   const load = useCallback(async (tournamentId?: string) => {
+    activeLoad.current?.abort();
+    const controller = new AbortController();
+    activeLoad.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
     setLoading(true);
+    setLoadError(null);
     try {
       const query = tournamentId ? `?tournament=${encodeURIComponent(tournamentId)}` : "";
-      const response = await fetch(`/api/app${query}`, { cache: "no-store" });
+      const response = await fetch(`/api/app${query}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
       const next = (await response.json()) as Dashboard & { error?: string };
       if (!response.ok) throw new Error(next.error ?? "대회 정보를 불러오지 못했습니다.");
       setData(next);
       if (next.tournament) setSelectedTournament(next.tournament.id);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "잠시 후 다시 시도해 주세요.");
+      if (activeLoad.current !== controller) return;
+      const nextMessage = controller.signal.aborted
+        ? "서버 응답이 늦어 요청을 중단했습니다. 잠시 후 다시 시도해 주세요."
+        : error instanceof Error ? error.message : "잠시 후 다시 시도해 주세요.";
+      setLoadError(nextMessage);
+      setMessage(nextMessage);
     } finally {
-      setLoading(false);
+      window.clearTimeout(timeout);
+      if (activeLoad.current === controller) {
+        activeLoad.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -219,11 +249,12 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
     // Initial data loading is an intentional client-side synchronization with the API.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
+    return () => activeLoad.current?.abort();
   }, [load]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (!document.hidden) void load(selectedTournament || undefined);
+      if (!document.hidden && !activeLoad.current) void load(selectedTournament || undefined);
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [load, selectedTournament]);
@@ -251,6 +282,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   }
 
   if (loading && !data) return <LoadingScreen />;
+  if (loadError && !data) return <LoadErrorScreen message={loadError} onRetry={() => void load()} />;
   if (!data || !data.tournament) {
     const viewer = data?.viewer;
     return (
