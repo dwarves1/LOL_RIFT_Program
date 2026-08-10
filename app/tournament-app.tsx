@@ -982,18 +982,20 @@ function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & {
       <div className="admin-grid">
         <article className="panel schedule-confirmation-panel">
           <div className="section-heading"><div><p className="eyebrow">SCHEDULE APPROVAL</p><h2>경기 일정 확정</h2></div><span>{upcoming.filter((match) => match.scheduleConfirmed).length}/{upcoming.length}</span></div>
-          <p className="admin-panel-help">확정된 경기만 시작 1시간 전까지 포인트 예측에 표시됩니다. 일정을 수정하면 다시 확정해야 합니다.</p>
+          <p className="admin-panel-help">날짜·시간을 변경하면 먼저 일정을 저장해 주세요. 확정된 경기만 시작 1시간 전까지 포인트 예측에 표시됩니다.</p>
           <div className="admin-schedule-list">
             {upcoming.map((match) => {
               const teamA = teamMap.get(match.teamAId!);
               const teamB = teamMap.get(match.teamBId!);
               return (
-                <div className="admin-schedule-row" key={match.id}>
-                  <time>{formatDate(match.scheduledAt)}</time>
-                  <span><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><small>{match.roundLabel}</small></span>
-                  <b className={match.scheduleConfirmed ? "confirmed" : "waiting"}>{match.scheduleConfirmed ? "확정" : "미확정"}</b>
-                  <button className="secondary-button" disabled={busy || match.scheduleConfirmed} onClick={() => command({ action: "confirm_match_schedule", matchId: match.id }, "경기 일정을 확정했습니다.")}>{match.scheduleConfirmed ? "확정 완료" : "일정 확정"}</button>
-                </div>
+                <AdminScheduleRow
+                  key={`${match.id}:${match.scheduledAt}:${match.scheduleConfirmed}`}
+                  match={match}
+                  teamA={teamA}
+                  teamB={teamB}
+                  busy={busy}
+                  command={command}
+                />
               );
             })}
             {!upcoming.length && <div className="schedule-group-empty">확정할 예정 경기가 없습니다.</div>}
@@ -1014,6 +1016,54 @@ function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & {
         </article>
       )}
     </section>
+  );
+}
+
+function AdminScheduleRow({ match, teamA, teamB, busy, command }: {
+  match: Match;
+  teamA?: Team;
+  teamB?: Team;
+  busy: boolean;
+  command: SharedProps["command"];
+}) {
+  const originalScheduledAt = toDateTimeLocal(match.scheduledAt);
+  const [scheduledAt, setScheduledAt] = useState(originalScheduledAt);
+  const scheduleChanged = scheduledAt !== originalScheduledAt;
+  const validSchedule = Boolean(scheduledAt) && !Number.isNaN(new Date(scheduledAt).getTime());
+  const matchLabel = `${teamA?.name ?? "미정"} 대 ${teamB?.name ?? "미정"}`;
+
+  return (
+    <div className="admin-schedule-row">
+      <div className="admin-schedule-editor">
+        <input
+          type="datetime-local"
+          value={scheduledAt}
+          aria-label={`${matchLabel} 경기 일시`}
+          onChange={(event) => setScheduledAt(event.target.value)}
+        />
+        <button
+          type="button"
+          disabled={busy || !validSchedule || !scheduleChanged}
+          onClick={() => command(
+            { action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() },
+            "경기 일정을 변경했습니다. 변경된 일정을 다시 확정해 주세요.",
+          )}
+        >
+          일정 저장
+        </button>
+      </div>
+      <span><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><small>{match.roundLabel}</small></span>
+      <b className={match.scheduleConfirmed ? "confirmed" : "waiting"}>{match.scheduleConfirmed ? "확정" : "미확정"}</b>
+      <button
+        type="button"
+        className="secondary-button schedule-confirm-button"
+        disabled={busy || match.scheduleConfirmed || scheduleChanged}
+        title={scheduleChanged ? "변경한 일정을 먼저 저장해 주세요." : undefined}
+        onClick={() => command({ action: "confirm_match_schedule", matchId: match.id }, "경기 일정을 확정했습니다.")}
+      >
+        {match.scheduleConfirmed ? "확정 완료" : scheduleChanged ? "저장 필요" : "일정 확정"}
+      </button>
+    </div>
   );
 }
 
