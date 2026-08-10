@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
 
-const title = "RIFT FIVE | 롤 대회 운영 허브";
+const title = "LOL RIFT Program | 롤 대회 운영 허브";
 const description = "팀 수를 선택해 리그와 토너먼트, 승리팀 예측을 한곳에서 운영하세요.";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -19,13 +19,13 @@ export async function generateMetadata(): Promise<Metadata> {
       locale: "ko_KR",
       title,
       description,
-      images: [{ url: "/og-v2.png", width: 1536, height: 1024, alt: "RIFT FIVE 롤 대회 운영 허브" }],
+      images: [{ url: "/og-lol-rift.png", width: 1536, height: 1024, alt: "LOL RIFT Program 롤 대회 운영 허브" }],
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
-      images: ["/og-v2.png"],
+      images: ["/og-lol-rift.png"],
     },
   };
 }

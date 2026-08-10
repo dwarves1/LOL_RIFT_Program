@@ -12,11 +12,11 @@ async function render() {
   );
 }
 
-test("server-renders the RIFT FIVE tournament app", async () => {
+test("server-renders the LOL RIFT Program tournament app", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /RIFT FIVE/);
+  assert.match(html, /LOL RIFT Program/);
   assert.match(html, /롤 대회 운영 허브/);
   assert.doesNotMatch(html, /codex-preview/);
   assert.doesNotMatch(html, /react-loading-skeleton/);

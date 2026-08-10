@@ -169,7 +169,7 @@ function TeamMark({ team, small = false }: { team?: Team; small?: boolean }) {
 function LoadingScreen() {
   return (
     <main className="loading-screen" aria-live="polite">
-      <div className="brand-mark">R5</div>
+      <div className="brand-mark">LR</div>
       <p>대회 데이터를 준비하고 있습니다</p>
       <span className="loader" />
     </main>
@@ -270,8 +270,8 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
     <div className="app-shell">
       <header className="topbar">
         <button className="brand" onClick={() => setActiveTab("home")} aria-label="대회 홈으로 이동">
-          <span className="brand-mark">R5</span>
-          <span><strong>RIFT FIVE</strong><small>TOURNAMENT HUB</small></span>
+          <span className="brand-mark">LR</span>
+          <span><strong>LOL RIFT Program</strong><small>TOURNAMENT HUB</small></span>
         </button>
         <nav className="desktop-nav" aria-label="주요 메뉴">
           {NAV_ITEMS.map((item) => (
@@ -741,7 +741,7 @@ function TeamsView({ data }: { data: Dashboard }) {
 
 function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: SharedProps & { upcoming: Match[] }) {
   if (!data.viewer) {
-    return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">R5</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 대회 기본 포인트를 받고, 대회가 바뀌어도 잔액을 이어갈 수 있습니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
+    return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 대회 기본 포인트를 받고, 대회가 바뀌어도 잔액을 이어갈 수 있습니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
   }
   return (
     <section className="page-section">
