@@ -7,6 +7,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { ensureSchema, getConfiguredOwnerEmail, getDb } from "../db";
+import { isPredictionOpen, shouldSwapLeagueSides } from "./match-rules";
 import {
   auditLogs,
   bets,
@@ -285,15 +286,17 @@ async function createTournamentInternal(
   for (let leg = 1; leg <= matchesPerPair; leg += 1) {
     for (let i = 0; i < teamRows.length; i += 1) {
       for (let j = i + 1; j < teamRows.length; j += 1) {
+        const swapSides = shouldSwapLeagueSides(leg);
         leagueMatches.push({
           id: uid("match"),
           tournamentId,
           phase: "league",
           matchNo: `L${order}`,
           roundLabel: `${leg}차 리그`,
-          teamAId: teamRows[i].id,
-          teamBId: teamRows[j].id,
+          teamAId: swapSides ? teamRows[j].id : teamRows[i].id,
+          teamBId: swapSides ? teamRows[i].id : teamRows[j].id,
           scheduledAt: isoAfter(startAt.toISOString(), (order - 1) * 60),
+          scheduleConfirmed: false,
           status: "scheduled",
           winnerId: null,
           loserId: null,
@@ -422,6 +425,7 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
       teamAId: sourceA.startsWith("seed:") ? sourceA.slice(5) : null,
       teamBId: sourceB.startsWith("seed:") ? sourceB.slice(5) : null,
       scheduledAt: isoAfter(bracketStart, index * 90),
+      scheduleConfirmed: false,
       sortOrder: index + 1,
     }));
   for (let index = 0; index < bracketRows.length; index += 4) {
@@ -631,11 +635,46 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
   const nextScheduledAt = date.toISOString();
   if (match.scheduledAt === nextScheduledAt) return;
 
-  await db.update(matches).set({ scheduledAt: nextScheduledAt }).where(eq(matches.id, matchId));
+  await db
+    .update(matches)
+    .set({ scheduledAt: nextScheduledAt, scheduleConfirmed: false })
+    .where(eq(matches.id, matchId));
+  if (match.phase === "league") {
+    const ordered = await db
+      .select({ id: matches.id, sortOrder: matches.sortOrder })
+      .from(matches)
+      .where(and(eq(matches.tournamentId, match.tournamentId), eq(matches.phase, "league")))
+      .orderBy(asc(matches.scheduledAt), asc(matches.sortOrder));
+    for (let index = 0; index < ordered.length; index += 1) {
+      if (ordered[index].sortOrder !== index + 1) {
+        await db.update(matches).set({ sortOrder: index + 1 }).where(eq(matches.id, ordered[index].id));
+      }
+    }
+  }
   await audit(actor, "match_schedule_changed", "match", match.id, match.tournamentId, {
     scheduledAt: match.scheduledAt,
+    scheduleConfirmed: match.scheduleConfirmed,
   }, {
     scheduledAt: nextScheduledAt,
+    scheduleConfirmed: false,
+  });
+}
+
+export async function confirmMatchSchedule(matchId: string, actor: RequestUser) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  if (match.status !== "scheduled") throw new Error("진행 전 경기만 일정을 확정할 수 있습니다.");
+  if (!match.teamAId || !match.teamBId) throw new Error("대진이 확정된 경기만 일정을 확정할 수 있습니다.");
+  if (match.scheduleConfirmed) return;
+
+  await db.update(matches).set({ scheduleConfirmed: true }).where(eq(matches.id, matchId));
+  await audit(actor, "match_schedule_confirmed", "match", match.id, match.tournamentId, {
+    scheduleConfirmed: false,
+  }, {
+    scheduledAt: match.scheduledAt,
+    scheduleConfirmed: true,
   });
 }
 
@@ -653,7 +692,8 @@ export async function createBet(
   if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) {
     throw new Error("현재 예측할 수 없는 경기입니다.");
   }
-  if (new Date(match.scheduledAt).getTime() <= Date.now()) throw new Error("경기 시작 후에는 예측할 수 없습니다.");
+  if (!match.scheduleConfirmed) throw new Error("운영자가 일정을 확정한 경기만 예측할 수 있습니다.");
+  if (!isPredictionOpen(match.scheduledAt)) throw new Error("경기 시작 1시간 전부터는 예측할 수 없습니다.");
   if (![match.teamAId, match.teamBId].includes(teamId)) throw new Error("대진에 포함된 팀을 선택해 주세요.");
   const normalizedStake = Math.floor(stake);
   if (normalizedStake < 10) throw new Error("최소 10P부터 예측할 수 있습니다.");

@@ -2,6 +2,7 @@ import {
   createBet,
   createBracket,
   createTournament,
+  confirmMatchSchedule,
   getDashboard,
   getRequestUser,
   setMatchWinner,
@@ -56,6 +57,10 @@ export async function POST(request: Request) {
     }
     if (action === "set_match_schedule") {
       await setMatchSchedule(String(payload.matchId), String(payload.scheduledAt), user);
+      return Response.json({ ok: true });
+    }
+    if (action === "confirm_match_schedule") {
+      await confirmMatchSchedule(String(payload.matchId), user);
       return Response.json({ ok: true });
     }
     if (action === "create_bet") {

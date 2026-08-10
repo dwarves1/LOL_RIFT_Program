@@ -84,6 +84,9 @@ export const matches = sqliteTable(
     sourceA: text("source_a"),
     sourceB: text("source_b"),
     scheduledAt: text("scheduled_at").notNull(),
+    scheduleConfirmed: integer("schedule_confirmed", { mode: "boolean" })
+      .notNull()
+      .default(false),
     status: text("status", { enum: ["scheduled", "completed"] })
       .notNull()
       .default("scheduled"),

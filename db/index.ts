@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
+import { shouldSwapLeagueSides } from "../lib/match-rules";
 
 export function getRawDb(): D1Database {
   if (!env.DB) {
@@ -27,7 +28,7 @@ const schemaStatements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_tournament_name ON teams(tournament_id, name)`,
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY NOT NULL, team_id TEXT NOT NULL, nickname TEXT NOT NULL, position TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id)`,
-  `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, schedule_confirmed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_matches_tournament_phase_order ON matches(tournament_id, phase, sort_order)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tournament_number ON matches(tournament_id, phase, match_no)`,
   `CREATE TABLE IF NOT EXISTS tournament_entries (tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, starter_points_awarded INTEGER NOT NULL, points_balance INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tournament_id, user_id))`,
@@ -61,6 +62,57 @@ async function migrateTournamentPoints(raw: D1Database) {
   }
 }
 
+async function migrateMatchScheduleConfirmation(raw: D1Database) {
+  const columns = await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>();
+  if (!columns.results.some((column) => column.name === "schedule_confirmed")) {
+    await raw.prepare("ALTER TABLE matches ADD COLUMN schedule_confirmed INTEGER NOT NULL DEFAULT 0").run();
+  }
+}
+
+async function normalizeLeagueSides(raw: D1Database) {
+  type LeagueSideRow = {
+    id: string;
+    tournament_id: string;
+    round_label: string;
+    match_no: string;
+    team_a_id: string;
+    team_b_id: string;
+  };
+  const rows = await raw.prepare(`
+    SELECT id, tournament_id, round_label, match_no, team_a_id, team_b_id
+    FROM matches
+    WHERE phase = 'league' AND team_a_id IS NOT NULL AND team_b_id IS NOT NULL
+  `).all<LeagueSideRow>();
+  const pairGroups = new Map<string, LeagueSideRow[]>();
+  for (const row of rows.results) {
+    const pair = [row.team_a_id, row.team_b_id].sort().join(":");
+    const key = `${row.tournament_id}:${pair}`;
+    pairGroups.set(key, [...(pairGroups.get(key) ?? []), row]);
+  }
+
+  const updates: D1PreparedStatement[] = [];
+  for (const pairMatches of pairGroups.values()) {
+    const legNumber = (row: LeagueSideRow) => Number(row.round_label.match(/^(\d+)/)?.[1] ?? 0);
+    pairMatches.sort((a, b) => legNumber(a) - legNumber(b) || a.match_no.localeCompare(b.match_no));
+    const base = pairMatches.find((row) => legNumber(row) % 2 === 1) ?? pairMatches[0];
+    if (!base) continue;
+    const baseA = base.team_a_id;
+    const baseB = base.team_b_id;
+    pairMatches.forEach((row, index) => {
+      const leg = legNumber(row);
+      const shouldSwap = leg > 0 ? shouldSwapLeagueSides(leg) : index % 2 === 1;
+      const expectedA = shouldSwap ? baseB : baseA;
+      const expectedB = shouldSwap ? baseA : baseB;
+      if (row.team_a_id !== expectedA || row.team_b_id !== expectedB) {
+        updates.push(raw.prepare("UPDATE matches SET team_a_id = ?, team_b_id = ? WHERE id = ?").bind(expectedA, expectedB, row.id));
+      }
+    });
+  }
+  for (let index = 0; index < updates.length; index += 50) {
+    await raw.batch(updates.slice(index, index + 50));
+  }
+}
+
 async function removeLegacyDemoTournament(raw: D1Database) {
   const demoName = "2026 서머 소환사의 컵";
   const demoIds = await raw
@@ -88,8 +140,10 @@ export function ensureSchema(): Promise<void> {
       .batch(schemaStatements.map((statement) => raw.prepare(statement)))
       .then(async () => {
         await migrateTournamentPoints(raw);
+        await migrateMatchScheduleConfirmation(raw);
         await raw.prepare("CREATE INDEX IF NOT EXISTS idx_entries_tournament_balance ON tournament_entries(tournament_id, points_balance)").run();
         await removeLegacyDemoTournament(raw);
+        await normalizeLeagueSides(raw);
         await raw.prepare("PRAGMA optimize").run();
       });
   }

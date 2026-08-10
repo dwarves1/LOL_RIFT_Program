@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { isPredictionOpen } from "../lib/match-rules";
 
 type Role = "viewer" | "operator" | "admin";
 type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "points" | "admin";
@@ -40,6 +41,7 @@ type Match = {
   teamAId: string | null;
   teamBId: string | null;
   scheduledAt: string;
+  scheduleConfirmed: boolean;
   status: "scheduled" | "completed";
   winnerId: string | null;
   loserId: string | null;
@@ -141,6 +143,7 @@ const AUDIT_LABEL: Record<string, string> = {
   match_result_set: "경기 승리팀을 확정했습니다",
   match_result_changed: "경기 결과를 변경했습니다",
   match_schedule_changed: "경기 일정을 변경했습니다",
+  match_schedule_confirmed: "경기 일정을 확정했습니다",
   user_role_changed: "사용자 권한을 변경했습니다",
 };
 
@@ -286,6 +289,12 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   const upcoming = data.matches
     .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId)
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+  // Prediction availability is refreshed with the dashboard polling cycle.
+  // eslint-disable-next-line react-hooks/purity
+  const predictionNow = Date.now();
+  const predictionMatches = upcoming.filter(
+    (match) => match.scheduleConfirmed && isPredictionOpen(match.scheduledAt, predictionNow),
+  );
   const totalMatches = data.matches.length;
   const completedMatches = data.matches.filter((match) => match.status === "completed").length;
   const progress = totalMatches ? Math.round((completedMatches / totalMatches) * 100) : 0;
@@ -362,7 +371,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         {activeTab === "standings" && <StandingsView {...shared} />}
         {activeTab === "bracket" && <BracketView {...shared} matches={bracketMatches} />}
         {activeTab === "teams" && <TeamsView data={data} />}
-        {activeTab === "points" && <PointsView {...shared} upcoming={upcoming} />}
+        {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} />}
         {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} />}
       </main>
 
@@ -378,7 +387,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         </button>
       </nav>
 
-      {showCreate && (
+      {showCreate && isAdmin && (
         <CreateTournamentModal
           busy={busy}
           onClose={() => setShowCreate(false)}
@@ -498,11 +507,8 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Omit
   const [stake, setStake] = useState(100);
   // The lock is intentionally evaluated against wall-clock time on each refreshed render.
   // eslint-disable-next-line react-hooks/purity
-  const locked = new Date(match.scheduledAt).getTime() <= Date.now();
+  const openForPrediction = isPredictionOpen(match.scheduledAt, Date.now());
 
-  if (!data.viewer) {
-    return <a href={signInPath} className="prediction-signin">로그인하고 승리팀 예측하기 <span>→</span></a>;
-  }
   if (existing) {
     return (
       <div className="prediction-confirmed">
@@ -511,7 +517,11 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Omit
       </div>
     );
   }
-  if (locked) return <div className="prediction-locked">경기가 시작되어 예측이 마감되었습니다.</div>;
+  if (!match.scheduleConfirmed) return <div className="prediction-locked">운영자가 경기 일정을 확정하면 예측이 열립니다.</div>;
+  if (!openForPrediction) return <div className="prediction-locked">경기 시작 1시간 전 예측이 마감되었습니다.</div>;
+  if (!data.viewer) {
+    return <a href={signInPath} className="prediction-signin">로그인하고 승리팀 예측하기 <span>→</span></a>;
+  }
   return (
     <div className="prediction-box">
       <div className="prediction-options">
@@ -627,6 +637,11 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command }: { match: Match
       </div>
       <div className="match-actions">
         {isStaff && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} />}
+        {match.status === "scheduled" && (
+          <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
+            {match.scheduleConfirmed ? "일정 확정" : "일정 미확정"}
+          </span>
+        )}
         {match.status === "completed" ? (
           <span className="result-complete">결과 확정</span>
         ) : (
@@ -685,13 +700,20 @@ function MatchScheduleEditor({ match, busy, command }: { match: Match; busy: boo
 
 function StandingsView({ data, busy, command }: SharedProps) {
   const [seedOrder, setSeedOrder] = useState(data.standings.map((row) => row.teamId));
+  const [selectedTeamId, setSelectedTeamId] = useState(data.standings[0]?.teamId ?? "");
   // Reset the editable seed list whenever refreshed standings arrive.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setSeedOrder(data.standings.map((row) => row.teamId)), [data.standings]);
+  useEffect(() => {
+    // Keep the current selection during polling, but choose the first team after switching tournaments.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedTeamId((current) => data.teams.some((team) => team.id === current) ? current : (data.standings[0]?.teamId ?? ""));
+  }, [data.standings, data.teams]);
   const allLeagueDone = data.summary.leagueTotal > 0 && data.summary.leagueCompleted === data.summary.leagueTotal;
   const hasBracket = data.summary.bracketTotal > 0;
   const canOperate = data.viewer?.role === "operator" || data.viewer?.role === "admin";
   const orderRows = seedOrder.map((id) => data.standings.find((row) => row.teamId === id)!).filter(Boolean);
+  const selectedTeam = data.teams.find((team) => team.id === selectedTeamId);
 
   function move(index: number, direction: -1 | 1) {
     const next = [...seedOrder];
@@ -705,7 +727,25 @@ function StandingsView({ data, busy, command }: SharedProps) {
     <section className="page-section">
       <PageTitle eyebrow="LEAGUE TABLE" title="리그 순위" description="동률 순위는 자동 결정하지 않으며 운영자가 최종 시드를 확정합니다." />
       <div className="standings-layout">
-        <article className="panel standings-full"><StandingTable standings={data.standings} /></article>
+        <div className="standings-main-column">
+          <article className="panel standings-full">
+            <div className="standings-select-help">팀을 선택하면 선수 명단을 확인할 수 있습니다.</div>
+            <StandingTable standings={data.standings} selectedTeamId={selectedTeamId} onSelectTeam={setSelectedTeamId} />
+          </article>
+          {selectedTeam && (
+            <article className="panel standings-team-roster" style={{ "--team-color": selectedTeam.color } as React.CSSProperties}>
+              <div className="section-heading">
+                <div><p className="eyebrow">SELECTED ROSTER</p><h2>{selectedTeam.name} 선수 명단</h2></div>
+                <TeamMark team={selectedTeam} small />
+              </div>
+              <div className="standing-roster-list">
+                {selectedTeam.players.map((player) => (
+                  <div key={player.id}><span>{player.position}</span><strong>{player.nickname}</strong></div>
+                ))}
+              </div>
+            </article>
+          )}
+        </div>
         <aside className="panel seed-panel">
           <div className="section-heading"><div><p className="eyebrow">FINAL SEED</p><h2>토너먼트 시드</h2></div></div>
           {!allLeagueDone ? (
@@ -733,19 +773,32 @@ function StandingsView({ data, busy, command }: SharedProps) {
   );
 }
 
-function StandingTable({ standings, compact = false }: { standings: Standing[]; compact?: boolean }) {
+function StandingTable({ standings, compact = false, selectedTeamId, onSelectTeam }: {
+  standings: Standing[];
+  compact?: boolean;
+  selectedTeamId?: string;
+  onSelectTeam?: (teamId: string) => void;
+}) {
   return (
     <div className={`standing-table ${compact ? "compact" : ""}`}>
       <div className="standing-head"><span>순위</span><span>팀</span><span>경기</span><span>승</span><span>패</span><span>승률</span></div>
-      {standings.map((row) => (
-        <div className="standing-row" key={row.teamId}>
-          <span className="rank">{row.rank}</span>
-          <span className="standing-team"><i style={{ background: row.color }} /><strong>{row.teamName}</strong>{row.tied && <em>동률</em>}</span>
-          <span>{row.played}</span><strong>{row.wins}</strong><span>{row.losses}</span><span>{row.winRate}%</span>
-        </div>
-      ))}
+      {standings.map((row) => <StandingRow key={row.teamId} row={row} selected={selectedTeamId === row.teamId} onSelect={onSelectTeam ? () => onSelectTeam(row.teamId) : undefined} />)}
     </div>
   );
+}
+
+function StandingRow({ row, selected, onSelect }: { row: Standing; selected: boolean; onSelect?: () => void }) {
+  const content = (
+    <>
+      <span className="rank">{row.rank}</span>
+      <span className="standing-team"><i style={{ background: row.color }} /><strong>{row.teamName}</strong>{row.tied && <em>동률</em>}</span>
+      <span>{row.played}</span><strong>{row.wins}</strong><span>{row.losses}</span><span>{row.winRate}%</span>
+    </>
+  );
+  if (onSelect) {
+    return <button type="button" className={`standing-row selectable ${selected ? "selected" : ""}`} aria-pressed={selected} onClick={onSelect}>{content}</button>;
+  }
+  return <div className="standing-row">{content}</div>;
 }
 
 const CUSTOM_BRACKET_STAGES = [
@@ -858,7 +911,7 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: Shar
   }
   return (
     <section className="page-section">
-      <PageTitle eyebrow="PREDICTION" title="포인트 예측" description="현재 대회에서 받은 가상 포인트로 승리팀을 예상해 보세요." />
+      <PageTitle eyebrow="PREDICTION" title="포인트 예측" description="운영자가 일정을 확정한 경기를 시작 1시간 전까지 예측할 수 있습니다." />
       <div className="wallet-hero">
         <div><span>TOURNAMENT BALANCE</span><strong>{data.viewer.pointsBalance.toLocaleString()}<small>P</small></strong><p>{data.tournament?.name} 전용 포인트 · 다른 대회와 별도로 관리됩니다.</p></div>
         <div className="wallet-stats"><div><span>참여</span><strong>{data.bets.length}</strong></div><div><span>적중</span><strong>{data.bets.filter((bet) => bet.status === "won").length}</strong></div></div>
@@ -867,8 +920,8 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: Shar
         <article className="panel">
           <div className="section-heading"><div><p className="eyebrow">OPEN PICKS</p><h2>예측 가능한 경기</h2></div></div>
           <div className="open-picks">
-            {upcoming.slice(0, 4).map((match) => <div key={match.id}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
-            {!upcoming.length && <EmptyState title="예측 가능한 경기가 없습니다" detail="다음 대진이 확정되면 예측이 열립니다." />}
+            {upcoming.map((match) => <div key={match.id}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
+            {!upcoming.length && <EmptyState title="예측 가능한 경기가 없습니다" detail="운영자가 일정을 확정하고 경기 시작까지 1시간 이상 남으면 예측이 열립니다." />}
           </div>
         </article>
         <aside className="panel leaderboard-panel">
@@ -886,16 +939,33 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: Shar
   );
 }
 
-function AdminView({ data, teamMap, isStaff, busy, command, openCreate }: SharedProps & { openCreate: () => void }) {
-  const upcoming = data.matches.filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId).slice(0, 5);
+function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & { openCreate: () => void }) {
+  const upcoming = data.matches
+    .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId)
+    .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
   return (
     <section className="page-section">
-      <PageTitle eyebrow="CONTROL ROOM" title="대회 운영" description="경기 결과, 사용자 권한, 변경 이력을 한곳에서 관리합니다." />
-      <div className="admin-actions"><button className="primary-button" onClick={openCreate}>＋ 새 대회 생성</button><div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
+      <PageTitle eyebrow="CONTROL ROOM" title="대회 운영" description="경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다." />
+      <div className="admin-actions">{data.viewer?.role === "admin" && <button className="primary-button" onClick={openCreate}>＋ 새 대회 생성</button>}<div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
       <div className="admin-grid">
-        <article className="panel">
-          <div className="section-heading"><div><p className="eyebrow">QUICK RESULT</p><h2>승리팀 빠른 확정</h2></div></div>
-          <div className="quick-results">{upcoming.map((match) => <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} />)}</div>
+        <article className="panel schedule-confirmation-panel">
+          <div className="section-heading"><div><p className="eyebrow">SCHEDULE APPROVAL</p><h2>경기 일정 확정</h2></div><span>{upcoming.filter((match) => match.scheduleConfirmed).length}/{upcoming.length}</span></div>
+          <p className="admin-panel-help">확정된 경기만 시작 1시간 전까지 포인트 예측에 표시됩니다. 일정을 수정하면 다시 확정해야 합니다.</p>
+          <div className="admin-schedule-list">
+            {upcoming.map((match) => {
+              const teamA = teamMap.get(match.teamAId!);
+              const teamB = teamMap.get(match.teamBId!);
+              return (
+                <div className="admin-schedule-row" key={match.id}>
+                  <time>{formatDate(match.scheduledAt)}</time>
+                  <span><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><small>{match.roundLabel}</small></span>
+                  <b className={match.scheduleConfirmed ? "confirmed" : "waiting"}>{match.scheduleConfirmed ? "확정" : "미확정"}</b>
+                  <button className="secondary-button" disabled={busy || match.scheduleConfirmed} onClick={() => command({ action: "confirm_match_schedule", matchId: match.id }, "경기 일정을 확정했습니다.")}>{match.scheduleConfirmed ? "확정 완료" : "일정 확정"}</button>
+                </div>
+              );
+            })}
+            {!upcoming.length && <div className="schedule-group-empty">확정할 예정 경기가 없습니다.</div>}
+          </div>
         </article>
         <article className="panel audit-panel">
           <div className="section-heading"><div><p className="eyebrow">AUDIT LOG</p><h2>변경 이력</h2></div></div>
@@ -904,9 +974,10 @@ function AdminView({ data, teamMap, isStaff, busy, command, openCreate }: Shared
       </div>
       {data.viewer?.role === "admin" && (
         <article className="panel role-panel">
-          <div className="section-heading"><div><p className="eyebrow">ACCESS CONTROL</p><h2>운영자 권한</h2></div></div>
+          <div className="section-heading"><div><p className="eyebrow">ACCESS CONTROL</p><h2>가입 회원 및 권한</h2></div><span>{data.users.length}명</span></div>
           <div className="role-table">
             {data.users.map((user) => <div key={user.id}><i>{user.displayName.slice(0, 1)}</i><span><strong>{user.displayName}</strong><small>{user.email}</small></span><b>{user.pointsBalance.toLocaleString()}P</b><select value={user.role} disabled={busy} onChange={(event) => command({ action: "set_role", userId: user.id, role: event.target.value }, `${user.displayName}님의 권한을 변경했습니다.`)}><option value="viewer">관람자</option><option value="operator">운영자</option><option value="admin">관리자</option></select></div>)}
+            {!data.users.length && <div className="role-empty">아직 로그인한 회원이 없습니다.</div>}
           </div>
         </article>
       )}
@@ -917,7 +988,7 @@ function AdminView({ data, teamMap, isStaff, busy, command, openCreate }: Shared
 function ResultRow({ match, teamMap }: { match: Match; teamMap: Map<string, Team> }) {
   const winner = match.winnerId ? teamMap.get(match.winnerId) : undefined;
   const loser = match.loserId ? teamMap.get(match.loserId) : undefined;
-  return <div className="result-row"><span>{match.matchNo}</span><TeamMark team={winner} small /><strong>{winner?.name}</strong><b>WIN</b><small>vs</small><span>{loser?.name}</span></div>;
+  return <div className="result-row"><span>{match.phase === "league" ? "리그" : match.matchNo}</span><TeamMark team={winner} small /><strong>{winner?.name}</strong><b>WIN</b><small>vs</small><span>{loser?.name}</span></div>;
 }
 
 function PageTitle({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {

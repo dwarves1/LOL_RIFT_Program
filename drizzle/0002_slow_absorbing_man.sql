@@ -1,0 +1,1 @@
+ALTER TABLE `matches` ADD `schedule_confirmed` integer DEFAULT false NOT NULL;
