@@ -205,6 +205,10 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
 .result-complete { color: var(--green); }.result-waiting { color: var(--muted); }
 .winner-buttons { display: flex; gap: 5px; }
 .winner-buttons button, .bracket-card button { padding: 6px 8px; border: 1px solid rgba(233,185,73,.26); background: rgba(233,185,73,.06); color: var(--gold-2); font-size: 8px; cursor: pointer; }
+.schedule-editor { display: flex; gap: 5px; width: 100%; }
+.schedule-editor input { flex: 1; min-width: 0; padding: 7px 8px; border: 1px solid var(--line); background: #091321; color: #dbe4ef; font-size: 9px; }
+.schedule-editor button { padding: 7px 9px; border: 1px solid rgba(96,165,250,.3); background: rgba(96,165,250,.08); color: #93c5fd; font-size: 8px; white-space: nowrap; cursor: pointer; }
+.schedule-editor button:disabled { cursor: not-allowed; opacity: .45; }
 
 .standings-layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(310px, .7fr); gap: 18px; align-items: start; }
 .standings-full { padding: 18px; }
@@ -265,6 +269,11 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
 
 .toast { position: fixed; z-index: 80; top: 84px; right: 24px; display: flex; align-items: center; gap: 16px; max-width: min(420px, calc(100vw - 32px)); padding: 12px 14px; border: 1px solid rgba(233,185,73,.35); background: #172337; color: #eef3f9; box-shadow: 0 16px 50px rgba(0,0,0,.4); font-size: 11px; }.toast button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 17px; }
 .empty-state { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; border: 1px dashed var(--line); text-align: center; }.empty-state > span { color: var(--gold); font-size: 28px; }.empty-state h3 { margin: 12px 0 4px; font-size: 15px; }.empty-state p { margin: 0; color: var(--muted); font-size: 10px; }
+.first-tournament-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; background: radial-gradient(circle at 50% 35%, rgba(96,165,250,.1), transparent 28%); }
+.first-tournament-screen .brand-mark { width: 64px; height: 64px; margin-bottom: 20px; }
+.first-tournament-screen h1 { margin: 8px 0 10px; font-size: clamp(30px, 6vw, 54px); }
+.first-tournament-screen > p:not(.eyebrow) { margin: 0 0 24px; color: var(--muted); font-size: 12px; }
+.first-tournament-help { color: var(--muted); font-size: 11px; }
 .loading-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }.loading-screen .brand-mark { width: 58px; height: 58px; }.loading-screen p { color: var(--muted); font-size: 11px; }.loader { width: 120px; height: 1px; overflow: hidden; background: #1d2a3c; }.loader::after { content: ""; display: block; width: 40%; height: 100%; background: var(--gold); animation: loading 1.2s ease-in-out infinite; }@keyframes loading { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
 
 .modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(1,6,12,.86); backdrop-filter: blur(12px); }

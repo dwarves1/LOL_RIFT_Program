@@ -30,7 +30,7 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_matches_tournament_phase_order ON matches(tournament_id, phase, sort_order)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tournament_number ON matches(tournament_id, phase, match_no)`,
-  `CREATE TABLE IF NOT EXISTS tournament_entries (tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, starter_points_awarded INTEGER NOT NULL, joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tournament_id, user_id))`,
+  `CREATE TABLE IF NOT EXISTS tournament_entries (tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, starter_points_awarded INTEGER NOT NULL, points_balance INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tournament_id, user_id))`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user ON tournament_entries(user_id)`,
   `CREATE TABLE IF NOT EXISTS bets (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, match_id TEXT NOT NULL, user_id TEXT NOT NULL, team_id TEXT NOT NULL, stake INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', payout INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, settled_at TEXT)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_bets_user_match ON bets(user_id, match_id)`,
@@ -38,11 +38,48 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_bets_tournament_user ON bets(tournament_id, user_id)`,
   `CREATE TABLE IF NOT EXISTS point_ledger (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, tournament_id TEXT, bet_id TEXT, type TEXT NOT NULL, amount INTEGER NOT NULL, balance_after INTEGER NOT NULL, description TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_ledger_user_created ON point_ledger(user_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_ledger_tournament_user_created ON point_ledger(tournament_id, user_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT, actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_tournament_created ON audit_logs(tournament_id, created_at)`,
 ];
 
 let schemaReady: Promise<void> | null = null;
+
+async function migrateTournamentPoints(raw: D1Database) {
+  const columns = await raw.prepare("PRAGMA table_info(tournament_entries)").all<{ name: string }>();
+  if (!columns.results.some((column) => column.name === "points_balance")) {
+    await raw.prepare("ALTER TABLE tournament_entries ADD COLUMN points_balance INTEGER NOT NULL DEFAULT 0").run();
+    await raw.prepare(`
+      UPDATE tournament_entries
+      SET points_balance = COALESCE(
+        (SELECT SUM(amount) FROM point_ledger
+         WHERE point_ledger.tournament_id = tournament_entries.tournament_id
+           AND point_ledger.user_id = tournament_entries.user_id),
+        starter_points_awarded
+      )
+    `).run();
+  }
+}
+
+async function removeLegacyDemoTournament(raw: D1Database) {
+  const demoName = "2026 서머 소환사의 컵";
+  const demoIds = await raw
+    .prepare("SELECT id FROM tournaments WHERE created_by = 'system' AND name = ?")
+    .bind(demoName)
+    .all<{ id: string }>();
+  for (const demo of demoIds.results) {
+    await raw.batch([
+      raw.prepare("DELETE FROM point_ledger WHERE tournament_id = ?").bind(demo.id),
+      raw.prepare("DELETE FROM bets WHERE tournament_id = ?").bind(demo.id),
+      raw.prepare("DELETE FROM tournament_entries WHERE tournament_id = ?").bind(demo.id),
+      raw.prepare("DELETE FROM audit_logs WHERE tournament_id = ?").bind(demo.id),
+      raw.prepare("DELETE FROM players WHERE team_id IN (SELECT id FROM teams WHERE tournament_id = ?)").bind(demo.id),
+      raw.prepare("DELETE FROM matches WHERE tournament_id = ?").bind(demo.id),
+      raw.prepare("DELETE FROM teams WHERE tournament_id = ?").bind(demo.id),
+      raw.prepare("DELETE FROM tournaments WHERE id = ?").bind(demo.id),
+    ]);
+  }
+}
 
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
@@ -50,6 +87,9 @@ export function ensureSchema(): Promise<void> {
     schemaReady = raw
       .batch(schemaStatements.map((statement) => raw.prepare(statement)))
       .then(async () => {
+        await migrateTournamentPoints(raw);
+        await raw.prepare("CREATE INDEX IF NOT EXISTS idx_entries_tournament_balance ON tournament_entries(tournament_id, points_balance)").run();
+        await removeLegacyDemoTournament(raw);
         await raw.prepare("PRAGMA optimize").run();
       });
   }

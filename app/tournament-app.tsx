@@ -140,6 +140,7 @@ const AUDIT_LABEL: Record<string, string> = {
   bracket_created: "토너먼트 대진을 확정했습니다",
   match_result_set: "경기 승리팀을 확정했습니다",
   match_result_changed: "경기 결과를 변경했습니다",
+  match_schedule_changed: "경기 일정을 변경했습니다",
   user_role_changed: "사용자 권한을 변경했습니다",
 };
 
@@ -248,7 +249,32 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
 
   if (loading && !data) return <LoadingScreen />;
   if (!data || !data.tournament) {
-    return <EmptyState title="대회를 준비해 주세요" detail="관리자가 첫 대회를 생성하면 이곳에 일정과 순위가 표시됩니다." />;
+    const viewer = data?.viewer;
+    return (
+      <main className="first-tournament-screen">
+        <div className="brand-mark">LR</div>
+        <p className="eyebrow">LOL RIFT PROGRAM</p>
+        <h1>첫 대회를 만들어 주세요</h1>
+        <p>샘플 데이터 없이 관리자가 등록한 대회만 표시됩니다.</p>
+        {viewer?.role === "admin" ? (
+          <button className="primary-button" onClick={() => setShowCreate(true)}>＋ 새 대회 생성</button>
+        ) : viewer ? (
+          <span className="first-tournament-help">관리자 계정이 대회를 생성하면 참가할 수 있습니다.</span>
+        ) : (
+          <a className="primary-button" href={signInPath}>관리자 로그인</a>
+        )}
+        {showCreate && (
+          <CreateTournamentModal
+            busy={busy}
+            onClose={() => setShowCreate(false)}
+            onCreate={async (input) => {
+              const ok = await command({ action: "create_tournament", input }, "새 대회를 생성했습니다.");
+              if (ok) setShowCreate(false);
+            }}
+          />
+        )}
+      </main>
+    );
   }
 
   const viewer = data.viewer;
@@ -509,7 +535,7 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, br
   const visible = phase === "league" ? leagueMatches : bracketMatches;
   return (
     <section className="page-section">
-      <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="운영자가 승리팀을 선택하면 순위와 다음 대진에 즉시 반영됩니다." />
+      <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="운영자가 경기 일시와 승리팀을 직접 입력하면 순위와 다음 대진에 즉시 반영됩니다." />
       <div className="segmented-control">
         <button className={phase === "league" ? "active" : ""} onClick={() => setPhase("league")}>리그전 <span>{leagueMatches.length}</span></button>
         <button className={phase === "bracket" ? "active" : ""} onClick={() => setPhase("bracket")}>토너먼트 <span>{bracketMatches.length}</span></button>
@@ -543,6 +569,7 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command }: { match: Match
         })}
       </div>
       <div className="match-actions">
+        {isStaff && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} />}
         {match.status === "completed" ? (
           <span className="result-complete">결과 확정</span>
         ) : (
@@ -567,6 +594,35 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command }: { match: Match
         )}
       </div>
     </article>
+  );
+}
+
+function toDateTimeLocal(value: string) {
+  const date = new Date(value);
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return localDate.toISOString().slice(0, 16);
+}
+
+function MatchScheduleEditor({ match, busy, command }: { match: Match; busy: boolean; command: SharedProps["command"] }) {
+  const [scheduledAt, setScheduledAt] = useState(toDateTimeLocal(match.scheduledAt));
+  return (
+    <div className="schedule-editor">
+      <input
+        type="datetime-local"
+        value={scheduledAt}
+        aria-label={`${match.matchNo} 경기 일시`}
+        onChange={(event) => setScheduledAt(event.target.value)}
+      />
+      <button
+        disabled={busy || !scheduledAt}
+        onClick={() => command(
+          { action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() },
+          `${match.matchNo} 경기 일정을 변경했습니다.`,
+        )}
+      >
+        일정 저장
+      </button>
+    </div>
   );
 }
 
@@ -741,13 +797,13 @@ function TeamsView({ data }: { data: Dashboard }) {
 
 function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: SharedProps & { upcoming: Match[] }) {
   if (!data.viewer) {
-    return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 대회 기본 포인트를 받고, 대회가 바뀌어도 잔액을 이어갈 수 있습니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
+    return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 선택한 대회의 기본 포인트를 받고, 대회별 지갑으로 따로 관리됩니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
   }
   return (
     <section className="page-section">
-      <PageTitle eyebrow="PREDICTION" title="포인트 예측" description="가상 포인트로 승리팀을 예상하고 시즌 랭킹에 도전하세요." />
+      <PageTitle eyebrow="PREDICTION" title="포인트 예측" description="현재 대회에서 받은 가상 포인트로 승리팀을 예상해 보세요." />
       <div className="wallet-hero">
-        <div><span>MY BALANCE</span><strong>{data.viewer.pointsBalance.toLocaleString()}<small>P</small></strong><p>대회 기본 포인트와 적중 포인트는 다음 대회에도 유지됩니다.</p></div>
+        <div><span>TOURNAMENT BALANCE</span><strong>{data.viewer.pointsBalance.toLocaleString()}<small>P</small></strong><p>{data.tournament?.name} 전용 포인트 · 다른 대회와 별도로 관리됩니다.</p></div>
         <div className="wallet-stats"><div><span>참여</span><strong>{data.bets.length}</strong></div><div><span>적중</span><strong>{data.bets.filter((bet) => bet.status === "won").length}</strong></div></div>
       </div>
       <div className="points-layout">
@@ -759,7 +815,7 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: Shar
           </div>
         </article>
         <aside className="panel leaderboard-panel">
-          <div className="section-heading"><div><p className="eyebrow">POINT RANKING</p><h2>전체 랭킹</h2></div></div>
+          <div className="section-heading"><div><p className="eyebrow">POINT RANKING</p><h2>현재 대회 랭킹</h2></div></div>
           {data.leaderboard.map((user, index) => <div className={`leader-row ${user.id === data.viewer?.id ? "me" : ""}`} key={user.id}><span>{index + 1}</span><i>{user.displayName.slice(0, 1)}</i><strong>{user.displayName}</strong><b>{user.pointsBalance.toLocaleString()}P</b></div>)}
         </aside>
       </div>
@@ -850,7 +906,7 @@ function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onC
         <div className="modal-body">
           <div className="form-grid tournament-fields">
             <label><span>대회명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
-            <label><span>시작 일시</span><input type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} /></label>
+            <label><span>첫 경기 기본 일시</span><input type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} /><small>생성 후 일정 화면에서 경기별로 수정</small></label>
             <label><span>참가 팀 수</span><select value={teamDrafts.length} onChange={(event) => updateTeamCount(Number(event.target.value))}>{Array.from({ length: 15 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>{count}팀</option>)}</select><small>2팀부터 16팀까지</small></label>
             <label><span>팀 간 경기 수</span><input type="number" min="1" max="10" value={matchesPerPair} onChange={(event) => setMatchesPerPair(Number(event.target.value))} /><small>리그전 총 {leagueMatchCount}경기</small></label>
             <label><span>참가 기본 포인트</span><input type="number" min="0" step="100" value={starterPoints} onChange={(event) => setStarterPoints(Number(event.target.value))} /></label>

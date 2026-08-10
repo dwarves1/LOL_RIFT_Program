@@ -113,11 +113,13 @@ export const tournamentEntries = sqliteTable(
     tournamentId: text("tournament_id").notNull(),
     userId: text("user_id").notNull(),
     starterPointsAwarded: integer("starter_points_awarded").notNull(),
+    pointsBalance: integer("points_balance").notNull().default(0),
     joinedAt: text("joined_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
     primaryKey({ columns: [table.tournamentId, table.userId] }),
     index("idx_entries_user").on(table.userId),
+    index("idx_entries_tournament_balance").on(table.tournamentId, table.pointsBalance),
   ],
 );
 
@@ -159,7 +161,10 @@ export const pointLedger = sqliteTable(
     description: text("description").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index("idx_ledger_user_created").on(table.userId, table.createdAt)],
+  (table) => [
+    index("idx_ledger_user_created").on(table.userId, table.createdAt),
+    index("idx_ledger_tournament_user_created").on(table.tournamentId, table.userId, table.createdAt),
+  ],
 );
 
 export const auditLogs = sqliteTable(

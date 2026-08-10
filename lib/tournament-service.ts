@@ -146,14 +146,21 @@ async function adjustPoints(
   amount: number,
   type: string,
   description: string,
-  tournamentId: string | null,
+  tournamentId: string,
   betId: string | null,
 ) {
   const db = getDb();
-  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!user) throw new Error("사용자를 찾을 수 없습니다.");
-  const nextBalance = user.pointsBalance + amount;
-  await db.update(users).set({ pointsBalance: nextBalance }).where(eq(users.id, userId));
+  const [entry] = await db
+    .select()
+    .from(tournamentEntries)
+    .where(and(eq(tournamentEntries.userId, userId), eq(tournamentEntries.tournamentId, tournamentId)))
+    .limit(1);
+  if (!entry) throw new Error("대회 포인트 지갑을 찾을 수 없습니다.");
+  const nextBalance = entry.pointsBalance + amount;
+  await db
+    .update(tournamentEntries)
+    .set({ pointsBalance: nextBalance })
+    .where(and(eq(tournamentEntries.userId, userId), eq(tournamentEntries.tournamentId, tournamentId)));
   await db.insert(pointLedger).values({
     id: uid("point"),
     userId,
@@ -179,28 +186,37 @@ async function ensureTournamentEntry(userId: string, tournamentId: string) {
       ),
     )
     .limit(1);
-  if (entry) return;
+  if (entry) return entry;
 
   const [tournament] = await db
     .select()
     .from(tournaments)
     .where(eq(tournaments.id, tournamentId))
     .limit(1);
-  if (!tournament) return;
+  if (!tournament) return null;
 
   await db.insert(tournamentEntries).values({
     tournamentId,
     userId,
     starterPointsAwarded: tournament.starterPoints,
+    pointsBalance: tournament.starterPoints,
   });
-  await adjustPoints(
+  await db.insert(pointLedger).values({
+    id: uid("point"),
     userId,
-    tournament.starterPoints,
-    "starter_grant",
-    `${tournament.name} 참가 기본 포인트`,
     tournamentId,
-    null,
-  );
+    betId: null,
+    type: "starter_grant",
+    amount: tournament.starterPoints,
+    balanceAfter: tournament.starterPoints,
+    description: `${tournament.name} 참가 기본 포인트`,
+  });
+  const [created] = await db
+    .select()
+    .from(tournamentEntries)
+    .where(and(eq(tournamentEntries.userId, userId), eq(tournamentEntries.tournamentId, tournamentId)))
+    .limit(1);
+  return created ?? null;
 }
 
 export type CreateTournamentInput = {
@@ -213,13 +229,12 @@ export type CreateTournamentInput = {
 
 export async function createTournament(input: CreateTournamentInput, actor: RequestUser) {
   if (actor.role !== "admin") throw new Error("관리자만 대회를 생성할 수 있습니다.");
-  return createTournamentInternal(input, actor, false);
+  return createTournamentInternal(input, actor);
 }
 
 async function createTournamentInternal(
   input: CreateTournamentInput,
   actor: Actor,
-  seedCompletedLeague: boolean,
 ) {
   const name = input.name.trim();
   if (!name) throw new Error("대회명을 입력해 주세요.");
@@ -270,7 +285,6 @@ async function createTournamentInternal(
   for (let leg = 1; leg <= matchesPerPair; leg += 1) {
     for (let i = 0; i < teamRows.length; i += 1) {
       for (let j = i + 1; j < teamRows.length; j += 1) {
-        const winnerId = seedCompletedLeague ? teamRows[i].id : null;
         leagueMatches.push({
           id: uid("match"),
           tournamentId,
@@ -280,11 +294,11 @@ async function createTournamentInternal(
           teamAId: teamRows[i].id,
           teamBId: teamRows[j].id,
           scheduledAt: isoAfter(startAt.toISOString(), (order - 1) * 60),
-          status: seedCompletedLeague ? "completed" : "scheduled",
-          winnerId,
-          loserId: seedCompletedLeague ? teamRows[j].id : null,
+          status: "scheduled",
+          winnerId: null,
+          loserId: null,
           sortOrder: order,
-          completedAt: seedCompletedLeague ? new Date().toISOString() : null,
+          completedAt: null,
         });
         order += 1;
       }
@@ -301,39 +315,7 @@ async function createTournamentInternal(
     leagueMatches: leagueMatches.length,
   });
 
-  if (seedCompletedLeague) {
-    await createBracketInternal(
-      tournamentId,
-      teamRows.map((team) => team.id),
-      actor,
-    );
-  }
   return tournamentId;
-}
-
-export async function seedDemoTournament() {
-  await ensureSchema();
-  const db = getDb();
-  const [count] = await db.select({ count: sql<number>`count(*)` }).from(tournaments);
-  if (Number(count?.count ?? 0) > 0) return;
-
-  await createTournamentInternal(
-    {
-      name: "2026 서머 소환사의 컵",
-      startAt: "2026-08-15T10:00:00+09:00",
-      matchesPerPair: 2,
-      starterPoints: 1000,
-      teams: [
-        { name: "BLUE COMETS", members: ["JIN", "Forest", "Miro", "Pulse", "Noah"] },
-        { name: "SEOUL TITANS", members: ["Haru", "Canyon2", "Navi", "Bolt", "Moa"] },
-        { name: "NEXUS FIVE", members: ["Onyx", "River", "Lune", "Arrow", "Mint"] },
-        { name: "RED PHOENIX", members: ["Rook", "Flame", "Zero", "Nova", "Bini"] },
-        { name: "VOID WALKERS", members: ["Khan", "Moss", "Echo", "Ray", "Dawn"] },
-      ],
-    },
-    { id: "system", displayName: "시스템" },
-    true,
-  );
 }
 
 function calculateStandings(
@@ -638,6 +620,25 @@ export async function setMatchWinner(matchId: string, winnerId: string, actor: R
   });
 }
 
+export async function setMatchSchedule(matchId: string, scheduledAt: string, actor: RequestUser) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  const date = new Date(scheduledAt);
+  if (Number.isNaN(date.getTime())) throw new Error("경기 일시를 확인해 주세요.");
+
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  const nextScheduledAt = date.toISOString();
+  if (match.scheduledAt === nextScheduledAt) return;
+
+  await db.update(matches).set({ scheduledAt: nextScheduledAt }).where(eq(matches.id, matchId));
+  await audit(actor, "match_schedule_changed", "match", match.id, match.tournamentId, {
+    scheduledAt: match.scheduledAt,
+  }, {
+    scheduledAt: nextScheduledAt,
+  });
+}
+
 export async function createBet(
   tournamentId: string,
   matchId: string,
@@ -646,10 +647,9 @@ export async function createBet(
   actor: RequestUser,
 ) {
   const db = getDb();
-  await ensureTournamentEntry(actor.id, tournamentId);
-  const [freshUser] = await db.select().from(users).where(eq(users.id, actor.id)).limit(1);
+  const entry = await ensureTournamentEntry(actor.id, tournamentId);
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
-  if (!freshUser || !match || match.tournamentId !== tournamentId) throw new Error("예측할 경기를 찾을 수 없습니다.");
+  if (!entry || !match || match.tournamentId !== tournamentId) throw new Error("예측할 경기를 찾을 수 없습니다.");
   if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) {
     throw new Error("현재 예측할 수 없는 경기입니다.");
   }
@@ -657,7 +657,7 @@ export async function createBet(
   if (![match.teamAId, match.teamBId].includes(teamId)) throw new Error("대진에 포함된 팀을 선택해 주세요.");
   const normalizedStake = Math.floor(stake);
   if (normalizedStake < 10) throw new Error("최소 10P부터 예측할 수 있습니다.");
-  if (normalizedStake > freshUser.pointsBalance) throw new Error("보유 포인트가 부족합니다.");
+  if (normalizedStake > entry.pointsBalance) throw new Error("현재 대회의 보유 포인트가 부족합니다.");
   const [existing] = await db
     .select()
     .from(bets)
@@ -701,7 +701,7 @@ export async function setUserRole(targetUserId: string, role: UserRole, actor: R
 }
 
 export async function getDashboard(tournamentId: string | null, requestUser: RequestUser | null) {
-  await seedDemoTournament();
+  await ensureSchema();
   const db = getDb();
   const tournamentList = await db.select().from(tournaments).orderBy(desc(tournaments.startAt));
   const selected = tournamentList.find((item) => item.id === tournamentId) ?? tournamentList[0] ?? null;
@@ -713,27 +713,30 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       teams: [],
       matches: [],
       standings: [],
+      placements: [],
       bets: [],
       ledger: [],
       leaderboard: [],
       audit: [],
       users: [],
+      summary: { leagueCompleted: 0, leagueTotal: 0, bracketCompleted: 0, bracketTotal: 0 },
     };
   }
 
   if (requestUser) {
-    await ensureTournamentEntry(requestUser.id, selected.id);
-    const [refreshed] = await db.select().from(users).where(eq(users.id, requestUser.id)).limit(1);
-    if (refreshed) requestUser.pointsBalance = refreshed.pointsBalance;
+    const entry = await ensureTournamentEntry(requestUser.id, selected.id);
+    requestUser.pointsBalance = entry?.pointsBalance ?? 0;
   }
 
   const [teamRows, playerRows, matchRows, leaderboardRows, auditRows] = await Promise.all([
     db.select().from(teams).where(eq(teams.tournamentId, selected.id)).orderBy(asc(teams.seed), asc(teams.name)),
     db.select().from(players),
     db.select().from(matches).where(eq(matches.tournamentId, selected.id)).orderBy(asc(matches.phase), asc(matches.sortOrder)),
-    db.select({ id: users.id, displayName: users.displayName, pointsBalance: users.pointsBalance, role: users.role })
-      .from(users)
-      .orderBy(desc(users.pointsBalance), asc(users.displayName))
+    db.select({ id: users.id, displayName: users.displayName, pointsBalance: tournamentEntries.pointsBalance, role: users.role })
+      .from(tournamentEntries)
+      .innerJoin(users, eq(users.id, tournamentEntries.userId))
+      .where(eq(tournamentEntries.tournamentId, selected.id))
+      .orderBy(desc(tournamentEntries.pointsBalance), asc(users.displayName))
       .limit(20),
     db.select().from(auditLogs).where(eq(auditLogs.tournamentId, selected.id)).orderBy(desc(auditLogs.createdAt)).limit(30),
   ]);
@@ -742,10 +745,24 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     ? await db.select().from(bets).where(and(eq(bets.userId, requestUser.id), eq(bets.tournamentId, selected.id))).orderBy(desc(bets.createdAt))
     : [];
   const ledgerRows = requestUser
-    ? await db.select().from(pointLedger).where(eq(pointLedger.userId, requestUser.id)).orderBy(desc(pointLedger.createdAt)).limit(30)
+    ? await db.select().from(pointLedger).where(and(eq(pointLedger.userId, requestUser.id), eq(pointLedger.tournamentId, selected.id))).orderBy(desc(pointLedger.createdAt)).limit(30)
     : [];
   const adminUsers = requestUser?.role === "admin"
-    ? await db.select().from(users).orderBy(asc(users.displayName))
+    ? (await db
+        .select({
+          id: users.id,
+          displayName: users.displayName,
+          email: users.email,
+          role: users.role,
+          pointsBalance: tournamentEntries.pointsBalance,
+        })
+        .from(users)
+        .leftJoin(
+          tournamentEntries,
+          and(eq(tournamentEntries.userId, users.id), eq(tournamentEntries.tournamentId, selected.id)),
+        )
+        .orderBy(asc(users.displayName)))
+        .map((user) => ({ ...user, pointsBalance: user.pointsBalance ?? 0 }))
     : [];
 
   const leagueMatches = matchRows.filter((match) => match.phase === "league");

@@ -5,6 +5,7 @@ import {
   getDashboard,
   getRequestUser,
   setMatchWinner,
+  setMatchSchedule,
   setUserRole,
   type CreateTournamentInput,
   type UserRole,
@@ -51,6 +52,10 @@ export async function POST(request: Request) {
     }
     if (action === "set_winner") {
       await setMatchWinner(String(payload.matchId), String(payload.winnerId), user);
+      return Response.json({ ok: true });
+    }
+    if (action === "set_match_schedule") {
+      await setMatchSchedule(String(payload.matchId), String(payload.scheduledAt), user);
       return Response.json({ ok: true });
     }
     if (action === "create_bet") {
