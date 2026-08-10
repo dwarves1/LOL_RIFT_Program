@@ -532,20 +532,73 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Omit
 
 function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, bracketMatches }: SharedProps & { leagueMatches: Match[]; bracketMatches: Match[] }) {
   const [phase, setPhase] = useState<"league" | "bracket">(data.tournament?.status === "league" ? "league" : "bracket");
-  const visible = phase === "league" ? leagueMatches : bracketMatches;
+  const visible = [...(phase === "league" ? leagueMatches : bracketMatches)].sort(
+    (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime() || a.sortOrder - b.sortOrder,
+  );
+  const upcomingMatches = visible.filter((match) => match.status !== "completed");
+  const completedMatches = visible.filter((match) => match.status === "completed");
   return (
     <section className="page-section">
-      <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="운영자가 경기 일시와 승리팀을 직접 입력하면 순위와 다음 대진에 즉시 반영됩니다." />
+      <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="경기는 시간순으로 표시되며, 남은 경기와 진행한 경기를 나누어 확인할 수 있습니다." />
       <div className="segmented-control">
         <button className={phase === "league" ? "active" : ""} onClick={() => setPhase("league")}>리그전 <span>{leagueMatches.length}</span></button>
         <button className={phase === "bracket" ? "active" : ""} onClick={() => setPhase("bracket")}>토너먼트 <span>{bracketMatches.length}</span></button>
       </div>
-      <div className="schedule-list">
-        {visible.map((match) => (
-          <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} />
-        ))}
-        {!visible.length && <EmptyState title="아직 생성된 대진이 없습니다" detail="리그 순위를 확정하면 토너먼트 대진이 자동 생성됩니다." />}
-      </div>
+      {visible.length ? (
+        <div className="schedule-groups">
+          <ScheduleGroup
+            title="남은 경기"
+            detail="예정된 경기"
+            matches={upcomingMatches}
+            emptyDetail="남은 경기가 없습니다."
+            teamMap={teamMap}
+            isStaff={isStaff}
+            busy={busy}
+            command={command}
+          />
+          <ScheduleGroup
+            title="진행한 경기"
+            detail="결과가 확정된 경기"
+            matches={completedMatches}
+            emptyDetail="아직 진행한 경기가 없습니다."
+            teamMap={teamMap}
+            isStaff={isStaff}
+            busy={busy}
+            command={command}
+          />
+        </div>
+      ) : (
+        <EmptyState title="아직 생성된 대진이 없습니다" detail="리그 순위를 확정하면 토너먼트 대진이 자동 생성됩니다." />
+      )}
+    </section>
+  );
+}
+
+function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, teamMap, isStaff, busy, command }: {
+  title: string;
+  detail: string;
+  matches: Match[];
+  emptyDetail: string;
+  teamMap: Map<string, Team>;
+  isStaff: boolean;
+  busy: boolean;
+  command: SharedProps["command"];
+}) {
+  return (
+    <section className="schedule-group" aria-label={title}>
+      <header>
+        <div><h2>{title}</h2><span>{detail}</span></div>
+        <strong>{groupMatches.length}경기</strong>
+      </header>
+      {groupMatches.length ? (
+        <div className="schedule-list">
+          {groupMatches.map((match) => (
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} />
+          ))}
+        </div>
+      ) : (
+        <div className="schedule-group-empty">{emptyDetail}</div>
+      )}
     </section>
   );
 }
@@ -555,7 +608,11 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command }: { match: Match
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
   return (
     <article className={`schedule-card ${match.status}`}>
-      <div className="match-time"><strong>{match.matchNo}</strong><span>{formatDate(match.scheduledAt)}</span><small>{match.roundLabel}</small></div>
+      <div className={`match-time ${match.phase === "league" ? "no-number" : ""}`}>
+        {match.phase !== "league" && <strong>{match.matchNo}</strong>}
+        <span>{formatDate(match.scheduledAt)}</span>
+        <small>{match.roundLabel}</small>
+      </div>
       <div className="schedule-teams">
         {[teamA, teamB].map((team, index) => {
           const isWinner = team && match.winnerId === team.id;
@@ -617,7 +674,7 @@ function MatchScheduleEditor({ match, busy, command }: { match: Match; busy: boo
         disabled={busy || !scheduledAt}
         onClick={() => command(
           { action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() },
-          `${match.matchNo} 경기 일정을 변경했습니다.`,
+          "경기 일정을 변경했습니다.",
         )}
       >
         일정 저장

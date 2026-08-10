@@ -188,10 +188,18 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
 .segmented-control button { padding: 9px 15px; border: 0; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
 .segmented-control button.active { background: rgba(233,185,73,.12); color: var(--gold-2); }
 .segmented-control span { margin-left: 5px; opacity: .55; }
+.schedule-groups { display: grid; gap: 30px; }
+.schedule-group > header { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 11px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.schedule-group > header > div { display: flex; align-items: baseline; gap: 10px; }
+.schedule-group > header h2 { margin: 0; color: var(--cream); font-size: 17px; }
+.schedule-group > header span { color: var(--muted); font-size: 9px; }
+.schedule-group > header strong { color: var(--gold-2); font-size: 10px; }
+.schedule-group-empty { display: grid; place-items: center; min-height: 92px; border: 1px dashed var(--line); color: var(--muted); font-size: 10px; }
 .schedule-list { display: flex; flex-direction: column; gap: 8px; }
 .schedule-card { display: grid; grid-template-columns: 170px minmax(320px, 1fr) minmax(230px, auto); align-items: center; gap: 24px; min-height: 112px; padding: 16px 22px; border: 1px solid var(--line); background: rgba(14,26,43,.76); }
 .schedule-card.completed { border-left: 2px solid rgba(74,222,128,.55); }
 .match-time { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 10px; }
+.match-time.no-number { grid-template-columns: 1fr; }
 .match-time strong { grid-row: span 2; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid rgba(233,185,73,.3); color: var(--gold-2); font-size: 11px; }
 .match-time span { color: #d7dee8; font-size: 11px; }
 .match-time small { color: var(--muted); font-size: 9px; }
@@ -299,7 +307,7 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
   .hero-card { min-height: 320px; padding: 28px 22px; align-items: flex-end; }.hero-copy h1 { font-size: 36px; }.hero-copy > p:not(.eyebrow) { margin: 14px 0 18px; font-size: 11px; }.progress-orbit { position: absolute; right: 20px; top: 22px; width: 92px; height: 92px; flex-basis: 92px; }.progress-orbit strong { font-size: 21px; }.progress-orbit span { font-size: 7px; }.hero-copy { padding-top: 70px; }.hero-meta { flex-wrap: wrap; }
   .dashboard-grid { margin-top: 12px; }.panel { padding: 18px; }.standing-head, .standing-row { grid-template-columns: 38px minmax(130px, 1fr) 38px 34px 34px 48px; padding: 0 4px; font-size: 9px; }.standing-team { gap: 6px; }.standing-team i { height: 20px; }.standing-team em { display: none; }
   .page-title { padding: 16px 0 20px; }.page-title > span { font-size: 10px; line-height: 1.6; }
-  .schedule-card { grid-template-columns: 1fr; gap: 13px; padding: 16px; }.schedule-teams { gap: 10px; }.match-actions { grid-column: auto; }.winner-buttons { width: 100%; }.winner-buttons button { min-height: 38px; }
+  .schedule-group > header > div { display: block; }.schedule-group > header span { display: block; margin-top: 4px; }.schedule-card { grid-template-columns: 1fr; gap: 13px; padding: 16px; }.schedule-teams { gap: 10px; }.match-actions { grid-column: auto; }.winner-buttons { width: 100%; }.winner-buttons button { min-height: 38px; }
   .seed-panel { position: static; }.team-grid { grid-template-columns: 1fr 1fr; }.wallet-hero { padding: 25px 22px; min-height: 180px; }.wallet-stats { gap: 12px; }.history-list > div { grid-template-columns: 80px 1fr 70px; }.history-list small { display: none; }
   .admin-actions { overflow-x: auto; }.admin-actions > div { flex: 0 0 120px; }.role-table > div { grid-template-columns: 32px 1fr 100px; }.role-table b { display: none; }.role-table select { grid-column: 2/-1; width: 100%; }
   .tournament-fields { grid-template-columns: 1fr 1fr; }.team-entry-grid { grid-template-columns: 1fr; }.team-entry-heading { display: block; }.team-entry-heading span { display: block; margin-top: 5px; }.modal-backdrop { padding: 0; }.create-modal { width: 100%; max-height: 100vh; height: 100vh; border: 0; }.create-modal > footer { position: sticky; bottom: 0; }.create-modal > footer button { flex: 1; }
