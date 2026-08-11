@@ -3,6 +3,7 @@ import {
   asc,
   desc,
   eq,
+  inArray,
   ne,
   sql,
 } from "drizzle-orm";
@@ -24,6 +25,7 @@ import {
   tournaments,
   users,
   riotIdHistory,
+  riotAccounts,
   draftSessions,
 } from "../db/schema";
 
@@ -166,33 +168,40 @@ export type UpdateProfileInput = {
   realName: string;
   riotGameName: string;
   riotTagline: string;
+  riotAccounts?: Array<{ id?: string; gameName: string; tagline: string; isPrimary: boolean }>;
 };
 
 export async function updateUserProfile(input: UpdateProfileInput, actor: RequestUser) {
   const realName = input.realName?.trim().normalize("NFKC");
-  const riotGameName = input.riotGameName?.trim().normalize("NFKC");
-  const riotTagline = input.riotTagline?.trim().normalize("NFKC").toUpperCase();
   if (!realName || realName.length > 50) throw new Error("실명을 확인해 주세요.");
-  if (!riotGameName || riotGameName.length > 32 || riotGameName.includes("#")) {
-    throw new Error("본계정 이름에는 #을 제외하고 입력해 주세요.");
+  const submitted = input.riotAccounts?.length ? input.riotAccounts : [{
+    gameName: input.riotGameName,
+    tagline: input.riotTagline,
+    isPrimary: true,
+  }];
+  if (submitted.length < 1 || submitted.length > 5 || submitted.filter((account) => account.isPrimary).length !== 1) {
+    throw new Error("본계정 1개와 부계정 최대 4개를 등록해 주세요.");
   }
-  if (!riotTagline || riotTagline.length > 16 || riotTagline.includes("#")) {
-    throw new Error("태그에는 #을 제외하고 입력해 주세요.");
-  }
-
-  const gameNameNormalized = normalizeIdentityPart(riotGameName);
-  const taglineNormalized = normalizeIdentityPart(riotTagline);
+  const normalizedAccounts = submitted.map((account) => {
+    const gameName = account.gameName?.trim().normalize("NFKC");
+    const tagline = account.tagline?.trim().normalize("NFKC").toUpperCase();
+    if (!gameName || gameName.length > 32 || gameName.includes("#") || !tagline || tagline.length > 16 || tagline.includes("#")) {
+      throw new Error("롤 계정은 게임 이름#태그 형식으로 입력해 주세요.");
+    }
+    return { ...account, gameName, tagline, gameNameNormalized: normalizeIdentityPart(gameName), taglineNormalized: normalizeIdentityPart(tagline) };
+  });
+  const identityKeys = new Set(normalizedAccounts.map((account) => `${account.gameNameNormalized}#${account.taglineNormalized}`));
+  if (identityKeys.size !== normalizedAccounts.length) throw new Error("같은 롤 계정을 중복 등록할 수 없습니다.");
+  const primary = normalizedAccounts.find((account) => account.isPrimary)!;
+  const riotGameName = primary.gameName;
+  const riotTagline = primary.tagline;
+  const gameNameNormalized = primary.gameNameNormalized;
+  const taglineNormalized = primary.taglineNormalized;
   const db = getDb();
-  const [duplicate] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(and(
-      eq(users.riotGameNameNormalized, gameNameNormalized),
-      eq(users.riotTaglineNormalized, taglineNormalized),
-      ne(users.id, actor.id),
-    ))
-    .limit(1);
-  if (duplicate) throw new Error("이미 다른 회원이 사용 중인 본계정입니다.");
+  const registered = await db.select().from(riotAccounts);
+  if (normalizedAccounts.some((account) => registered.some((item) => item.userId !== actor.id && item.gameNameNormalized === account.gameNameNormalized && item.taglineNormalized === account.taglineNormalized))) {
+    throw new Error("이미 다른 회원이 등록한 롤 계정입니다.");
+  }
 
   const [existing] = await db.select().from(users).where(eq(users.id, actor.id)).limit(1);
   if (!existing) throw new Error("사용자 정보를 찾을 수 없습니다.");
@@ -215,6 +224,31 @@ export async function updateUserProfile(input: UpdateProfileInput, actor: Reques
   }
 
   const displayName = publicDisplayName(riotGameName, riotTagline, realName);
+  const existingAccounts = registered.filter((account) => account.userId === actor.id);
+  const retainedIds = new Set(normalizedAccounts.map((account) => account.id).filter(Boolean));
+  for (const account of existingAccounts) {
+    if (!retainedIds.has(account.id)) {
+      const [linked] = await db.select({ id: players.id }).from(players).where(eq(players.riotAccountId, account.id)).limit(1);
+      if (linked) throw new Error(`${account.gameName}#${account.tagline} 계정은 대회 명단에 등록되어 삭제할 수 없습니다.`);
+      await db.delete(riotAccounts).where(eq(riotAccounts.id, account.id));
+    }
+  }
+  for (const account of normalizedAccounts) {
+    const values = {
+      gameName: account.gameName,
+      tagline: account.tagline,
+      gameNameNormalized: account.gameNameNormalized,
+      taglineNormalized: account.taglineNormalized,
+      isPrimary: account.isPrimary,
+      updatedAt: changedAt,
+    };
+    if (account.id && existingAccounts.some((item) => item.id === account.id)) {
+      await db.update(riotAccounts).set(values).where(and(eq(riotAccounts.id, account.id), eq(riotAccounts.userId, actor.id)));
+      await db.update(players).set({ nickname: `${account.gameName}#${account.tagline}` }).where(eq(players.riotAccountId, account.id));
+    } else {
+      await db.insert(riotAccounts).values({ id: uid("riot"), userId: actor.id, ...values, createdAt: changedAt });
+    }
+  }
   await db.update(users).set({
     displayName,
     realName,
@@ -364,6 +398,135 @@ export async function hasTournamentAccess(user: RequestUser | null, tournamentId
   return Boolean(member);
 }
 
+async function requireTournamentOperator(actor: RequestUser, tournamentId: string) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  if (!(await hasTournamentAccess(actor, tournamentId))) throw new Error("이 대회를 운영할 권한이 없습니다.");
+}
+
+function isStaff(actor: RequestUser) {
+  return actor.role === "admin" || actor.role === "operator" || actor.isLocalDemo;
+}
+
+async function isTeamLeader(actor: RequestUser, teamIds: Array<string | null>) {
+  const ids = teamIds.filter((id): id is string => Boolean(id));
+  if (!ids.length) return false;
+  const memberships = await getDb().select().from(players).where(and(eq(players.userId, actor.id), inArray(players.teamId, ids)));
+  return memberships.some((player) => player.teamRole === "captain" || player.teamRole === "vice_captain");
+}
+
+async function canManageMatch(actor: RequestUser, match: typeof matches.$inferSelect) {
+  return isStaff(actor) || isTeamLeader(actor, [match.teamAId, match.teamBId]);
+}
+
+export type TeamLogoInput = {
+  objectKey: string;
+  fileName: string;
+  contentType: string;
+  fileSize: number;
+  width?: number | null;
+  height?: number | null;
+};
+
+export async function setTeamLogo(teamId: string, input: TeamLogoInput, actor: RequestUser) {
+  const db = getDb();
+  const [team] = await db.select().from(teams).where(eq(teams.id, teamId)).limit(1);
+  if (!team) throw new Error("팀을 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, team.tournamentId);
+  const updatedAt = new Date().toISOString();
+  await db.update(teams).set({
+    logoObjectKey: input.objectKey,
+    logoFileName: input.fileName.slice(0, 180),
+    logoContentType: input.contentType,
+    logoFileSize: input.fileSize,
+    logoWidth: input.width ?? null,
+    logoHeight: input.height ?? null,
+    logoUpdatedBy: actor.id,
+    logoUpdatedAt: updatedAt,
+  }).where(eq(teams.id, team.id));
+  await audit(actor, team.logoObjectKey ? "team_logo_updated" : "team_logo_registered", "team", team.id, team.tournamentId, {
+    fileName: team.logoFileName,
+  }, {
+    fileName: input.fileName,
+  });
+  return { previousObjectKey: team.logoObjectKey, updatedAt };
+}
+
+export async function clearTeamLogo(teamId: string, actor: RequestUser) {
+  const db = getDb();
+  const [team] = await db.select().from(teams).where(eq(teams.id, teamId)).limit(1);
+  if (!team) throw new Error("팀을 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, team.tournamentId);
+  await db.update(teams).set({
+    logoObjectKey: null,
+    logoFileName: null,
+    logoContentType: null,
+    logoFileSize: null,
+    logoWidth: null,
+    logoHeight: null,
+    logoUpdatedBy: actor.id,
+    logoUpdatedAt: new Date().toISOString(),
+  }).where(eq(teams.id, team.id));
+  await audit(actor, "team_logo_cleared", "team", team.id, team.tournamentId, {
+    fileName: team.logoFileName,
+  }, null);
+  return team.logoObjectKey;
+}
+
+export async function setTeamLeaders(
+  teamId: string,
+  captainUserId: string,
+  viceCaptainUserId: string | null,
+  actor: RequestUser,
+) {
+  const db = getDb();
+  const [team] = await db.select().from(teams).where(eq(teams.id, teamId)).limit(1);
+  if (!team) throw new Error("팀을 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, team.tournamentId);
+  if (!captainUserId || captainUserId === viceCaptainUserId) {
+    throw new Error("팀장과 부팀장을 서로 다른 팀원으로 선택해 주세요.");
+  }
+
+  const roster = await db.select().from(players).where(eq(players.teamId, team.id));
+  const rosterUserIds = new Set(roster.map((player) => player.userId).filter((id): id is string => Boolean(id)));
+  if (!rosterUserIds.has(captainUserId) || (viceCaptainUserId && !rosterUserIds.has(viceCaptainUserId))) {
+    throw new Error("해당 팀에 등록된 회원만 팀장·부팀장으로 지정할 수 있습니다.");
+  }
+
+  const before = roster
+    .filter((player) => player.teamRole !== "member")
+    .map((player) => ({ userId: player.userId, role: player.teamRole }));
+  await db.update(players).set({ teamRole: "member" }).where(eq(players.teamId, team.id));
+  await db.update(players).set({ teamRole: "captain" }).where(and(eq(players.teamId, team.id), eq(players.userId, captainUserId)));
+  if (viceCaptainUserId) {
+    await db.update(players).set({ teamRole: "vice_captain" }).where(and(eq(players.teamId, team.id), eq(players.userId, viceCaptainUserId)));
+  }
+  await db.update(teams).set({ representativeUserId: captainUserId }).where(eq(teams.id, team.id));
+
+  await db.update(tournamentMembers).set({ role: "viewer" }).where(and(
+    eq(tournamentMembers.tournamentId, team.tournamentId),
+    eq(tournamentMembers.teamId, team.id),
+    eq(tournamentMembers.role, "team_rep"),
+  ));
+  for (const userId of [captainUserId, viceCaptainUserId].filter((id): id is string => Boolean(id))) {
+    const [membership] = await db.select().from(tournamentMembers).where(and(
+      eq(tournamentMembers.tournamentId, team.tournamentId),
+      eq(tournamentMembers.userId, userId),
+    )).limit(1);
+    if (!membership) {
+      await db.insert(tournamentMembers).values({ tournamentId: team.tournamentId, userId, role: "team_rep", teamId: team.id });
+    } else if (membership.role === "viewer" || membership.role === "team_rep") {
+      await db.update(tournamentMembers).set({ role: "team_rep", teamId: team.id }).where(and(
+        eq(tournamentMembers.tournamentId, team.tournamentId),
+        eq(tournamentMembers.userId, userId),
+      ));
+    }
+  }
+  await audit(actor, "team_leaders_updated", "team", team.id, team.tournamentId, before, {
+    captainUserId,
+    viceCaptainUserId,
+  });
+}
+
 export async function joinTournamentByCode(code: string, actor: RequestUser) {
   const normalized = normalizeAccessCode(code);
   if (normalized.length < 8) throw new Error("대회 코드를 확인해 주세요.");
@@ -407,7 +570,7 @@ export type CreateTournamentInput = {
   semifinalBestOf?: number;
   finalBestOf?: number;
   tiebreakBestOf?: number;
-  teams: Array<{ name: string; members: string[] }>;
+  teams: Array<{ name: string; members: Array<{ riotAccountId: string; teamRole: "member" | "captain" | "vice_captain" }> }>;
 };
 
 function normalizeBestOf(value: number | undefined, fallback: 1 | 3 | 5): 1 | 3 | 5 {
@@ -428,9 +591,14 @@ async function createTournamentInternal(
   if (!Array.isArray(input.teams) || input.teams.length < 2 || input.teams.length > 16) {
     throw new Error("참가 팀 수는 2팀부터 16팀까지 선택할 수 있습니다.");
   }
-  if (input.teams.some((team) => !team.name.trim() || !Array.isArray(team.members) || team.members.filter(Boolean).length !== 5)) {
-    throw new Error("각 팀의 팀명과 선수 5명을 모두 입력해 주세요.");
+  if (input.teams.some((team) => !team.name.trim() || !Array.isArray(team.members) || team.members.length !== 5 || team.members.some((member) => !member.riotAccountId) || team.members.filter((member) => member.teamRole === "captain").length !== 1 || team.members.filter((member) => member.teamRole === "vice_captain").length > 1)) {
+    throw new Error("각 팀에 등록 회원 5명과 팀장 1명, 부팀장 최대 1명을 지정해 주세요.");
   }
+  const rosterAccountIds = input.teams.flatMap((team) => team.members.map((member) => member.riotAccountId));
+  if (new Set(rosterAccountIds).size !== rosterAccountIds.length) throw new Error("같은 롤 계정을 여러 자리에 등록할 수 없습니다.");
+  const registeredAccounts = await getDb().select().from(riotAccounts).where(inArray(riotAccounts.id, rosterAccountIds));
+  if (registeredAccounts.length !== rosterAccountIds.length) throw new Error("회원이 등록한 롤 ID만 대회 명단에 추가할 수 있습니다.");
+  if (new Set(registeredAccounts.map((account) => account.userId)).size !== registeredAccounts.length) throw new Error("한 사용자는 한 대회에서 한 팀의 한 자리만 참가할 수 있습니다.");
   const competitionFormat = input.competitionFormat ?? (
     input.preliminaryFormat === "none"
       ? input.bracketFormat === "winner_loser_split" ? "split_only" : "bracket_only"
@@ -460,12 +628,14 @@ async function createTournamentInternal(
 
   const db = getDb();
   const tournamentId = uid("tournament");
+  const accountMap = new Map(registeredAccounts.map((account) => [account.id, account]));
   const teamRows = input.teams.map((team, index) => ({
     id: uid("team"),
     tournamentId,
     name: team.name.trim(),
     color: COLORS[index % COLORS.length],
     seed: null as number | null,
+    representativeUserId: accountMap.get(team.members.find((member) => member.teamRole === "captain")!.riotAccountId)!.userId,
   }));
 
   await db.insert(tournaments).values({
@@ -486,6 +656,7 @@ async function createTournamentInternal(
     accessCodeHash: await hashAccessCode(accessCode),
     accessCodeHint: accessCode.slice(-4),
     accessCodeUpdatedAt: new Date().toISOString(),
+    rosterMode: "registered_accounts",
     starterPoints,
     createdBy: actor.id,
   });
@@ -493,14 +664,28 @@ async function createTournamentInternal(
   await db.insert(tournamentMembers).values({ tournamentId, userId: actor.id, role: "owner" }).onConflictDoNothing();
 
   const playerRows = teamRows.flatMap((team, teamIndex) =>
-    input.teams[teamIndex].members.map((nickname, index) => ({
+    input.teams[teamIndex].members.map((member, index) => {
+      const account = accountMap.get(member.riotAccountId)!;
+      return {
       id: uid("player"),
       teamId: team.id,
-      nickname: nickname.trim(),
+      userId: account.userId,
+      riotAccountId: account.id,
+      teamRole: member.teamRole,
+      nickname: `${account.gameName}#${account.tagline}`,
       position: POSITIONS[index],
-    })),
+      };
+    }),
   );
   await db.insert(players).values(playerRows);
+  for (const player of playerRows) {
+    await db.insert(tournamentMembers).values({
+      tournamentId,
+      userId: player.userId,
+      role: player.teamRole === "member" ? "viewer" : "team_rep",
+      teamId: player.teamId,
+    }).onConflictDoNothing();
+  }
 
   const leagueMatches: Array<typeof matches.$inferInsert> = [];
   let order = 1;
@@ -915,11 +1100,17 @@ async function propagateBracket(tournamentId: string) {
   }
 }
 
-export async function setMatchWinner(matchId: string, winnerId: string, actor: RequestUser) {
-  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+export async function setMatchWinner(
+  matchId: string,
+  winnerId: string,
+  actor: RequestUser,
+  fromDetailedResult = false,
+) {
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  const maySetWinner = isStaff(actor) || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]));
+  if (!maySetWinner) throw new Error("이 경기의 결과를 등록할 권한이 없습니다.");
   if (!match.teamAId || !match.teamBId || ![match.teamAId, match.teamBId].includes(winnerId)) {
     throw new Error("대진에 포함된 팀을 선택해 주세요.");
   }
@@ -1020,10 +1211,10 @@ function statInteger(value: number, max = 10_000_000) {
 }
 
 export async function saveMatchResult(input: SaveMatchResultInput, actor: RequestUser) {
-  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId)).limit(1);
   if (!match || !match.teamAId || !match.teamBId) throw new Error("결과를 등록할 경기를 찾을 수 없습니다.");
+  if (!(await canManageMatch(actor, match))) throw new Error("이 경기의 결과 이미지를 등록할 권한이 없습니다.");
   const setNo = Math.min(match.bestOf, Math.max(1, Math.floor(input.setNo ?? 1)));
   const matchTeams = new Set([match.teamAId, match.teamBId]);
   if (
@@ -1049,6 +1240,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     .from(matchResultImages)
     .where(and(eq(matchResultImages.matchId, match.id), eq(matchResultImages.setNo, setNo)))
     .limit(1);
+  if (previousImage && !isStaff(actor)) throw new Error("등록된 세트 결과는 운영자나 관리자만 정정할 수 있습니다.");
   const reviewedAt = new Date().toISOString();
   const imageValues = {
     objectKey: input.image.objectKey,
@@ -1125,7 +1317,19 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const winsNeeded = Math.ceil(match.bestOf / 2);
   await db.update(matches).set({ seriesScoreA: scoreA, seriesScoreB: scoreB }).where(eq(matches.id, match.id));
   if (scoreA >= winsNeeded || scoreB >= winsNeeded) {
-    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor);
+    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor, true);
+  } else if (match.status === "completed") {
+    await rollbackBets(match.id, false);
+    await db.update(matches).set({
+      status: "scheduled",
+      winnerId: null,
+      loserId: null,
+      completedAt: null,
+      seriesScoreA: scoreA,
+      seriesScoreB: scoreB,
+    }).where(eq(matches.id, match.id));
+    if (match.phase === "bracket") await propagateBracket(match.tournamentId);
+    await db.update(tournaments).set({ status: match.phase === "league" ? "league" : "bracket" }).where(eq(tournaments.id, match.tournamentId));
   }
   await audit(actor, previousImage ? "match_detail_updated" : "match_detail_registered", "match", match.id, match.tournamentId, null, {
     winnerTeamId: input.winnerTeamId,
@@ -1136,19 +1340,20 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
 }
 
 export async function setMatchSchedule(matchId: string, scheduledAt: string, actor: RequestUser) {
-  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
   const date = new Date(scheduledAt);
   if (Number.isNaN(date.getTime())) throw new Error("경기 일시를 확인해 주세요.");
 
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  if (!(await canManageMatch(actor, match))) throw new Error("이 경기의 일정을 입력할 권한이 없습니다.");
+  if (match.scheduleConfirmed && !isStaff(actor)) throw new Error("확정된 일정은 운영자나 관리자만 변경할 수 있습니다.");
   const nextScheduledAt = date.toISOString();
   if (match.scheduledAt === nextScheduledAt) return;
 
   await db
     .update(matches)
-    .set({ scheduledAt: nextScheduledAt, scheduleConfirmed: false })
+    .set({ scheduledAt: nextScheduledAt, scheduleConfirmed: false, scheduleUpdatedBy: actor.id, scheduleUpdatedAt: new Date().toISOString() })
     .where(eq(matches.id, matchId));
   if (match.phase === "league") {
     const ordered = await db
@@ -1186,7 +1391,7 @@ export async function setMatchBestOf(matchId: string, bestOf: number, actor: Req
 }
 
 export async function confirmMatchSchedule(matchId: string, actor: RequestUser) {
-  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  if (!isStaff(actor)) throw new Error("운영자나 관리자만 경기 일정을 확정할 수 있습니다.");
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
@@ -1268,6 +1473,19 @@ export async function setUserRole(targetUserId: string, role: UserRole, actor: R
 export async function getDashboard(tournamentId: string | null, requestUser: RequestUser | null) {
   await ensureSchema();
   const db = getDb();
+  const myRiotAccounts = requestUser
+    ? await db.select().from(riotAccounts).where(eq(riotAccounts.userId, requestUser.id)).orderBy(desc(riotAccounts.isPrimary), asc(riotAccounts.createdAt))
+    : [];
+  const rosterAccounts = requestUser && requestUser.role !== "viewer"
+    ? await db.select({
+        id: riotAccounts.id,
+        userId: riotAccounts.userId,
+        gameName: riotAccounts.gameName,
+        tagline: riotAccounts.tagline,
+        isPrimary: riotAccounts.isPrimary,
+        displayName: users.displayName,
+      }).from(riotAccounts).innerJoin(users, eq(users.id, riotAccounts.userId)).orderBy(asc(riotAccounts.gameName))
+    : [];
   const allTournaments = await db.select().from(tournaments).orderBy(desc(tournaments.startAt));
   const memberships = requestUser
     ? await db.select().from(tournamentMembers).where(eq(tournamentMembers.userId, requestUser.id))
@@ -1293,6 +1511,9 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       teamStats: [],
       playerStats: [],
       accounts: [],
+      myRiotAccounts,
+      rosterAccounts,
+      leaderTeamIds: [],
       bets: [],
       ledger: [],
       leaderboard: [],
@@ -1368,15 +1589,16 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       .innerJoin(matches, eq(matches.id, playerMatchStats.matchId))
       .where(eq(matches.tournamentId, selected.id)),
     db.select({
-      id: users.id,
+      id: riotAccounts.id,
+      userId: users.id,
       displayName: users.displayName,
-      riotGameName: users.riotGameName,
-      riotTagline: users.riotTagline,
-      profileCompletedAt: users.profileCompletedAt,
+      riotGameName: riotAccounts.gameName,
+      riotTagline: riotAccounts.tagline,
     }).from(tournamentMembers)
       .innerJoin(users, eq(users.id, tournamentMembers.userId))
+      .innerJoin(riotAccounts, eq(riotAccounts.userId, users.id))
       .where(eq(tournamentMembers.tournamentId, selected.id))
-      .orderBy(asc(users.displayName)),
+      .orderBy(asc(users.displayName), desc(riotAccounts.isPrimary)),
     db.select({
       id: matchGames.id,
       matchId: matchGames.matchId,
@@ -1423,9 +1645,21 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
   const bracketMatches = matchRows.filter((match) => match.phase === "bracket");
   const standings = calculateStandings(teamRows, leagueMatches);
   const teamData = teamRows.map((team) => ({
-    ...team,
+    id: team.id,
+    tournamentId: team.tournamentId,
+    name: team.name,
+    color: team.color,
+    seed: team.seed,
+    logoFileName: team.logoFileName,
+    logoUpdatedAt: team.logoUpdatedAt,
+    logoUrl: team.logoObjectKey
+      ? `/api/teams/${encodeURIComponent(team.id)}/logo?v=${encodeURIComponent(team.logoUpdatedAt ?? "1")}`
+      : null,
     players: playerRows.filter((player) => player.teamId === team.id),
   }));
+  const leaderTeamIds = requestUser
+    ? playerRows.filter((player) => player.userId === requestUser.id && (player.teamRole === "captain" || player.teamRole === "vice_captain")).map((player) => player.teamId)
+    : [];
   const finalMatch = bracketMatches.find((match) => match.matchNo === "F");
   const placements = [
     finalMatch?.winnerId ? { rank: 1, teamId: finalMatch.winnerId } : null,
@@ -1458,12 +1692,16 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     })),
     teamStats: teamStatRows,
     playerStats: playerStatRows,
-    accounts: accountRows.filter((account) => account.profileCompletedAt).map((account) => ({
+    accounts: accountRows.map((account) => ({
       id: account.id,
+      userId: account.userId,
       displayName: account.displayName,
       riotGameName: account.riotGameName,
       riotTagline: account.riotTagline,
     })),
+    myRiotAccounts,
+    rosterAccounts,
+    leaderTeamIds,
     bets: userBets,
     ledger: ledgerRows,
     leaderboard: leaderboardRows,

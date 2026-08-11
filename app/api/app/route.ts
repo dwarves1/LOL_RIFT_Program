@@ -11,11 +11,15 @@ import {
   setMatchBestOf,
   saveMatchResult,
   setUserRole,
+  setTeamLogo,
+  clearTeamLogo,
+  setTeamLeaders,
   joinTournamentByCode,
   rotateTournamentCode,
   updateUserProfile,
   type CreateTournamentInput,
   type SaveMatchResultInput,
+  type TeamLogoInput,
   type UserRole,
 } from "../../../lib/tournament-service";
 import {
@@ -66,6 +70,10 @@ export async function POST(request: Request) {
         realName: String(payload.realName ?? ""),
         riotGameName: String(payload.riotGameName ?? ""),
         riotTagline: String(payload.riotTagline ?? ""),
+        riotAccounts: Array.isArray(payload.riotAccounts) ? payload.riotAccounts.map((account) => {
+          const item = account as Record<string, unknown>;
+          return { id: item.id ? String(item.id) : undefined, gameName: String(item.gameName ?? ""), tagline: String(item.tagline ?? ""), isPrimary: Boolean(item.isPrimary) };
+        }) : undefined,
       }, user);
       return Response.json({ ok: true });
     }
@@ -135,6 +143,50 @@ export async function POST(request: Request) {
     if (action === "resume_draft") { await resumeDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
     if (action === "rename_draft") { await renameDraft(String(payload.draftId), String(payload.name), user); return Response.json({ ok: true }); }
     if (action === "delete_draft") { await deleteDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
+    if (action === "upload_team_logo") {
+      const teamId = String(payload.teamId ?? "");
+      const image = payload.image as Record<string, unknown>;
+      const dataUrl = String(image?.dataUrl ?? "");
+      const matched = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+      if (!matched) throw new Error("PNG, JPG 또는 WebP 이미지를 선택해 주세요.");
+      const bytes = Uint8Array.from(atob(matched[2]), (character) => character.charCodeAt(0));
+      if (bytes.byteLength > 2 * 1024 * 1024) throw new Error("팀 로고는 2MB 이하로 올려 주세요.");
+      const extension = matched[1] === "image/png" ? "png" : matched[1] === "image/webp" ? "webp" : "jpg";
+      const objectKey = `team-logos/${teamId}/${crypto.randomUUID()}.${extension}`;
+      await env.RESULT_IMAGES.put(objectKey, bytes, {
+        httpMetadata: { contentType: matched[1], cacheControl: "public, max-age=31536000, immutable" },
+        customMetadata: { teamId, uploadedBy: user.id },
+      });
+      try {
+        const result = await setTeamLogo(teamId, {
+          objectKey,
+          fileName: String(image.fileName ?? `logo.${extension}`),
+          contentType: matched[1],
+          fileSize: bytes.byteLength,
+          width: Number(image.width ?? 0) || null,
+          height: Number(image.height ?? 0) || null,
+        } satisfies TeamLogoInput, user);
+        if (result.previousObjectKey && result.previousObjectKey !== objectKey) await env.RESULT_IMAGES.delete(result.previousObjectKey);
+      } catch (error) {
+        await env.RESULT_IMAGES.delete(objectKey);
+        throw error;
+      }
+      return Response.json({ ok: true });
+    }
+    if (action === "clear_team_logo") {
+      const previousObjectKey = await clearTeamLogo(String(payload.teamId ?? ""), user);
+      if (previousObjectKey) await env.RESULT_IMAGES.delete(previousObjectKey);
+      return Response.json({ ok: true });
+    }
+    if (action === "set_team_leaders") {
+      await setTeamLeaders(
+        String(payload.teamId ?? ""),
+        String(payload.captainUserId ?? ""),
+        payload.viceCaptainUserId ? String(payload.viceCaptainUserId) : null,
+        user,
+      );
+      return Response.json({ ok: true });
+    }
     if (action === "create_bet") {
       await createBet(
         String(payload.tournamentId),
@@ -150,9 +202,6 @@ export async function POST(request: Request) {
       return Response.json({ ok: true });
     }
     if (action === "save_match_result") {
-      if (user.role === "viewer") {
-        return Response.json({ error: "운영 권한이 필요합니다." }, { status: 403 });
-      }
       const input = payload.input as Record<string, unknown>;
       const image = input.image as Record<string, unknown>;
       const dataUrl = String(image.dataUrl ?? "");

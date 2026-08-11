@@ -5,6 +5,7 @@ import { isPredictionOpen } from "../lib/match-rules";
 import { ProfileModal } from "./profile-modal";
 import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
 import { DraftView, MatchDraftCreator } from "./draft-view";
+import { positionLabel } from "../lib/positions";
 
 type Role = "viewer" | "operator" | "admin";
 type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "stats" | "draft" | "points" | "admin";
@@ -40,6 +41,7 @@ type Tournament = {
   finalBestOf: number;
   tiebreakBestOf: number;
   accessCodeHint: string | null;
+  rosterMode: "legacy_free_text" | "registered_accounts";
 };
 
 type Team = {
@@ -47,7 +49,10 @@ type Team = {
   name: string;
   color: string;
   seed: number | null;
-  players: Array<{ id: string; nickname: string; position: string }>;
+  logoUrl: string | null;
+  logoFileName: string | null;
+  logoUpdatedAt: string | null;
+  players: Array<{ id: string; nickname: string; position: string; userId: string | null; riotAccountId: string | null; teamRole: "member" | "captain" | "vice_captain" }>;
 };
 
 type Match = {
@@ -64,6 +69,8 @@ type Match = {
   teamBId: string | null;
   scheduledAt: string;
   scheduleConfirmed: boolean;
+  scheduleUpdatedBy: string | null;
+  scheduleUpdatedAt: string | null;
   status: "scheduled" | "completed";
   winnerId: string | null;
   loserId: string | null;
@@ -132,7 +139,10 @@ type Dashboard = {
   resultImages: Array<{ id: string; matchId: string; setNo: number; fileName: string; width: number | null; height: number | null; durationSeconds: number | null; reviewedAt: string; imageUrl: string }>;
   teamStats: Array<{ matchId: string; setNo: number; side: number; teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
   playerStats: ResultPlayerStat[];
-  accounts: Array<{ id: string; displayName: string; riotGameName: string | null; riotTagline: string | null }>;
+  accounts: Array<{ id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null }>;
+  myRiotAccounts: Array<{ id: string; gameName: string; tagline: string; isPrimary: boolean }>;
+  rosterAccounts: Array<{ id: string; userId: string; gameName: string; tagline: string; isPrimary: boolean; displayName: string }>;
+  leaderTeamIds: string[];
   bets: Bet[];
   ledger: Array<{
     id: string;
@@ -206,6 +216,10 @@ const AUDIT_LABEL: Record<string, string> = {
   profile_updated: "공개 프로필을 변경했습니다",
   match_detail_registered: "경기 이미지와 상세 통계를 등록했습니다",
   match_detail_updated: "경기 이미지와 상세 통계를 수정했습니다",
+  team_logo_registered: "팀 로고를 등록했습니다",
+  team_logo_updated: "팀 로고를 변경했습니다",
+  team_logo_cleared: "팀 로고를 기본값으로 되돌렸습니다",
+  team_leaders_updated: "팀장·부팀장을 변경했습니다",
 };
 
 function formatDate(value: string, withTime = true) {
@@ -222,11 +236,16 @@ function teamInitials(name: string) {
   return words.length > 1 ? words.map((word) => word[0]).join("").slice(0, 2) : name.slice(0, 2);
 }
 
-function TeamMark({ team, small = false }: { team?: Team; small?: boolean }) {
+function TeamMark({ team, small = false, logoOverride }: { team?: Team; small?: boolean; logoOverride?: string | null }) {
   if (!team) return <span className={`team-mark placeholder ${small ? "small" : ""}`}>?</span>;
+  const logoUrl = logoOverride === undefined ? team.logoUrl : logoOverride;
   return (
-    <span className={`team-mark ${small ? "small" : ""}`} style={{ "--team-color": team.color } as React.CSSProperties}>
-      {teamInitials(team.name)}
+    <span
+      className={`team-mark ${logoUrl ? "has-logo" : ""} ${small ? "small" : ""}`}
+      style={{ "--team-color": team.color, ...(logoUrl ? { backgroundImage: `url(${JSON.stringify(logoUrl)})` } : {}) } as React.CSSProperties}
+      aria-label={logoUrl ? `${team.name} 로고` : undefined}
+    >
+      {!logoUrl && teamInitials(team.name)}
     </span>
   );
 }
@@ -368,6 +387,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         {showCreate && (
           <CreateTournamentModal
             busy={busy}
+            rosterAccounts={data?.rosterAccounts ?? []}
             onClose={() => setShowCreate(false)}
             onCreate={async (input) => {
               const ok = await command({ action: "create_tournament", input }, "새 대회를 생성했습니다.");
@@ -378,6 +398,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         {viewer && (!viewer.profileComplete || showProfile) && (
           <ProfileModal
             viewer={viewer}
+            riotAccounts={data?.myRiotAccounts ?? []}
             busy={busy}
             required={!viewer.profileComplete}
             onClose={() => setShowProfile(false)}
@@ -509,6 +530,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
       {showCreate && isStaff && (
         <CreateTournamentModal
           busy={busy}
+          rosterAccounts={data.rosterAccounts}
           onClose={() => setShowCreate(false)}
           onCreate={async (input) => {
             const ok = await command({ action: "create_tournament", input }, "새 대회를 생성했습니다.");
@@ -519,6 +541,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
       {viewer && (!viewer.profileComplete || showProfile) && (
         <ProfileModal
           viewer={viewer}
+          riotAccounts={data.myRiotAccounts}
           busy={busy}
           required={!viewer.profileComplete}
           onClose={() => setShowProfile(false)}
@@ -530,6 +553,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
           match={reviewMatch}
           teams={data.teams}
           accounts={data.accounts}
+          initialSetNo={Math.min(reviewMatch.bestOf, Math.max(1, ...data.games.filter((game) => game.matchId === reviewMatch.id && game.status === "completed").map((game) => game.setNo + 1)))}
           busy={busy}
           onClose={() => setReviewMatch(null)}
           onSubmit={(input) => command({ action: "save_match_result", input }, "경기 결과와 통계를 등록했습니다.")}
@@ -770,7 +794,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
       {groupMatches.length ? (
         <div className="schedule-list">
           {groupMatches.map((match) => (
-            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} leaderTeamIds={data.leaderTeamIds} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
           ))}
         </div>
       ) : (
@@ -780,9 +804,10 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   );
 }
 
-function ScheduleCard({ match, teamMap, isStaff, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
+function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; leaderTeamIds: string[]; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
+  const canManageMatch = isStaff || Boolean((match.teamAId && leaderTeamIds.includes(match.teamAId)) || (match.teamBId && leaderTeamIds.includes(match.teamBId)));
   return (
     <article className={`schedule-card ${match.status}`}>
       <div className={`match-time ${match.phase === "league" ? "no-number" : ""}`}>
@@ -805,9 +830,9 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command, draftSession, ha
       </div>
       <div className="match-actions">
         {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
-        {isStaff && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy} onClick={() => openResultReview(match)}>{hasDetail ? "세트 결과 추가·수정" : "세트 결과 이미지 등록"}</button>}
+        {canManageMatch && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy} onClick={() => openResultReview(match)}>{hasDetail ? isStaff ? "세트 결과 추가·수정" : "다음 세트 결과 등록" : "세트 결과 이미지 등록"}</button>}
         {teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : isStaff ? <MatchDraftCreator match={match} busy={busy} command={command} /> : null)}
-        {isStaff && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} />}
+        {canManageMatch && (!match.scheduleConfirmed || isStaff) && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} canSetBestOf={isStaff} />}
         {match.status === "scheduled" && (
           <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
             {match.scheduleConfirmed ? "일정 확정" : "일정 미확정"}
@@ -846,13 +871,12 @@ function toDateTimeLocal(value: string) {
   return localDate.toISOString().slice(0, 16);
 }
 
-function MatchScheduleEditor({ match, busy, command }: { match: Match; busy: boolean; command: SharedProps["command"] }) {
+function MatchScheduleEditor({ match, busy, command, canSetBestOf }: { match: Match; busy: boolean; command: SharedProps["command"]; canSetBestOf: boolean }) {
   const [scheduledAt, setScheduledAt] = useState(toDateTimeLocal(match.scheduledAt));
   const [bestOf, setBestOf] = useState(match.bestOf);
   return (
     <div className="schedule-editor">
-      <select value={bestOf} aria-label={`${match.matchNo} 세트 수`} onChange={(event) => setBestOf(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select>
-      <button disabled={busy || bestOf === match.bestOf} onClick={() => command({ action: "set_match_best_of", matchId: match.id, bestOf }, `BO${bestOf}로 변경했습니다.`)}>BO 저장</button>
+      {canSetBestOf && <><select value={bestOf} aria-label={`${match.matchNo} 세트 수`} onChange={(event) => setBestOf(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select><button disabled={busy || bestOf === match.bestOf} onClick={() => command({ action: "set_match_best_of", matchId: match.id, bestOf }, `BO${bestOf}로 변경했습니다.`)}>BO 저장</button></>}
       <input
         type="datetime-local"
         value={scheduledAt}
@@ -924,7 +948,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
               </div>
               <div className="standing-roster-list">
                 {selectedTeam.players.map((player) => (
-                  <div key={player.id}><span>{player.position}</span><strong>{player.nickname}</strong></div>
+                  <div key={player.id}><span>{positionLabel(player.position)}</span><strong>{player.nickname}</strong></div>
                 ))}
               </div>
             </article>
@@ -1082,7 +1106,7 @@ function TeamsView({ data }: { data: Dashboard }) {
           <article className="team-card" key={team.id} style={{ "--team-color": team.color } as React.CSSProperties}>
             <header><TeamMark team={team} /><div><span>{team.seed ? `리그 ${team.seed}위` : "참가 팀"}</span><h2>{team.name}</h2></div></header>
             <div className="roster-list">
-              {team.players.map((player) => <div key={player.id}><span>{player.position}</span><strong>{player.nickname}</strong></div>)}
+              {team.players.map((player) => <div key={player.id}><span>{positionLabel(player.position, true)}</span><strong>{player.nickname}</strong>{player.teamRole !== "member" && <small className="team-role-badge">{player.teamRole === "captain" ? "팀장" : "부팀장"}</small>}</div>)}
             </div>
           </article>
         ))}
@@ -1092,7 +1116,7 @@ function TeamsView({ data }: { data: Dashboard }) {
 }
 
 function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Team> }) {
-  const accountMap = new Map(data.accounts.map((account) => [account.id, account.displayName]));
+  const accountMap = new Map(data.accounts.map((account) => [account.userId, account.displayName]));
   const playerRows = [...data.playerStats.reduce((map, row) => {
     const key = row.userId ?? `snapshot:${row.accountName}`;
     const current = map.get(key) ?? {
@@ -1146,7 +1170,7 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
     <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 딜량</span><span>평균 골드</span><span>주력 챔피언</span><span>주 라인</span></div>{playerRows.map((row) => {
       const topChampion = [...row.champions].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
       const topLane = [...row.lanes].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
-      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games}</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.damage / row.games).toLocaleString()}</span><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{topChampion}</span><span>{topLane}</span></div>;
+      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games}</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.damage / row.games).toLocaleString()}</span><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{topChampion}</span><span>{positionLabel(topLane, true)}</span></div>;
     })}</div></article>
     <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as React.CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>
   </section>;
@@ -1221,6 +1245,22 @@ function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & {
           <div className="audit-list">{data.audit.map((log) => <div key={log.id}><i /><span><strong>{log.actorName}</strong>{AUDIT_LABEL[log.action] ?? log.action}<small>{formatDate(log.createdAt)}</small></span></div>)}</div>
         </article>
       </div>
+      <article className="panel team-logo-panel">
+        <div className="section-heading"><div><p className="eyebrow">TEAM IDENTITY</p><h2>팀 로고 관리</h2></div><span>PNG · JPG · WebP · 최대 2MB</span></div>
+        <p className="admin-panel-help">이미지가 없으면 팀명의 앞 두 글자가 기본 로고로 표시됩니다. 업로드한 이미지는 대진표·일정·순위·통계·밴픽에 공통 적용됩니다.</p>
+        <div className="team-logo-list">
+          {data.teams.map((team) => <TeamLogoControl key={team.id} team={team} busy={busy} command={command} />)}
+        </div>
+      </article>
+      {data.tournament?.rosterMode === "registered_accounts" && (
+        <article className="panel team-leadership-panel">
+          <div className="section-heading"><div><p className="eyebrow">TEAM LEADERSHIP</p><h2>팀장·부팀장 관리</h2></div><span>팀 명단에 등록된 회원만 선택</span></div>
+          <p className="admin-panel-help">팀장과 부팀장은 소속 팀 경기의 일정을 입력하고, 결과 이미지와 승패를 등록할 수 있습니다. 일정 확정과 잘못 등록된 결과의 정정은 운영자·관리자만 가능합니다.</p>
+          <div className="team-leadership-list">
+            {data.teams.map((team) => <TeamLeadershipControl key={`${team.id}:${team.players.map((player) => player.teamRole).join(",")}`} team={team} busy={busy} command={command} />)}
+          </div>
+        </article>
+      )}
       {data.viewer?.role === "admin" && (
         <article className="panel role-panel">
           <div className="section-heading"><div><p className="eyebrow">ACCESS CONTROL</p><h2>가입 회원 및 권한</h2></div><span>{data.users.length}명</span></div>
@@ -1232,6 +1272,65 @@ function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & {
       )}
     </section>
   );
+}
+
+function TeamLeadershipControl({ team, busy, command }: { team: Team; busy: boolean; command: SharedProps["command"] }) {
+  const registeredPlayers = team.players.filter((player) => player.userId);
+  const initialCaptain = registeredPlayers.find((player) => player.teamRole === "captain")?.userId ?? "";
+  const initialVice = registeredPlayers.find((player) => player.teamRole === "vice_captain")?.userId ?? "";
+  const [captainUserId, setCaptainUserId] = useState(initialCaptain);
+  const [viceCaptainUserId, setViceCaptainUserId] = useState(initialVice);
+  const changed = captainUserId !== initialCaptain || viceCaptainUserId !== initialVice;
+
+  return <div className="team-leadership-row">
+    <div className="team-leadership-name"><TeamMark team={team} small /><strong>{team.name}</strong></div>
+    <label><span>팀장</span><select value={captainUserId} disabled={busy} onChange={(event) => setCaptainUserId(event.target.value)}><option value="">선택</option>{registeredPlayers.map((player) => <option key={player.id} value={player.userId!}>{player.nickname}</option>)}</select></label>
+    <label><span>부팀장</span><select value={viceCaptainUserId} disabled={busy} onChange={(event) => setViceCaptainUserId(event.target.value)}><option value="">지정 안 함</option>{registeredPlayers.filter((player) => player.userId !== captainUserId).map((player) => <option key={player.id} value={player.userId!}>{player.nickname}</option>)}</select></label>
+    <button type="button" className="secondary-button" disabled={busy || !changed || !captainUserId || captainUserId === viceCaptainUserId} onClick={() => command({ action: "set_team_leaders", teamId: team.id, captainUserId, viceCaptainUserId: viceCaptainUserId || null }, `${team.name}의 팀장·부팀장을 변경했습니다.`)}>변경 저장</button>
+  </div>;
+}
+
+type PendingTeamLogo = { dataUrl: string; fileName: string; width: number; height: number };
+
+async function readTeamLogoFile(file: File): Promise<PendingTeamLogo> {
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) throw new Error("PNG, JPG 또는 WebP 이미지를 선택해 주세요.");
+  if (file.size > 2 * 1024 * 1024) throw new Error("팀 로고는 2MB 이하로 올려 주세요.");
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("이미지를 읽지 못했습니다."));
+    reader.readAsDataURL(file);
+  });
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const element = new Image();
+    element.onload = () => resolve(element);
+    element.onerror = () => reject(new Error("이미지를 열지 못했습니다."));
+    element.src = dataUrl;
+  });
+  return { dataUrl, fileName: file.name, width: image.naturalWidth, height: image.naturalHeight };
+}
+
+function TeamLogoControl({ team, busy, command }: { team: Team; busy: boolean; command: SharedProps["command"] }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [pending, setPending] = useState<PendingTeamLogo | null>(null);
+  const [error, setError] = useState("");
+
+  function resetSelection() {
+    setPending(null);
+    setError("");
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  return <div className="team-logo-row">
+    <TeamMark team={team} logoOverride={pending?.dataUrl} />
+    <div className="team-logo-copy"><strong>{team.name}</strong><span>{pending?.fileName ?? team.logoFileName ?? "기본 두 글자 로고"}</span>{error && <small>{error}</small>}</div>
+    <input ref={inputRef} className="team-logo-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; setError(""); void readTeamLogoFile(file).then(setPending).catch((cause) => { resetSelection(); setError(cause instanceof Error ? cause.message : "이미지를 확인하지 못했습니다."); }); }} />
+    <div className="team-logo-actions">
+      <button type="button" className="secondary-button" disabled={busy} onClick={() => inputRef.current?.click()}>{team.logoUrl ? "이미지 변경" : "이미지 선택"}</button>
+      {pending && <><button type="button" className="primary-button compact" disabled={busy} onClick={async () => { const ok = await command({ action: "upload_team_logo", teamId: team.id, image: pending }, `${team.name} 로고를 적용했습니다.`); if (ok) resetSelection(); }}>적용</button><button type="button" className="text-button" disabled={busy} onClick={resetSelection}>취소</button></>}
+      {!pending && team.logoUrl && <button type="button" className="text-button" disabled={busy} onClick={() => { if (window.confirm(`${team.name} 로고를 기본 두 글자로 되돌릴까요?`)) void command({ action: "clear_team_logo", teamId: team.id }, `${team.name} 로고를 기본값으로 되돌렸습니다.`); }}>기본 로고로 되돌리기</button>}
+    </div>
+  </div>;
 }
 
 function AdminScheduleRow({ match, teamA, teamB, busy, command }: {
@@ -1292,7 +1391,9 @@ function PageTitle({ eyebrow, title, description }: { eyebrow: string; title: st
   return <header className="page-title"><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><span>{description}</span></header>;
 }
 
-type TeamDraft = { name: string; members: string[] };
+type TeamRole = "member" | "captain" | "vice_captain";
+type TeamMemberDraft = { riotAccountId: string; teamRole: TeamRole };
+type TeamDraft = { name: string; members: TeamMemberDraft[] };
 
 const TEAM_DRAFT_COLORS = [
   "#60a5fa", "#f97316", "#a78bfa", "#34d399", "#f43f5e", "#facc15", "#22d3ee", "#fb7185",
@@ -1302,7 +1403,7 @@ const TEAM_DRAFT_COLORS = [
 function createTeamDraft(teamIndex: number): TeamDraft {
   return {
     name: `TEAM ${teamIndex + 1}`,
-    members: Array.from({ length: 5 }, (_, playerIndex) => `선수 ${playerIndex + 1}`),
+    members: Array.from({ length: 5 }, () => ({ riotAccountId: "", teamRole: "member" as const })),
   };
 }
 
@@ -1332,7 +1433,7 @@ function BestOfSelect({ label, value, onChange }: { label: string; value: number
   return <label><span>{label}</span><select value={value} onChange={(event) => onChange(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select></label>;
 }
 
-function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onClose: () => void; onCreate: (input: TournamentCreateInput) => void }) {
+function CreateTournamentModal({ busy, rosterAccounts, onClose, onCreate }: { busy: boolean; rosterAccounts: Dashboard["rosterAccounts"]; onClose: () => void; onCreate: (input: TournamentCreateInput) => void }) {
   const [name, setName] = useState("새 소환사의 컵");
   const [startAt, setStartAt] = useState("2026-09-05T10:00");
   const [matchesPerPair, setMatchesPerPair] = useState(2);
@@ -1380,13 +1481,13 @@ function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onC
         </div>
         <div className="format-section"><div className="team-entry-heading"><h3>대회 진행 방식</h3><span>5가지 조합 중 선택</span></div><div className="format-choice-grid five-options">{FORMAT_OPTIONS.map(([id, title, detail]) => <button type="button" key={id} className={competitionFormat === id ? "selected" : ""} onClick={() => setCompetitionFormat(id)}><strong>{title}</strong><span>{detail}</span></button>)}</div></div>
         <div className="format-section"><div className="team-entry-heading"><h3>경기별 세트 기본값</h3><span>경기 시작 전 개별 변경 가능</span></div><div className="form-grid bo-grid">{hasLeague && <BestOfSelect label="리그 경기" value={leagueBestOf} onChange={setLeagueBestOf} />}{hasLeague && <BestOfSelect label="순위 결정전" value={tiebreakBestOf} onChange={setTiebreakBestOf} />}{hasBracket && <BestOfSelect label="본선 초반" value={bracketBestOf} onChange={setBracketBestOf} />}{hasBracket && <BestOfSelect label="준결승·조 결승" value={semifinalBestOf} onChange={setSemifinalBestOf} />}{hasBracket && <BestOfSelect label="최종 결승" value={finalBestOf} onChange={setFinalBestOf} />}</div></div>
-        <div className="team-entry-heading"><h3>팀 및 선수 등록</h3><span>각 팀 5명 · TOP / JGL / MID / ADC / SUP</span></div>
-        <div className="team-entry-grid">{teamDrafts.map((team, teamIndex) => <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>시드 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <label key={memberIndex}><span>{POSITIONS_LABEL[memberIndex]}</span><input value={member} onChange={(event) => { const members = [...team.members]; members[memberIndex] = event.target.value; updateTeam(teamIndex, { members }); }} /></label>)}</fieldset>)}</div>
+        <div className="team-entry-heading"><h3>팀 및 선수 등록</h3><span>각 팀 5명 · TOP / JGL / MID / AD CARRY / SUP</span></div>
+        <div className="team-entry-grid">{teamDrafts.map((team, teamIndex) => <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>시드 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <div className="registered-player-field" key={memberIndex}><label><span>{POSITIONS_LABEL[memberIndex]}</span><select value={member.riotAccountId} onChange={(event) => { const members = team.members.map((item, index) => index === memberIndex ? { ...item, riotAccountId: event.target.value } : item); updateTeam(teamIndex, { members }); }}><option value="">등록 롤 ID 선택</option>{rosterAccounts.map((account) => <option key={account.id} value={account.id}>{account.gameName}#{account.tagline} · {account.displayName}</option>)}</select></label><select aria-label={`${POSITIONS_LABEL[memberIndex]} 팀 역할`} value={member.teamRole} onChange={(event) => { const role = event.target.value as TeamRole; const members = team.members.map((item, index) => ({ ...item, teamRole: index === memberIndex ? role : role === "captain" && item.teamRole === "captain" ? "member" : role === "vice_captain" && item.teamRole === "vice_captain" ? "member" : item.teamRole })); updateTeam(teamIndex, { members }); }}><option value="member">팀원</option><option value="captain">팀장</option><option value="vice_captain">부팀장</option></select></div>)}</fieldset>)}</div>
         {hasBracket && <div className="initial-bracket-preview"><div className="team-entry-heading"><h3>최초 대진 미리보기</h3><span>{split ? "승자조 패배 팀은 패자조로 이동" : "상위 시드 자동 부전승"}</span></div><SingleEliminationPreview teams={teamDrafts.slice(0, competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length)} /></div>}
       </div>
-      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, competitionFormat, advancingTeamCount: hasBracket ? (competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length) : 0, leagueBestOf, bracketBestOf, semifinalBestOf, finalBestOf, tiebreakBestOf, teams: teamDrafts })}>{busy ? "생성 중…" : "대회 생성 및 코드 발급"}</button></footer>
+      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy || rosterAccounts.length < teamDrafts.length * 5 || teamDrafts.some((team) => team.members.some((member) => !member.riotAccountId) || team.members.filter((member) => member.teamRole === "captain").length !== 1)} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, competitionFormat, advancingTeamCount: hasBracket ? (competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length) : 0, leagueBestOf, bracketBestOf, semifinalBestOf, finalBestOf, tiebreakBestOf, teams: teamDrafts })}>{busy ? "생성 중…" : "대회 생성 및 코드 발급"}</button></footer>
     </section>
   </div>;
 }
 
-const POSITIONS_LABEL = ["TOP", "JGL", "MID", "ADC", "SUP"];
+const POSITIONS_LABEL = ["TOP", "JGL", "MID", "AD CARRY", "SUP"];

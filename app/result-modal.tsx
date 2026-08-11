@@ -2,10 +2,11 @@
 
 import { useMemo, useState } from "react";
 import { extractFixedLolScoreboard, type ExtractedScoreboardPlayer } from "../lib/scoreboard-ocr";
+import { PLAYER_POSITIONS, positionLabel } from "../lib/positions";
 
 type ResultTeam = { id: string; name: string; color: string };
 type ResultMatch = { id: string; matchNo: string; roundLabel: string; teamAId: string | null; teamBId: string | null; bestOf?: number };
-type ResultAccount = { id: string; displayName: string; riotGameName: string | null; riotTagline: string | null };
+type ResultAccount = { id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null };
 export type ResultPlayerStat = {
   id?: string;
   matchId?: string;
@@ -28,7 +29,7 @@ export type ResultPlayerStat = {
   confidence?: number;
 };
 
-const LANES = ["TOP", "JGL", "MID", "ADC", "SUP"] as const;
+const LANES = PLAYER_POSITIONS;
 
 function emptyPlayers(): ResultPlayerStat[] {
   return Array.from({ length: 10 }, (_, index) => ({
@@ -67,6 +68,7 @@ export function ResultReviewModal({
   match,
   teams,
   accounts,
+  initialSetNo = 1,
   busy,
   onClose,
   onSubmit,
@@ -74,6 +76,7 @@ export function ResultReviewModal({
   match: ResultMatch;
   teams: ResultTeam[];
   accounts: ResultAccount[];
+  initialSetNo?: number;
   busy: boolean;
   onClose: () => void;
   onSubmit: (input: Record<string, unknown>) => Promise<boolean>;
@@ -87,7 +90,7 @@ export function ResultReviewModal({
   const [side1TeamId, setSide1TeamId] = useState(match.teamAId ?? "");
   const [side2TeamId, setSide2TeamId] = useState(match.teamBId ?? "");
   const [winnerSide, setWinnerSide] = useState<1 | 2>(1);
-  const [setNo, setSetNo] = useState(1);
+  const [setNo, setSetNo] = useState(Math.min(match.bestOf ?? 1, Math.max(1, initialSetNo)));
   const [rawExtraction, setRawExtraction] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState({ value: 0, detail: "" });
@@ -111,7 +114,7 @@ export function ResultReviewModal({
   function applyExtractedRows(rows: ExtractedScoreboardPlayer[]) {
     const mapped = rows.map((row) => {
       const account = accounts.find((item) => item.riotGameName && normalize(item.riotGameName) === normalize(row.accountName));
-      return { ...row, userId: account?.id ?? null };
+      return { ...row, userId: account?.userId ?? null };
     });
     setPlayers(mapped);
     const firstKills = mapped.filter((row) => row.side === 1).reduce((sum, row) => sum + row.kills, 0);
@@ -185,8 +188,8 @@ export function ResultReviewModal({
             <div className="result-player-table">
               <div className="result-player-head"><span>라인</span><span>계정 연결</span><span>이미지 계정명</span><span>챔피언</span><span>Lv</span><span>K</span><span>D</span><span>A</span><span>딜량</span><span>골드</span><span>G/분</span></div>
               {players.map((player, index) => <div className={`result-player-row ${(player.confidence ?? 0) < 55 ? "low-confidence" : ""}`} key={player.rowOrder}>
-                <select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane}>{lane}</option>)}</select>
-                <select value={player.userId ?? ""} onChange={(event) => patchPlayer(index, { userId: event.target.value || null })}><option value="">미연결</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}</select>
+                <select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select>
+                <select value={player.userId ?? ""} onChange={(event) => patchPlayer(index, { userId: event.target.value || null })}><option value="">미연결</option>{accounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline} · {account.displayName}</option>)}</select>
                 <input value={player.accountName} onChange={(event) => patchPlayer(index, { accountName: event.target.value })} />
                 <input value={player.championName} onChange={(event) => patchPlayer(index, { championName: event.target.value })} />
                 {(["championLevel", "kills", "deaths", "assists", "damage", "gold", "goldPerMinute"] as const).map((field) => <input key={field} type="number" min="0" value={player[field]} onChange={(event) => patchPlayer(index, { [field]: Number(event.target.value) })} />)}
@@ -258,7 +261,7 @@ export function ResultDetailModal({
           const rows = stats.filter((stat) => stat.side === side);
           const team = teamMap.get(rows[0]?.teamId ?? "");
           const won = rows.some((row) => row.won);
-          return <section key={side} className={won ? "won" : ""}><header><span>{side}팀</span><strong>{team?.name ?? "팀"}</strong>{won && <b>WIN</b>}</header><div className="detail-stat-head"><span>선수</span><span>챔피언</span><span>K/D/A</span><span>KDA</span><span>딜량</span><span>골드</span><span>G/분</span></div>{rows.map((row) => <div className="detail-stat-row" key={row.rowOrder}><strong>{row.accountName}</strong><span>{row.lane} · {row.championName}</span><b>{row.kills}/{row.deaths}/{row.assists}</b><span>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(1)}</span><span>{row.damage.toLocaleString()}</span><span>{row.gold.toLocaleString()}</span><span>{row.goldPerMinute.toLocaleString()}</span></div>)}</section>;
+          return <section key={side} className={won ? "won" : ""}><header><span>{side}팀</span><strong>{team?.name ?? "팀"}</strong>{won && <b>WIN</b>}</header><div className="detail-stat-head"><span>선수</span><span>챔피언</span><span>K/D/A</span><span>KDA</span><span>딜량</span><span>골드</span><span>G/분</span></div>{rows.map((row) => <div className="detail-stat-row" key={row.rowOrder}><strong>{row.accountName}</strong><span>{positionLabel(row.lane)} · {row.championName}</span><b>{row.kills}/{row.deaths}/{row.assists}</b><span>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(1)}</span><span>{row.damage.toLocaleString()}</span><span>{row.gold.toLocaleString()}</span><span>{row.goldPerMinute.toLocaleString()}</span></div>)}</section>;
         })}</div>
       </div>
       <footer><button type="button" className="primary-button" onClick={onClose}>확인</button></footer>

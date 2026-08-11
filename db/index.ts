@@ -24,9 +24,12 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS riot_id_history (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_history_user ON riot_id_history(user_id, changed_at)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_history_lookup ON riot_id_history(game_name_normalized, tagline_normalized)`,
+  `CREATE TABLE IF NOT EXISTS riot_accounts (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE INDEX IF NOT EXISTS idx_riot_accounts_user ON riot_accounts(user_id, is_primary)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_riot_accounts_identity ON riot_accounts(game_name_normalized, tagline_normalized)`,
   `CREATE TABLE IF NOT EXISTS tournaments (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'league', start_at TEXT NOT NULL, matches_per_pair INTEGER NOT NULL DEFAULT 2, preliminary_format TEXT NOT NULL DEFAULT 'round_robin', bracket_format TEXT NOT NULL DEFAULT 'single_elimination', starter_points INTEGER NOT NULL DEFAULT 1000, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_tournaments_status_start ON tournaments(status, start_at)`,
-  `CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, name TEXT NOT NULL, color TEXT NOT NULL, seed INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, name TEXT NOT NULL, color TEXT NOT NULL, seed INTEGER, representative_user_id TEXT, logo_object_key TEXT, logo_file_name TEXT, logo_content_type TEXT, logo_file_size INTEGER, logo_width INTEGER, logo_height INTEGER, logo_updated_by TEXT, logo_updated_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_teams_tournament ON teams(tournament_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_tournament_name ON teams(tournament_id, name)`,
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY NOT NULL, team_id TEXT NOT NULL, user_id TEXT, nickname TEXT NOT NULL, position TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
@@ -196,6 +199,36 @@ async function migrateCompetitionDraftAccess(raw: D1Database) {
   await addColumnIfMissing(raw, "draft_sessions", draftColumns, "turn_expires_at", "TEXT");
 }
 
+async function migrateTeamLogos(raw: D1Database) {
+  const teamColumns = (await raw.prepare("PRAGMA table_info(teams)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_object_key", "TEXT");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_file_name", "TEXT");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_content_type", "TEXT");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_file_size", "INTEGER");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_width", "INTEGER");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_height", "INTEGER");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_updated_by", "TEXT");
+  await addColumnIfMissing(raw, "teams", teamColumns, "logo_updated_at", "TEXT");
+}
+
+async function migrateRegisteredRosters(raw: D1Database) {
+  const tournamentColumns = (await raw.prepare("PRAGMA table_info(tournaments)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "roster_mode", "TEXT NOT NULL DEFAULT 'legacy_free_text'");
+  const playerColumns = (await raw.prepare("PRAGMA table_info(players)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "players", playerColumns, "riot_account_id", "TEXT");
+  await addColumnIfMissing(raw, "players", playerColumns, "team_role", "TEXT NOT NULL DEFAULT 'member'");
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "schedule_updated_by", "TEXT");
+  await addColumnIfMissing(raw, "matches", matchColumns, "schedule_updated_at", "TEXT");
+  await raw.batch([
+    raw.prepare("CREATE TABLE IF NOT EXISTS riot_accounts (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_riot_accounts_user ON riot_accounts(user_id, is_primary)"),
+    raw.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_riot_accounts_identity ON riot_accounts(game_name_normalized, tagline_normalized)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_players_riot_account ON players(riot_account_id)"),
+    raw.prepare("INSERT OR IGNORE INTO riot_accounts (id, user_id, game_name, tagline, game_name_normalized, tagline_normalized, is_primary, created_at, updated_at) SELECT 'riot_' || id, id, riot_game_name, riot_tagline, riot_game_name_normalized, riot_tagline_normalized, 1, COALESCE(profile_completed_at, CURRENT_TIMESTAMP), COALESCE(profile_updated_at, CURRENT_TIMESTAMP) FROM users WHERE riot_game_name IS NOT NULL AND riot_tagline IS NOT NULL"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -210,6 +243,8 @@ export function ensureSchema(): Promise<void> {
         await migrateMatchScheduleConfirmation(raw);
         await migrateProfilesFormatsAndResults(raw);
         await migrateCompetitionDraftAccess(raw);
+        await migrateTeamLogos(raw);
+        await migrateRegisteredRosters(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

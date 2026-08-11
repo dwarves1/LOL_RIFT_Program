@@ -58,6 +58,25 @@ export const riotIdHistory = sqliteTable(
   ],
 );
 
+export const riotAccounts = sqliteTable(
+  "riot_accounts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    gameName: text("game_name").notNull(),
+    tagline: text("tagline").notNull(),
+    gameNameNormalized: text("game_name_normalized").notNull(),
+    taglineNormalized: text("tagline_normalized").notNull(),
+    isPrimary: integer("is_primary", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_riot_accounts_user").on(table.userId, table.isPrimary),
+    uniqueIndex("idx_riot_accounts_identity").on(table.gameNameNormalized, table.taglineNormalized),
+  ],
+);
+
 export const tournaments = sqliteTable(
   "tournaments",
   {
@@ -92,6 +111,7 @@ export const tournaments = sqliteTable(
     accessCodeHash: text("access_code_hash"),
     accessCodeHint: text("access_code_hint"),
     accessCodeUpdatedAt: text("access_code_updated_at"),
+    rosterMode: text("roster_mode", { enum: ["legacy_free_text", "registered_accounts"] }).notNull().default("registered_accounts"),
     starterPoints: integer("starter_points").notNull().default(1000),
     createdBy: text("created_by").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -108,6 +128,14 @@ export const teams = sqliteTable(
     color: text("color").notNull(),
     seed: integer("seed"),
     representativeUserId: text("representative_user_id"),
+    logoObjectKey: text("logo_object_key"),
+    logoFileName: text("logo_file_name"),
+    logoContentType: text("logo_content_type"),
+    logoFileSize: integer("logo_file_size"),
+    logoWidth: integer("logo_width"),
+    logoHeight: integer("logo_height"),
+    logoUpdatedBy: text("logo_updated_by"),
+    logoUpdatedAt: text("logo_updated_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
@@ -198,6 +226,8 @@ export const players = sqliteTable(
     id: text("id").primaryKey(),
     teamId: text("team_id").notNull(),
     userId: text("user_id"),
+    riotAccountId: text("riot_account_id"),
+    teamRole: text("team_role", { enum: ["member", "captain", "vice_captain"] }).notNull().default("member"),
     nickname: text("nickname").notNull(),
     position: text("position").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -205,6 +235,7 @@ export const players = sqliteTable(
   (table) => [
     index("idx_players_team").on(table.teamId),
     index("idx_players_user").on(table.userId),
+    index("idx_players_riot_account").on(table.riotAccountId),
   ],
 );
 
@@ -228,6 +259,8 @@ export const matches = sqliteTable(
     scheduleConfirmed: integer("schedule_confirmed", { mode: "boolean" })
       .notNull()
       .default(false),
+    scheduleUpdatedBy: text("schedule_updated_by"),
+    scheduleUpdatedAt: text("schedule_updated_at"),
     status: text("status", { enum: ["scheduled", "completed"] })
       .notNull()
       .default("scheduled"),
