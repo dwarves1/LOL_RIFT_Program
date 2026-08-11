@@ -415,7 +415,8 @@ async function isTeamLeader(actor: RequestUser, teamIds: Array<string | null>) {
 }
 
 async function canManageMatch(actor: RequestUser, match: typeof matches.$inferSelect) {
-  return isStaff(actor) || isTeamLeader(actor, [match.teamAId, match.teamBId]);
+  return (isStaff(actor) && await hasTournamentAccess(actor, match.tournamentId))
+    || isTeamLeader(actor, [match.teamAId, match.teamBId]);
 }
 
 export type TeamLogoInput = {
@@ -776,7 +777,7 @@ function calculateStandings(
 }
 
 export async function createBracket(tournamentId: string, seedOrder: string[], actor: RequestUser) {
-  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  await requireTournamentOperator(actor, tournamentId);
   return createBracketInternal(tournamentId, seedOrder, actor);
 }
 
@@ -1109,7 +1110,8 @@ export async function setMatchWinner(
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
-  const maySetWinner = isStaff(actor) || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]));
+  const maySetWinner = (isStaff(actor) && await hasTournamentAccess(actor, match.tournamentId))
+    || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]));
   if (!maySetWinner) throw new Error("이 경기의 결과를 등록할 권한이 없습니다.");
   if (!match.teamAId || !match.teamBId || ![match.teamAId, match.teamBId].includes(winnerId)) {
     throw new Error("대진에 포함된 팀을 선택해 주세요.");
@@ -1377,10 +1379,10 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
 }
 
 export async function setMatchBestOf(matchId: string, bestOf: number, actor: RequestUser) {
-  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
   if (match.status !== "scheduled") throw new Error("시작 전 경기만 세트 수를 변경할 수 있습니다.");
   const completedGames = await db.select().from(matchGames).where(and(eq(matchGames.matchId, matchId), eq(matchGames.status, "completed")));
   if (completedGames.length) throw new Error("세트 결과가 등록된 경기는 BO를 변경할 수 없습니다.");
@@ -1391,10 +1393,10 @@ export async function setMatchBestOf(matchId: string, bestOf: number, actor: Req
 }
 
 export async function confirmMatchSchedule(matchId: string, actor: RequestUser) {
-  if (!isStaff(actor)) throw new Error("운영자나 관리자만 경기 일정을 확정할 수 있습니다.");
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
   if (match.status !== "scheduled") throw new Error("진행 전 경기만 일정을 확정할 수 있습니다.");
   if (!match.teamAId || !match.teamBId) throw new Error("대진이 확정된 경기만 일정을 확정할 수 있습니다.");
   if (match.scheduleConfirmed) return;
@@ -1416,6 +1418,9 @@ export async function createBet(
   actor: RequestUser,
 ) {
   const db = getDb();
+  if (!(await hasTournamentAccess(actor, tournamentId))) {
+    throw new Error("대회 코드를 입력해 참가한 사용자만 예측할 수 있습니다.");
+  }
   const entry = await ensureTournamentEntry(actor.id, tournamentId);
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!entry || !match || match.tournamentId !== tournamentId) throw new Error("예측할 경기를 찾을 수 없습니다.");

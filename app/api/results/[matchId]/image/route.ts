@@ -29,6 +29,6 @@ export async function GET(
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
-  headers.set("cache-control", "public, max-age=3600");
+  headers.set("cache-control", "private, max-age=3600");
   return new Response(object.body, { headers });
 }

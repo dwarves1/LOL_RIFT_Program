@@ -1,6 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "../db";
-import { draftSessions, matches, teams, tournamentMembers } from "../db/schema";
+import { draftSessions, matches, players, teams, tournamentMembers } from "../db/schema";
 import type { RequestUser } from "./tournament-service";
 
 export type DraftMode = "standard" | "fearless" | "hard_fearless";
@@ -110,8 +110,19 @@ export async function joinDraft(sessionId: string, side: DraftSide, actor: Reque
   if (!team) throw new Error("팀을 찾을 수 없습니다.");
   const occupied = side === "blue" ? session.blueUserId : session.redUserId;
   if (occupied && occupied !== actor.id) throw new Error("이미 다른 대표가 참가했습니다.");
-  if (team.representativeUserId && team.representativeUserId !== actor.id && actor.role === "viewer") {
-    throw new Error("등록된 팀 대표 계정만 참가할 수 있습니다.");
+  const [player, membership] = await Promise.all([
+    db.select().from(players).where(and(eq(players.teamId, team.id), eq(players.userId, actor.id))).limit(1).then((rows) => rows[0]),
+    db.select().from(tournamentMembers).where(and(
+      eq(tournamentMembers.tournamentId, session.tournamentId!),
+      eq(tournamentMembers.userId, actor.id),
+    )).limit(1).then((rows) => rows[0]),
+  ]);
+  const isTeamLeader = player?.teamRole === "captain" || player?.teamRole === "vice_captain";
+  const isLegacyRepresentative = !team.representativeUserId
+    && membership?.teamId === team.id
+    && membership.role === "team_rep";
+  if (!(await canOperateTournament(actor, session.tournamentId)) && !isTeamLeader && !isLegacyRepresentative) {
+    throw new Error("등록된 팀장·부팀장만 해당 팀 대표로 참가할 수 있습니다.");
   }
   await db.update(teams).set({ representativeUserId: team.representativeUserId ?? actor.id }).where(eq(teams.id, team.id));
   await db.update(tournamentMembers).set({ role: "team_rep", teamId: team.id }).where(and(

@@ -9,7 +9,9 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/match-rules.test.mjs tests/positions.test.mjs tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/match-rules.test.mjs tests/positions.test.mjs tests/rendered-html.test.mjs && npm run test:integration",
+    "test:integration": "node --experimental-loader ./tests/qa-cloudflare-loader.mjs --test tests/tournament-integration.test.mjs",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

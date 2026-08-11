@@ -683,7 +683,7 @@ function MatchVersus({ match, teamMap }: { match: Match; teamMap: Map<string, Te
   );
 }
 
-function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Omit<SharedProps, "isStaff"> & { match: Match }) {
+function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick<SharedProps, "data" | "teamMap" | "busy" | "command" | "signInPath"> & { match: Match }) {
   const existing = data.bets.find((bet) => bet.matchId === match.id);
   const [teamId, setTeamId] = useState(match.teamAId ?? "");
   const [stake, setStake] = useState(100);
