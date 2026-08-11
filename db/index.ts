@@ -233,9 +233,23 @@ export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
     schemaReady = raw
-      .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
-      .first<{ name: string }>()
-      .then(async (usersTable) => {
+      .prepare(`
+        SELECT COUNT(*) AS marker_count
+        FROM sqlite_schema
+        WHERE (type = 'index' AND name = 'idx_entries_tournament_balance')
+           OR (type = 'index' AND name = 'idx_match_result_images_match_set')
+           OR (type = 'index' AND name = 'idx_players_riot_account')
+      `)
+      .first<{ marker_count: number }>()
+      .then(async (schemaState) => {
+        // Sites applies the checked-in Drizzle migrations before serving traffic.
+        // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
+        // concurrent writes can contend on D1 and hold the initial dashboard request.
+        if (Number(schemaState?.marker_count ?? 0) === 3) return;
+
+        const usersTable = await raw
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
+          .first<{ name: string }>();
         if (!usersTable) {
           await raw.batch(schemaStatements.map((statement) => raw.prepare(statement)));
         }
