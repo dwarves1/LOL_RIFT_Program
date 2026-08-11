@@ -75,7 +75,7 @@ export function DraftView({ data, teamMap, busy, command }: {
   const selected = allDrafts.find((draft) => draft.id === selectedId) ?? allDrafts[0];
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/champions", { signal: controller.signal })
+    fetch("/api/champions?catalog=current-no-jade", { cache: "no-store", signal: controller.signal })
       .then((response) => response.json() as Promise<{ champions: Champion[] }>)
       .then((payload) => setChampions(currentUniqueChampions(payload.champions)))
       .catch((error: unknown) => { if (!(error instanceof DOMException && error.name === "AbortError")) setChampions([]); });
