@@ -16,6 +16,8 @@ export type ExtractedScoreboardPlayer = {
 
 export type ExtractedScoreboard = {
   durationSeconds: number;
+  topOutcome: "win" | "loss" | "unknown";
+  topOutcomeConfidence: number;
   players: ExtractedScoreboardPlayer[];
   rawText: string;
 };
@@ -36,12 +38,68 @@ function scaledRectangle(width: number, height: number, left: number, top: numbe
   };
 }
 
+function cropForOcr(
+  image: HTMLImageElement,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  kind: "text" | "number",
+) {
+  const rectangle = scaledRectangle(image.naturalWidth, image.naturalHeight, left, top, width, height);
+  const scale = 3;
+  const padding = 8;
+  const canvas = document.createElement("canvas");
+  canvas.width = rectangle.width * scale + padding * 2;
+  canvas.height = rectangle.height * scale + padding * 2;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("이미지를 분석할 수 없습니다.");
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(
+    image,
+    rectangle.left,
+    rectangle.top,
+    rectangle.width,
+    rectangle.height,
+    padding,
+    padding,
+    rectangle.width * scale,
+    rectangle.height * scale,
+  );
+
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  const threshold = kind === "number" ? 112 : 92;
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    const red = pixels.data[index];
+    const green = pixels.data[index + 1];
+    const blue = pixels.data[index + 2];
+    const luminance = red * 0.299 + green * 0.587 + blue * 0.114;
+    const value = luminance >= threshold ? 0 : 255;
+    pixels.data[index] = value;
+    pixels.data[index + 1] = value;
+    pixels.data[index + 2] = value;
+    pixels.data[index + 3] = 255;
+  }
+  context.putImageData(pixels, 0, 0);
+  return canvas;
+}
+
 function cleanLines(value: string) {
   return value.split(/\r?\n/).map((line) => line.replace(/[<>|_[\]{}]/g, "").trim()).filter(Boolean);
 }
 
 function parseInteger(value: string | undefined) {
   return Number.parseInt((value ?? "0").replace(/[^0-9]/g, ""), 10) || 0;
+}
+
+export function parseTopOutcome(value: string) {
+  const normalized = value.normalize("NFKC").replace(/[^\p{L}]/gu, "").toLocaleLowerCase("ko-KR");
+  if (/승리|win/.test(normalized)) return "win" as const;
+  if (/패배|defeat|loss|lose/.test(normalized)) return "loss" as const;
+  return "unknown" as const;
 }
 
 function parseNumericRow(text: string) {
@@ -92,27 +150,31 @@ export async function extractFixedLolScoreboard(
       tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
     });
 
-    const durationResult = await numberWorker.recognize(image, {
-      rectangle: scaledRectangle(image.naturalWidth, image.naturalHeight, 232, 20, 92, 30),
-    });
+    let outcomeResult = await nameWorker.recognize(cropForOcr(image, 52, 0, 118, 52, "text"));
+    let topOutcome = parseTopOutcome(outcomeResult.data.text);
+    if (topOutcome === "unknown") {
+      const rawOutcomeResult = await nameWorker.recognize(image, {
+        rectangle: scaledRectangle(image.naturalWidth, image.naturalHeight, 52, 0, 118, 52),
+      });
+      if (parseTopOutcome(rawOutcomeResult.data.text) !== "unknown") {
+        outcomeResult = rawOutcomeResult;
+        topOutcome = parseTopOutcome(rawOutcomeResult.data.text);
+      }
+    }
+
+    const durationResult = await numberWorker.recognize(cropForOcr(image, 232, 20, 92, 30, "number"));
     const durationMatch = durationResult.data.text.match(/(\d{1,2})\s*[:.]\s*(\d{2})/);
     const durationSeconds = durationMatch ? parseInteger(durationMatch[1]) * 60 + parseInteger(durationMatch[2]) : 0;
     const players: ExtractedScoreboardPlayer[] = [];
-    const raw: string[] = [durationResult.data.text];
+    const raw: string[] = [outcomeResult.data.text, durationResult.data.text];
 
     for (let index = 0; index < ROW_CENTERS.length; index += 1) {
       const center = ROW_CENTERS[index];
       onProgress?.(10 + index * 8, `${index + 1}/10 선수 행 분석 중`);
       const [nameResult, numericResult, levelResult] = await Promise.all([
-        nameWorker.recognize(image, {
-          rectangle: scaledRectangle(image.naturalWidth, image.naturalHeight, 184, center - 20, 175, 40),
-        }),
-        numberWorker.recognize(image, {
-          rectangle: scaledRectangle(image.naturalWidth, image.naturalHeight, 700, center - 18, 286, 42),
-        }),
-        numberWorker.recognize(image, {
-          rectangle: scaledRectangle(image.naturalWidth, image.naturalHeight, 70, center - 17, 30, 34),
-        }),
+        nameWorker.recognize(cropForOcr(image, 184, center - 20, 175, 40, "text")),
+        numberWorker.recognize(cropForOcr(image, 700, center - 18, 286, 42, "number")),
+        numberWorker.recognize(cropForOcr(image, 70, center - 17, 30, 34, "number")),
       ]);
       const lines = cleanLines(nameResult.data.text);
       const numbers = parseNumericRow(numericResult.data.text);
@@ -130,7 +192,13 @@ export async function extractFixedLolScoreboard(
       });
     }
     onProgress?.(100, "자동 추출 완료");
-    return { durationSeconds, players, rawText: raw.join("\n") };
+    return {
+      durationSeconds,
+      topOutcome,
+      topOutcomeConfidence: Math.round(outcomeResult.data.confidence),
+      players,
+      rawText: raw.join("\n"),
+    };
   } finally {
     await Promise.all([nameWorker.terminate(), numberWorker.terminate()]);
   }

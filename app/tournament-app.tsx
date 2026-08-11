@@ -814,19 +814,23 @@ function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, busy, command, d
         {match.phase !== "league" && <strong>{match.matchNo}</strong>}
         <span>{formatDate(match.scheduledAt)}</span>
         <small>{match.roundLabel}</small>
-        <b>BO{match.bestOf} · {match.seriesScoreA}:{match.seriesScoreB}</b>
+        <b>BO{match.bestOf}</b>
       </div>
       <div className="schedule-teams">
-        {[teamA, teamB].map((team, index) => {
-          const isWinner = team && match.winnerId === team.id;
-          return (
-            <div key={team?.id ?? index} className={isWinner ? "winner" : ""}>
-              <TeamMark team={team} small />
-              <strong>{team?.name ?? "대진 대기"}</strong>
-              {isWinner && <span>WIN</span>}
-            </div>
-          );
-        })}
+        <div className={`schedule-team team-a ${teamA && match.winnerId === teamA.id ? "winner" : ""}`}>
+          <TeamMark team={teamA} small />
+          <strong>{teamA?.name ?? "대진 대기"}</strong>
+          {teamA && match.winnerId === teamA.id && <span>WIN</span>}
+        </div>
+        <div className="schedule-score" aria-label={`세트 점수 ${match.seriesScoreA} 대 ${match.seriesScoreB}`}>
+          <small>{match.status === "completed" ? "FINAL" : "SCORE"}</small>
+          <strong>{match.seriesScoreA}<i>:</i>{match.seriesScoreB}</strong>
+        </div>
+        <div className={`schedule-team team-b ${teamB && match.winnerId === teamB.id ? "winner" : ""}`}>
+          <TeamMark team={teamB} small />
+          <strong>{teamB?.name ?? "대진 대기"}</strong>
+          {teamB && match.winnerId === teamB.id && <span>WIN</span>}
+        </div>
       </div>
       <div className="match-actions">
         {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}

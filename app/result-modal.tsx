@@ -89,7 +89,8 @@ export function ResultReviewModal({
   const [duration, setDuration] = useState("00:00");
   const [side1TeamId, setSide1TeamId] = useState(match.teamAId ?? "");
   const [side2TeamId, setSide2TeamId] = useState(match.teamBId ?? "");
-  const [winnerSide, setWinnerSide] = useState<1 | 2>(1);
+  const [winnerSide, setWinnerSide] = useState<1 | 2 | null>(null);
+  const [detectedOutcome, setDetectedOutcome] = useState<{ value: "win" | "loss" | "unknown"; confidence: number }>({ value: "unknown", confidence: 0 });
   const [setNo, setSetNo] = useState(Math.min(match.bestOf ?? 1, Math.max(1, initialSetNo)));
   const [rawExtraction, setRawExtraction] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
@@ -111,15 +112,15 @@ export function ResultReviewModal({
     setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? { ...player, ...patch } : player));
   }
 
-  function applyExtractedRows(rows: ExtractedScoreboardPlayer[]) {
+  function applyExtractedRows(rows: ExtractedScoreboardPlayer[], topOutcome: "win" | "loss" | "unknown", topOutcomeConfidence: number) {
     const mapped = rows.map((row) => {
       const account = accounts.find((item) => item.riotGameName && normalize(item.riotGameName) === normalize(row.accountName));
       return { ...row, userId: account?.userId ?? null };
     });
     setPlayers(mapped);
-    const firstKills = mapped.filter((row) => row.side === 1).reduce((sum, row) => sum + row.kills, 0);
-    const secondKills = mapped.filter((row) => row.side === 2).reduce((sum, row) => sum + row.kills, 0);
-    setWinnerSide(firstKills >= secondKills ? 1 : 2);
+    const reliableOutcome = topOutcomeConfidence >= 50 ? topOutcome : "unknown";
+    setDetectedOutcome({ value: reliableOutcome, confidence: topOutcomeConfidence });
+    setWinnerSide(reliableOutcome === "win" ? 1 : reliableOutcome === "loss" ? 2 : null);
   }
 
   async function analyzeFile(file: File) {
@@ -151,18 +152,20 @@ export function ResultReviewModal({
     setProgress({ value: 1, detail: "OCR 엔진을 준비하는 중" });
     try {
       const extracted = await extractFixedLolScoreboard(image, (value, detail) => setProgress({ value, detail }));
-      applyExtractedRows(extracted.players);
+      applyExtractedRows(extracted.players, extracted.topOutcome, extracted.topOutcomeConfidence);
       setDuration(durationLabel(extracted.durationSeconds));
       setRawExtraction(extracted.rawText);
     } catch (error) {
       setPlayers(emptyPlayers());
+      setDetectedOutcome({ value: "unknown", confidence: 0 });
+      setWinnerSide(null);
       setAnalysisError(`${error instanceof Error ? error.message : "자동 인식에 실패했습니다."} 아래 표에서 직접 입력할 수 있습니다.`);
     } finally {
       setAnalyzing(false);
     }
   }
 
-  const valid = dataUrl && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && players.every((player) => player.accountName.trim() && player.championName.trim());
+  const valid = dataUrl && winnerSide && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && players.every((player) => player.accountName.trim() && player.championName.trim());
   return (
     <div className="modal-backdrop result-backdrop" role="presentation">
       <section className="result-review-modal" role="dialog" aria-modal="true" aria-labelledby="result-review-title">
@@ -184,7 +187,12 @@ export function ResultReviewModal({
               <button type="button" className="side-swap" onClick={() => { setSide1TeamId(side2TeamId); setSide2TeamId(side1TeamId); }}>⇄</button>
               <label><span>이미지 2팀</span><select value={side2TeamId} onChange={(event) => setSide2TeamId(event.target.value)}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
             </div>
-            <div className="winner-review"><span>승리팀 확인</span>{([1, 2] as const).map((side) => <button type="button" key={side} className={winnerSide === side ? "active" : ""} onClick={() => setWinnerSide(side)}>{side === 1 ? availableTeams.find((team) => team.id === side1TeamId)?.name : availableTeams.find((team) => team.id === side2TeamId)?.name}<small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></button>)}</div>
+            <div className={`outcome-detection ${detectedOutcome.value}`}>
+              <span>이미지 상단 판독</span>
+              <strong>{detectedOutcome.value === "win" ? "승리 · 1팀을 승리팀으로 선택" : detectedOutcome.value === "loss" ? "패배 · 2팀을 승리팀으로 선택" : "판독 불가 · 승리팀을 직접 선택해 주세요"}</strong>
+              {detectedOutcome.confidence > 0 && <small>신뢰도 {detectedOutcome.confidence}%</small>}
+            </div>
+            <div className="winner-review"><span>최종 승리팀 확인</span>{([1, 2] as const).map((side) => <button type="button" key={side} className={winnerSide === side ? "active" : ""} onClick={() => setWinnerSide(side)}><b>{side}팀</b>{side === 1 ? availableTeams.find((team) => team.id === side1TeamId)?.name : availableTeams.find((team) => team.id === side2TeamId)?.name}<small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></button>)}</div>
             <div className="result-player-table">
               <div className="result-player-head"><span>라인</span><span>계정 연결</span><span>이미지 계정명</span><span>챔피언</span><span>Lv</span><span>K</span><span>D</span><span>A</span><span>딜량</span><span>골드</span><span>G/분</span></div>
               {players.map((player, index) => <div className={`result-player-row ${(player.confidence ?? 0) < 55 ? "low-confidence" : ""}`} key={player.rowOrder}>
@@ -199,6 +207,7 @@ export function ResultReviewModal({
           </div>
         </div>
         <footer><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="button" className="primary-button" disabled={busy || analyzing || !valid} onClick={async () => {
+          if (!winnerSide) return;
           const ok = await onSubmit({
             matchId: match.id,
             setNo,
@@ -223,7 +232,7 @@ export function ResultReviewModal({
               gold: player.gold,
               goldPerMinute: player.goldPerMinute,
             })),
-            extraction: { rawText: rawExtraction, confidence: players.map((player) => player.confidence ?? 0) },
+            extraction: { rawText: rawExtraction, confidence: players.map((player) => player.confidence ?? 0), topOutcome: detectedOutcome.value, topOutcomeConfidence: detectedOutcome.confidence },
           });
           if (ok) onClose();
         }}>{busy ? "등록 중…" : "검토 완료 및 결과 등록"}</button></footer>

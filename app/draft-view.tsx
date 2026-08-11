@@ -72,7 +72,14 @@ export function DraftView({ data, teamMap, busy, command }: {
   const [clock, setClock] = useState(0);
   const allDrafts = useMemo(() => [...data.draftSessions, ...data.practiceDrafts], [data.draftSessions, data.practiceDrafts]);
   const selected = allDrafts.find((draft) => draft.id === selectedId) ?? allDrafts[0];
-  useEffect(() => { fetch("/api/champions").then((response) => response.json() as Promise<{ champions: Champion[] }>).then((payload) => setChampions(payload.champions)).catch(() => setChampions([])); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/champions", { signal: controller.signal })
+      .then((response) => response.json() as Promise<{ champions: Champion[] }>)
+      .then((payload) => setChampions([...new Map(payload.champions.map((champion) => [champion.id, champion])).values()]))
+      .catch((error: unknown) => { if (!(error instanceof DOMException && error.name === "AbortError")) setChampions([]); });
+    return () => controller.abort();
+  }, []);
   useEffect(() => { const timer = window.setInterval(() => setClock(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
 
   const sets = selected ? parseSets(selected) : [];
