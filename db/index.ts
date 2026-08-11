@@ -133,6 +133,69 @@ async function migrateProfilesFormatsAndResults(raw: D1Database) {
   await addColumnIfMissing(raw, "match_result_images", resultImageColumns, "duration_seconds", "INTEGER");
 }
 
+async function migrateCompetitionDraftAccess(raw: D1Database) {
+  const tournamentColumns = (await raw.prepare("PRAGMA table_info(tournaments)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "competition_format", "TEXT NOT NULL DEFAULT 'league_then_bracket'");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "advancing_team_count", "INTEGER");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "league_best_of", "INTEGER NOT NULL DEFAULT 1");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "bracket_best_of", "INTEGER NOT NULL DEFAULT 3");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "semifinal_best_of", "INTEGER NOT NULL DEFAULT 5");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "final_best_of", "INTEGER NOT NULL DEFAULT 5");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "tiebreak_best_of", "INTEGER NOT NULL DEFAULT 1");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "access_code_hash", "TEXT");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "access_code_hint", "TEXT");
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "access_code_updated_at", "TEXT");
+
+  const teamColumns = (await raw.prepare("PRAGMA table_info(teams)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "teams", teamColumns, "representative_user_id", "TEXT");
+
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "match_type", "TEXT NOT NULL DEFAULT 'regular'");
+  await addColumnIfMissing(raw, "matches", matchColumns, "best_of", "INTEGER NOT NULL DEFAULT 1");
+  await addColumnIfMissing(raw, "matches", matchColumns, "series_score_a", "INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing(raw, "matches", matchColumns, "series_score_b", "INTEGER NOT NULL DEFAULT 0");
+
+  const resultImageColumns = (await raw.prepare("PRAGMA table_info(match_result_images)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "match_result_images", resultImageColumns, "set_no", "INTEGER NOT NULL DEFAULT 1");
+  await raw.prepare("DROP INDEX IF EXISTS idx_match_result_images_match").run();
+  await raw.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_match_result_images_match_set ON match_result_images(match_id, set_no)").run();
+
+  const teamStatColumns = (await raw.prepare("PRAGMA table_info(match_team_stats)").all<{ name: string }>()).results;
+  if (!teamStatColumns.some((column) => column.name === "set_no")) {
+    await raw.batch([
+      raw.prepare("CREATE TABLE match_team_stats_v2 (match_id TEXT NOT NULL, set_no INTEGER NOT NULL DEFAULT 1, side INTEGER NOT NULL, team_id TEXT NOT NULL, kills INTEGER NOT NULL, deaths INTEGER NOT NULL, assists INTEGER NOT NULL, gold INTEGER NOT NULL, won INTEGER NOT NULL, PRIMARY KEY(match_id, set_no, side))"),
+      raw.prepare("INSERT INTO match_team_stats_v2 (match_id, set_no, side, team_id, kills, deaths, assists, gold, won) SELECT match_id, 1, side, team_id, kills, deaths, assists, gold, won FROM match_team_stats"),
+      raw.prepare("DROP TABLE match_team_stats"),
+      raw.prepare("ALTER TABLE match_team_stats_v2 RENAME TO match_team_stats"),
+      raw.prepare("CREATE INDEX idx_match_team_stats_team ON match_team_stats(team_id, match_id)"),
+    ]);
+  }
+
+  const playerStatColumns = (await raw.prepare("PRAGMA table_info(player_match_stats)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "player_match_stats", playerStatColumns, "set_no", "INTEGER NOT NULL DEFAULT 1");
+  await raw.prepare("DROP INDEX IF EXISTS idx_player_match_stats_row").run();
+  await raw.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_player_match_stats_row ON player_match_stats(match_id, set_no, row_order)").run();
+
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS match_games (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, set_no INTEGER NOT NULL, blue_team_id TEXT, red_team_id TEXT, winner_team_id TEXT, status TEXT NOT NULL DEFAULT 'scheduled', completed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_match_games_match_set ON match_games(match_id, set_no)`,
+    `CREATE INDEX IF NOT EXISTS idx_match_games_match ON match_games(match_id, set_no)`,
+    `CREATE TABLE IF NOT EXISTS tournament_members (tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'viewer', team_id TEXT, joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tournament_id, user_id))`,
+    `CREATE INDEX IF NOT EXISTS idx_tournament_members_user ON tournament_members(user_id, tournament_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tournament_members_team ON tournament_members(team_id)`,
+    `CREATE TABLE IF NOT EXISTS draft_sessions (id TEXT PRIMARY KEY NOT NULL, context TEXT NOT NULL, tournament_id TEXT, match_id TEXT, owner_user_id TEXT NOT NULL, name TEXT, mode TEXT NOT NULL, best_of INTEGER NOT NULL, timer_mode TEXT NOT NULL, timer_seconds INTEGER, undo_enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'lobby', blue_team_id TEXT, red_team_id TEXT, blue_user_id TEXT, red_user_id TEXT, current_set INTEGER NOT NULL DEFAULT 1, current_step INTEGER NOT NULL DEFAULT 0, turn_expires_at TEXT, version INTEGER NOT NULL DEFAULT 1, state_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE INDEX IF NOT EXISTS idx_draft_sessions_match ON draft_sessions(match_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_draft_sessions_owner ON draft_sessions(owner_user_id, context, updated_at)`,
+    `INSERT OR IGNORE INTO tournament_members (tournament_id, user_id, role) SELECT id, created_by, 'owner' FROM tournaments`,
+    `INSERT OR IGNORE INTO tournament_members (tournament_id, user_id, role) SELECT tournament_id, user_id, 'viewer' FROM tournament_entries`,
+    `INSERT OR IGNORE INTO match_games (id, match_id, set_no, blue_team_id, red_team_id, winner_team_id, status, completed_at) SELECT 'game_' || id, id, 1, team_a_id, team_b_id, winner_id, CASE WHEN status = 'completed' THEN 'completed' ELSE 'scheduled' END, completed_at FROM matches`,
+    `UPDATE tournaments SET competition_format = CASE WHEN preliminary_format = 'none' AND bracket_format = 'winner_loser_split' THEN 'split_only' WHEN preliminary_format = 'none' THEN 'bracket_only' WHEN bracket_format = 'winner_loser_split' THEN 'league_then_split' ELSE 'league_then_bracket' END`,
+  ];
+  await raw.batch(statements.map((statement) => raw.prepare(statement)));
+  const draftColumns = (await raw.prepare("PRAGMA table_info(draft_sessions)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "draft_sessions", draftColumns, "turn_expires_at", "TEXT");
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -146,6 +209,7 @@ export function ensureSchema(): Promise<void> {
         await migrateTournamentPoints(raw);
         await migrateMatchScheduleConfirmation(raw);
         await migrateProfilesFormatsAndResults(raw);
+        await migrateCompetitionDraftAccess(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

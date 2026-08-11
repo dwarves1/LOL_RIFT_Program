@@ -4,9 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isPredictionOpen } from "../lib/match-rules";
 import { ProfileModal } from "./profile-modal";
 import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
+import { DraftView, MatchDraftCreator } from "./draft-view";
 
 type Role = "viewer" | "operator" | "admin";
-type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "stats" | "points" | "admin";
+type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "stats" | "draft" | "points" | "admin";
 
 type Viewer = {
   id: string;
@@ -30,7 +31,15 @@ type Tournament = {
   matchesPerPair: number;
   starterPoints: number;
   preliminaryFormat: "none" | "round_robin";
-  bracketFormat: "single_elimination" | "winner_loser_split";
+  bracketFormat: "none" | "single_elimination" | "winner_loser_split";
+  competitionFormat: CompetitionFormat;
+  advancingTeamCount: number | null;
+  leagueBestOf: number;
+  bracketBestOf: number;
+  semifinalBestOf: number;
+  finalBestOf: number;
+  tiebreakBestOf: number;
+  accessCodeHint: string | null;
 };
 
 type Team = {
@@ -47,6 +56,10 @@ type Match = {
   phase: "league" | "bracket";
   matchNo: string;
   roundLabel: string;
+  matchType: "regular" | "tiebreaker";
+  bestOf: number;
+  seriesScoreA: number;
+  seriesScoreB: number;
   teamAId: string | null;
   teamBId: string | null;
   scheduledAt: string;
@@ -55,6 +68,31 @@ type Match = {
   winnerId: string | null;
   loserId: string | null;
   sortOrder: number;
+};
+
+type DraftSession = {
+  id: string;
+  context: "match" | "practice";
+  tournamentId: string | null;
+  matchId: string | null;
+  ownerUserId: string;
+  name: string | null;
+  mode: "standard" | "fearless" | "hard_fearless";
+  bestOf: number;
+  timerMode: "limited" | "unlimited";
+  timerSeconds: number | null;
+  undoEnabled: boolean;
+  status: "lobby" | "active" | "completed";
+  blueTeamId: string | null;
+  redTeamId: string | null;
+  blueUserId: string | null;
+  redUserId: string | null;
+  currentSet: number;
+  currentStep: number;
+  turnExpiresAt: string | null;
+  version: number;
+  stateJson: string;
+  updatedAt: string;
 };
 
 type Standing = {
@@ -67,6 +105,7 @@ type Standing = {
   losses: number;
   winRate: number;
   tied: boolean;
+  tiebreakWins: number;
 };
 
 type Bet = {
@@ -85,10 +124,13 @@ type Dashboard = {
   tournament: Tournament | null;
   teams: Team[];
   matches: Match[];
+  games: Array<{ id: string; matchId: string; setNo: number; blueTeamId: string | null; redTeamId: string | null; winnerTeamId: string | null; status: "scheduled" | "completed" | "cancelled" }>;
+  draftSessions: DraftSession[];
+  practiceDrafts: DraftSession[];
   standings: Standing[];
   placements: Array<{ rank: number; teamId: string }>;
-  resultImages: Array<{ id: string; matchId: string; fileName: string; width: number | null; height: number | null; durationSeconds: number | null; reviewedAt: string; imageUrl: string }>;
-  teamStats: Array<{ matchId: string; side: number; teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
+  resultImages: Array<{ id: string; matchId: string; setNo: number; fileName: string; width: number | null; height: number | null; durationSeconds: number | null; reviewedAt: string; imageUrl: string }>;
+  teamStats: Array<{ matchId: string; setNo: number; side: number; teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
   playerStats: ResultPlayerStat[];
   accounts: Array<{ id: string; displayName: string; riotGameName: string | null; riotTagline: string | null }>;
   bets: Bet[];
@@ -135,6 +177,7 @@ const NAV_ITEMS: Array<{ id: Tab; label: string; short: string }> = [
   { id: "bracket", label: "토너먼트", short: "대진" },
   { id: "teams", label: "팀 · 선수", short: "팀" },
   { id: "stats", label: "경기 통계", short: "통계" },
+  { id: "draft", label: "밴픽", short: "밴픽" },
   { id: "points", label: "포인트 예측", short: "포인트" },
 ];
 
@@ -231,6 +274,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   const [showProfile, setShowProfile] = useState(false);
   const [reviewMatch, setReviewMatch] = useState<Match | null>(null);
   const [detailMatch, setDetailMatch] = useState<Match | null>(null);
+  const [joinCode, setJoinCode] = useState("");
   const activeLoad = useRef<AbortController | null>(null);
 
   const load = useCallback(async (tournamentId?: string) => {
@@ -289,9 +333,9 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as { ok?: boolean; error?: string; tournamentId?: string };
+      const result = (await response.json()) as { ok?: boolean; error?: string; tournamentId?: string; accessCode?: string; draftId?: string };
       if (!response.ok) throw new Error(result.error ?? "요청을 처리하지 못했습니다.");
-      setMessage(successMessage);
+      setMessage(result.accessCode ? `${successMessage} 대회 코드: ${result.accessCode}` : successMessage);
       await load(result.tournamentId ?? selectedTournament);
       return true;
     } catch (error) {
@@ -312,12 +356,14 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         <p className="eyebrow">LOL RIFT PROGRAM</p>
         <h1>첫 대회를 만들어 주세요</h1>
         <p>샘플 데이터 없이 관리자가 등록한 대회만 표시됩니다.</p>
-        {viewer?.role === "admin" ? (
-          <button className="primary-button" onClick={() => setShowCreate(true)}>＋ 새 대회 생성</button>
-        ) : viewer ? (
-          <span className="first-tournament-help">관리자 계정이 대회를 생성하면 참가할 수 있습니다.</span>
+        {viewer ? (
+          <div className="join-tournament-box">
+            <input value={joinCode} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="RIFT-XXXX-XXXX" aria-label="대회 코드" />
+            <button className="primary-button" disabled={busy || !joinCode.trim()} onClick={() => command({ action: "join_tournament", code: joinCode }, "대회 참가가 완료되었습니다.")}>대회 코드로 참가</button>
+            {(viewer.role === "admin" || viewer.role === "operator") && <button className="secondary-button" onClick={() => setShowCreate(true)}>＋ 새 대회 생성</button>}
+          </div>
         ) : (
-          <a className="primary-button" href={signInPath}>관리자 로그인</a>
+          <a className="primary-button" href={signInPath}>로그인 후 대회 코드 입력</a>
         )}
         {showCreate && (
           <CreateTournamentModal
@@ -344,7 +390,6 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
 
   const viewer = data.viewer;
   const isStaff = viewer?.role === "operator" || viewer?.role === "admin";
-  const isAdmin = viewer?.role === "admin";
   const teamMap = new Map(data.teams.map((team) => [team.id, team]));
   const leagueMatches = data.matches.filter((match) => match.phase === "league");
   const bracketMatches = data.matches.filter((match) => match.phase === "bracket");
@@ -425,7 +470,8 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
               ))}
             </select>
           </div>
-          {isAdmin && <button className="primary-button compact" onClick={() => setShowCreate(true)}>＋ 새 대회</button>}
+          {isStaff && <button className="primary-button compact" onClick={() => setShowCreate(true)}>＋ 새 대회</button>}
+          {viewer && <div className="join-inline"><input value={joinCode} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="대회 코드" /><button onClick={() => command({ action: "join_tournament", code: joinCode }, "대회 참가가 완료되었습니다.")}>참가</button></div>}
         </section>
 
         {activeTab === "home" && (
@@ -443,6 +489,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         {activeTab === "bracket" && <BracketView {...shared} matches={bracketMatches} />}
         {activeTab === "teams" && <TeamsView data={data} />}
         {activeTab === "stats" && <StatsView data={data} teamMap={teamMap} />}
+        {activeTab === "draft" && <DraftView data={data} teamMap={teamMap} busy={busy} command={command} />}
         {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} />}
         {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} />}
       </main>
@@ -454,12 +501,12 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
             {item.short}
           </button>
         ))}
-        <button className={["teams", "stats", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab(isStaff ? "admin" : "stats")}>
+        <button className={["teams", "stats", "draft", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab("draft")}>
           <span>•••</span>더보기
         </button>
       </nav>
 
-      {showCreate && isAdmin && (
+      {showCreate && isStaff && (
         <CreateTournamentModal
           busy={busy}
           onClose={() => setShowCreate(false)}
@@ -489,13 +536,13 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         />
       )}
       {detailMatch && (() => {
-        const resultImage = data.resultImages.find((image) => image.matchId === detailMatch.id);
+        const resultImage = [...data.resultImages].filter((image) => image.matchId === detailMatch.id).sort((a, b) => b.setNo - a.setNo)[0];
         return resultImage ? <ResultDetailModal
           match={detailMatch}
           teams={data.teams}
           imageUrl={resultImage.imageUrl}
           durationSeconds={resultImage.durationSeconds}
-          stats={data.playerStats.filter((stat) => stat.matchId === detailMatch.id)}
+          stats={data.playerStats.filter((stat) => stat.matchId === detailMatch.id && stat.setNo === resultImage.setNo)}
           onClose={() => setDetailMatch(null)}
         /> : null;
       })()}
@@ -535,7 +582,11 @@ function HomeView({
   const nextMatch = upcoming[0];
   const lastResults = data.matches.filter((match) => match.status === "completed").slice(-3).reverse();
   const teamCount = data.teams.length;
-  const bracketFormat = data.tournament?.bracketFormat === "winner_loser_split" ? "승·패자 분기형 토너먼트" : "일반 토너먼트";
+  const bracketFormat = data.tournament?.bracketFormat === "none"
+    ? "본선 없이 리그 순위를 확정합니다."
+    : data.tournament?.bracketFormat === "winner_loser_split"
+      ? "승·패자 분기형 토너먼트로 이어집니다."
+      : "일반 토너먼트로 이어집니다.";
   const preliminaryLabel = data.tournament?.preliminaryFormat === "round_robin"
     ? `서로 ${data.tournament?.matchesPerPair}경기 · 총 ${data.summary.leagueTotal}경기 후`
     : "리그전 없이 바로";
@@ -659,7 +710,7 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, openResultReview,
       <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="경기는 시간순으로 표시되며, 남은 경기와 진행한 경기를 나누어 확인할 수 있습니다." />
       <div className="segmented-control">
         {data.tournament?.preliminaryFormat === "round_robin" && <button className={phase === "league" ? "active" : ""} onClick={() => setPhase("league")}>리그전 <span>{leagueMatches.length}</span></button>}
-        <button className={phase === "bracket" ? "active" : ""} onClick={() => setPhase("bracket")}>토너먼트 <span>{bracketMatches.length}</span></button>
+        {data.tournament?.bracketFormat !== "none" && <button className={phase === "bracket" ? "active" : ""} onClick={() => setPhase("bracket")}>토너먼트 <span>{bracketMatches.length}</span></button>}
       </div>
       {visible.length ? (
         <div className="schedule-groups">
@@ -719,7 +770,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
       {groupMatches.length ? (
         <div className="schedule-list">
           {groupMatches.map((match) => (
-            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
           ))}
         </div>
       ) : (
@@ -729,7 +780,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   );
 }
 
-function ScheduleCard({ match, teamMap, isStaff, busy, command, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"]; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
+function ScheduleCard({ match, teamMap, isStaff, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
   return (
@@ -738,6 +789,7 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command, hasDetail, openR
         {match.phase !== "league" && <strong>{match.matchNo}</strong>}
         <span>{formatDate(match.scheduledAt)}</span>
         <small>{match.roundLabel}</small>
+        <b>BO{match.bestOf} · {match.seriesScoreA}:{match.seriesScoreB}</b>
       </div>
       <div className="schedule-teams">
         {[teamA, teamB].map((team, index) => {
@@ -753,7 +805,8 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command, hasDetail, openR
       </div>
       <div className="match-actions">
         {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
-        {isStaff && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy} onClick={() => openResultReview(match)}>{hasDetail ? "결과 이미지 수정" : "결과 이미지 등록"}</button>}
+        {isStaff && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy} onClick={() => openResultReview(match)}>{hasDetail ? "세트 결과 추가·수정" : "세트 결과 이미지 등록"}</button>}
+        {teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : isStaff ? <MatchDraftCreator match={match} busy={busy} command={command} /> : null)}
         {isStaff && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} />}
         {match.status === "scheduled" && (
           <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
@@ -765,7 +818,7 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command, hasDetail, openR
         ) : (
           <span className="result-waiting">경기 예정</span>
         )}
-        {isStaff && teamA && teamB && (
+        {isStaff && teamA && teamB && match.bestOf === 1 && (
           <div className="winner-buttons">
             {[teamA, teamB].map((team) => (
               <button
@@ -795,8 +848,11 @@ function toDateTimeLocal(value: string) {
 
 function MatchScheduleEditor({ match, busy, command }: { match: Match; busy: boolean; command: SharedProps["command"] }) {
   const [scheduledAt, setScheduledAt] = useState(toDateTimeLocal(match.scheduledAt));
+  const [bestOf, setBestOf] = useState(match.bestOf);
   return (
     <div className="schedule-editor">
+      <select value={bestOf} aria-label={`${match.matchNo} 세트 수`} onChange={(event) => setBestOf(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select>
+      <button disabled={busy || bestOf === match.bestOf} onClick={() => command({ action: "set_match_best_of", matchId: match.id, bestOf }, `BO${bestOf}로 변경했습니다.`)}>BO 저장</button>
       <input
         type="datetime-local"
         value={scheduledAt}
@@ -819,6 +875,10 @@ function MatchScheduleEditor({ match, busy, command }: { match: Match; busy: boo
 function StandingsView({ data, busy, command }: SharedProps) {
   const [seedOrder, setSeedOrder] = useState(data.standings.map((row) => row.teamId));
   const [selectedTeamId, setSelectedTeamId] = useState(data.standings[0]?.teamId ?? "");
+  const [tiebreakTeamA, setTiebreakTeamA] = useState(data.standings.filter((row) => row.tied)[0]?.teamId ?? "");
+  const [tiebreakTeamB, setTiebreakTeamB] = useState(data.standings.filter((row) => row.tied)[1]?.teamId ?? "");
+  const [tiebreakAt, setTiebreakAt] = useState(toDateTimeLocal(data.matches.at(-1)?.scheduledAt ?? data.tournament!.startAt));
+  const [tiebreakBestOf, setTiebreakBestOf] = useState(data.tournament?.tiebreakBestOf ?? 1);
   // Reset the editable seed list whenever refreshed standings arrive.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setSeedOrder(data.standings.map((row) => row.teamId)), [data.standings]);
@@ -827,7 +887,8 @@ function StandingsView({ data, busy, command }: SharedProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedTeamId((current) => data.teams.some((team) => team.id === current) ? current : (data.standings[0]?.teamId ?? ""));
   }, [data.standings, data.teams]);
-  const allLeagueDone = data.summary.leagueTotal > 0 && data.summary.leagueCompleted === data.summary.leagueTotal;
+  const regularMatches = data.matches.filter((match) => match.phase === "league" && match.matchType === "regular");
+  const allLeagueDone = regularMatches.length > 0 && regularMatches.every((match) => match.status === "completed");
   const hasBracket = data.summary.bracketTotal > 0;
   const canOperate = data.viewer?.role === "operator" || data.viewer?.role === "admin";
   const orderRows = seedOrder.map((id) => data.standings.find((row) => row.teamId === id)!).filter(Boolean);
@@ -848,6 +909,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
   return (
     <section className="page-section">
       <PageTitle eyebrow="LEAGUE TABLE" title="리그 순위" description="동률 순위는 자동 결정하지 않으며 운영자가 최종 시드를 확정합니다." />
+      {allLeagueDone && canOperate && data.standings.some((row) => row.tied) && <article className="panel tiebreak-creator"><div className="section-heading"><div><p className="eyebrow">TIEBREAKER</p><h2>순위 결정전 추가</h2></div></div><div className="form-grid"><label><span>팀 A</span><select value={tiebreakTeamA} onChange={(event) => setTiebreakTeamA(event.target.value)}>{data.standings.filter((row) => row.tied).map((row) => <option key={row.teamId} value={row.teamId}>{row.teamName}</option>)}</select></label><label><span>팀 B</span><select value={tiebreakTeamB} onChange={(event) => setTiebreakTeamB(event.target.value)}>{data.standings.filter((row) => row.tied).map((row) => <option key={row.teamId} value={row.teamId}>{row.teamName}</option>)}</select></label><label><span>일정</span><input type="datetime-local" value={tiebreakAt} onChange={(event) => setTiebreakAt(event.target.value)} /></label><BestOfSelect label="세트" value={tiebreakBestOf} onChange={setTiebreakBestOf} /><button className="primary-button" disabled={busy || tiebreakTeamA === tiebreakTeamB} onClick={() => command({ action: "create_tiebreaker", tournamentId: data.tournament!.id, teamAId: tiebreakTeamA, teamBId: tiebreakTeamB, scheduledAt: new Date(tiebreakAt).toISOString(), bestOf: tiebreakBestOf }, "순위 결정전을 추가했습니다.")}>결정전 생성</button></div></article>}
       <div className="standings-layout">
         <div className="standings-main-column">
           <article className="panel standings-full">
@@ -886,7 +948,8 @@ function StandingsView({ data, busy, command }: SharedProps) {
                   </div>
                 ))}
               </div>
-              {canOperate && <button className="primary-button wide" disabled={busy} onClick={() => command({ action: "create_bracket", tournamentId: data.tournament!.id, seedOrder }, "토너먼트 대진을 확정했습니다.")}>순위 확정 및 대진 생성</button>}
+              {canOperate && data.tournament?.bracketFormat !== "none" && <button className="primary-button wide" disabled={busy || data.standings.some((row) => row.tied)} onClick={() => command({ action: "create_bracket", tournamentId: data.tournament!.id, seedOrder: seedOrder.slice(0, data.tournament?.advancingTeamCount ?? seedOrder.length) }, "토너먼트 대진을 확정했습니다.")}>상위 {data.tournament?.advancingTeamCount ?? seedOrder.length}팀 본선 대진 생성</button>}
+              {data.tournament?.bracketFormat === "none" && <div className="seed-lock success"><span>✓</span><strong>리그전 종료</strong><p>리그 순위가 최종 결과입니다.</p></div>}
             </>
           )}
         </aside>
@@ -935,6 +998,7 @@ function BracketView({ data, teamMap, isStaff, busy, command, matches: bracketMa
   if (!bracketMatches.length) {
     return <section className="page-section"><PageTitle eyebrow="BRACKET" title="토너먼트 대진" description="리그 순위가 확정되면 대진이 생성됩니다." /><EmptyState title="대진 생성 대기 중" detail="리그전 결과를 모두 입력하고 최종 순위를 확정해 주세요." /></section>;
   }
+  const isWinnerLoserBracket = data.tournament?.bracketFormat === "winner_loser_split";
   const isCustomFiveTeamBracket = bracketMatches.some((match) => match.matchNo === "G1");
   const bracketStages = isCustomFiveTeamBracket
     ? CUSTOM_BRACKET_STAGES
@@ -950,9 +1014,9 @@ function BracketView({ data, teamMap, isStaff, busy, command, matches: bracketMa
   return (
     <section className="page-section">
       <PageTitle
-        eyebrow={isCustomFiveTeamBracket ? "CUSTOM LOSER BRACKET" : "SINGLE ELIMINATION"}
+        eyebrow={isWinnerLoserBracket ? "WINNER · LOSER BRACKET" : "SINGLE ELIMINATION"}
         title="토너먼트 대진"
-        description={isCustomFiveTeamBracket
+        description={isWinnerLoserBracket
           ? "운영자가 승리팀을 선택하면 다음 경기의 승자·패자 경로가 자동으로 연결됩니다."
           : "상위 시드의 부전승을 반영하며, 승리팀을 선택하면 다음 라운드가 자동으로 연결됩니다."}
       />
@@ -993,11 +1057,11 @@ function BracketCard({ match, teamMap, isStaff, busy, command }: { match: Match;
   const entries = [match.teamAId, match.teamBId].map((id) => id ? teamMap.get(id) : undefined);
   return (
     <article className={`bracket-card ${match.status}`}>
-      <header><strong>{match.matchNo === "F" ? "FINAL" : match.matchNo}</strong><span>{match.roundLabel}</span></header>
+      <header><strong>{match.matchNo === "F" ? "FINAL" : match.matchNo}</strong><span>{match.roundLabel} · BO{match.bestOf} · {match.seriesScoreA}:{match.seriesScoreB}</span></header>
       {entries.map((team, index) => (
         <div className={team && match.winnerId === team.id ? "winner" : ""} key={team?.id ?? index}>
           <TeamMark team={team} small /><span>{team?.name ?? "결과 대기"}</span>{team && match.winnerId === team.id && <b>W</b>}
-          {isStaff && team && entries.every(Boolean) && (
+          {isStaff && match.bestOf === 1 && team && entries.every(Boolean) && (
             <button disabled={busy} onClick={() => {
               if (window.confirm(`${team.name} 승리를 확정할까요?`)) void command({ action: "set_winner", matchId: match.id, winnerId: team.id }, `${team.name} 승리가 다음 대진에 반영되었습니다.`);
             }}>승리</button>
@@ -1129,7 +1193,7 @@ function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & {
   return (
     <section className="page-section">
       <PageTitle eyebrow="CONTROL ROOM" title="대회 운영" description="경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다." />
-      <div className="admin-actions">{data.viewer?.role === "admin" && <button className="primary-button" onClick={openCreate}>＋ 새 대회 생성</button>}<div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
+      <div className="admin-actions"><button className="primary-button" onClick={openCreate}>＋ 새 대회 생성</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button><div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
       <div className="admin-grid">
         <article className="panel schedule-confirmation-panel">
           <div className="section-heading"><div><p className="eyebrow">SCHEDULE APPROVAL</p><h2>경기 일정 확정</h2></div><span>{upcoming.filter((match) => match.scheduleConfirmed).length}/{upcoming.length}</span></div>
@@ -1254,62 +1318,75 @@ function SingleEliminationPreview({ teams }: { teams: TeamDraft[] }) {
   return <div className="preview-match-grid">{Array.from({ length: slots.length / 2 }, (_, index) => <div key={index}><span>{bracketSize}강 {index + 1}경기</span><strong>{slots[index * 2]} <small>vs</small> {slots[index * 2 + 1]}</strong></div>)}</div>;
 }
 
-function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onClose: () => void; onCreate: (input: { name: string; startAt: string; matchesPerPair: number; starterPoints: number; preliminaryFormat: "none" | "round_robin"; bracketFormat: "single_elimination" | "winner_loser_split"; teams: TeamDraft[] }) => void }) {
+type CompetitionFormat = "league_only" | "bracket_only" | "split_only" | "league_then_bracket" | "league_then_split";
+type TournamentCreateInput = { name: string; startAt: string; matchesPerPair: number; starterPoints: number; preliminaryFormat: "none" | "round_robin"; bracketFormat: "single_elimination" | "winner_loser_split"; competitionFormat: CompetitionFormat; advancingTeamCount: number; leagueBestOf: number; bracketBestOf: number; semifinalBestOf: number; finalBestOf: number; tiebreakBestOf: number; teams: TeamDraft[] };
+const FORMAT_OPTIONS: Array<[CompetitionFormat, string, string]> = [
+  ["league_only", "리그전만", "리그 순위로 대회를 마칩니다."],
+  ["bracket_only", "일반 토너먼트만", "직접 배치한 시드로 단일 탈락 대진을 만듭니다."],
+  ["split_only", "승·패자 분기형만", "승자조와 패자조를 모든 팀 수에 맞게 생성합니다."],
+  ["league_then_bracket", "리그전 + 일반 토너먼트", "최종 리그 순위로 본선 시드를 배정합니다."],
+  ["league_then_split", "리그전 + 승·패자 분기형", "선택한 순위까지 승자·패자조 본선에 진출합니다."],
+];
+
+function BestOfSelect({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  return <label><span>{label}</span><select value={value} onChange={(event) => onChange(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select></label>;
+}
+
+function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onClose: () => void; onCreate: (input: TournamentCreateInput) => void }) {
   const [name, setName] = useState("새 소환사의 컵");
   const [startAt, setStartAt] = useState("2026-09-05T10:00");
   const [matchesPerPair, setMatchesPerPair] = useState(2);
   const [starterPoints, setStarterPoints] = useState(1000);
-  const [preliminaryFormat, setPreliminaryFormat] = useState<"none" | "round_robin">("none");
-  const [bracketFormat, setBracketFormat] = useState<"single_elimination" | "winner_loser_split">("winner_loser_split");
-  const [teamDrafts, setTeamDrafts] = useState<TeamDraft[]>(Array.from({ length: 5 }, (_, teamIndex) => createTeamDraft(teamIndex)));
-
+  const [competitionFormat, setCompetitionFormat] = useState<CompetitionFormat>("league_then_split");
+  const [advancingTeamCount, setAdvancingTeamCount] = useState(4);
+  const [leagueBestOf, setLeagueBestOf] = useState(1);
+  const [bracketBestOf, setBracketBestOf] = useState(3);
+  const [semifinalBestOf, setSemifinalBestOf] = useState(5);
+  const [finalBestOf, setFinalBestOf] = useState(5);
+  const [tiebreakBestOf, setTiebreakBestOf] = useState(1);
+  const [teamDrafts, setTeamDrafts] = useState<TeamDraft[]>(Array.from({ length: 5 }, (_, index) => createTeamDraft(index)));
+  const hasLeague = competitionFormat === "league_only" || competitionFormat.startsWith("league_then");
+  const hasBracket = competitionFormat !== "league_only";
+  const split = competitionFormat === "split_only" || competitionFormat === "league_then_split";
+  const preliminaryFormat = hasLeague ? "round_robin" as const : "none" as const;
+  const bracketFormat = split ? "winner_loser_split" as const : "single_elimination" as const;
   const leagueMatchCount = (teamDrafts.length * (teamDrafts.length - 1) / 2) * matchesPerPair;
 
   function updateTeamCount(value: number) {
-    const count = bracketFormat === "winner_loser_split" ? 5 : Math.min(16, Math.max(2, Math.floor(value)));
+    const count = Math.min(16, Math.max(2, Math.floor(value)));
     setTeamDrafts((current) => Array.from({ length: count }, (_, index) => current[index] ?? createTeamDraft(index)));
+    setAdvancingTeamCount((current) => Math.min(count, Math.max(2, current)));
   }
-
   function moveTeam(index: number, direction: -1 | 1) {
     const target = index + direction;
     if (target < 0 || target >= teamDrafts.length) return;
-    setTeamDrafts((current) => {
-      const next = [...current];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
+    setTeamDrafts((current) => { const next = [...current]; [next[index], next[target]] = [next[target], next[index]]; return next; });
   }
-
   function updateTeam(teamIndex: number, patch: Partial<TeamDraft>) {
     setTeamDrafts((current) => current.map((team, index) => index === teamIndex ? { ...team, ...patch } : team));
   }
 
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-      <section className="create-modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
-        <header><div><p className="eyebrow">NEW TOURNAMENT</p><h2 id="create-title">새 대회 만들기</h2></div><button onClick={onClose} aria-label="닫기">×</button></header>
-        <div className="modal-body">
-          <div className="form-grid tournament-fields">
-            <label><span>대회명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
-            <label><span>첫 경기 기본 일시</span><input type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} /><small>생성 후 일정 화면에서 경기별로 수정</small></label>
-            <label><span>참가 팀 수</span><select value={teamDrafts.length} disabled={bracketFormat === "winner_loser_split"} onChange={(event) => updateTeamCount(Number(event.target.value))}>{Array.from({ length: 15 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>{count}팀</option>)}</select><small>{bracketFormat === "winner_loser_split" ? "승·패자 분기형은 5팀 고정" : "2팀부터 16팀까지"}</small></label>
-            {preliminaryFormat === "round_robin" && <label><span>팀 간 경기 수</span><input type="number" min="1" max="10" value={matchesPerPair} onChange={(event) => setMatchesPerPair(Number(event.target.value))} /><small>리그전 총 {leagueMatchCount}경기</small></label>}
-            <label><span>참가 기본 포인트</span><input type="number" min="0" step="100" value={starterPoints} onChange={(event) => setStarterPoints(Number(event.target.value))} /></label>
-          </div>
-          <div className="format-section"><div className="team-entry-heading"><h3>대회 진행 방식</h3><span>예선과 본선 방식을 대회마다 선택</span></div><div className="format-choice-grid"><button type="button" className={preliminaryFormat === "none" ? "selected" : ""} onClick={() => setPreliminaryFormat("none")}><strong>바로 토너먼트</strong><span>팀 등록과 최초 배치를 마치면 본선 대진을 즉시 생성합니다.</span></button><button type="button" className={preliminaryFormat === "round_robin" ? "selected" : ""} onClick={() => setPreliminaryFormat("round_robin")}><strong>풀리그 후 토너먼트</strong><span>모든 팀이 리그전을 치른 뒤 최종 순서로 본선 대진을 생성합니다.</span></button></div></div>
-          <div className="format-section"><div className="team-entry-heading"><h3>토너먼트 형식</h3><span>본선 대진 진행 규칙</span></div><div className="format-choice-grid"><button type="button" className={bracketFormat === "single_elimination" ? "selected" : ""} onClick={() => setBracketFormat("single_elimination")}><strong>일반 토너먼트</strong><span>패배 즉시 탈락 · 상위 순서 부전승 지원</span></button><button type="button" className={bracketFormat === "winner_loser_split" ? "selected" : ""} onClick={() => { setBracketFormat("winner_loser_split"); setTeamDrafts((current) => Array.from({ length: 5 }, (_, index) => current[index] ?? createTeamDraft(index))); }}><strong>승·패자 분기형</strong><span>5팀 · 승자전, 패자전, 패자부활전과 순위 결정</span></button></div></div>
-          <div className="team-entry-heading"><h3>팀 및 선수 등록</h3><span>각 팀 5명 · TOP / JGL / MID / ADC / SUP 순서</span></div>
-          <div className="team-entry-grid">
-            {teamDrafts.map((team, teamIndex) => (
-              <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>배치 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <label key={memberIndex}><span>{POSITIONS_LABEL[memberIndex]}</span><input value={member} onChange={(event) => { const members = [...team.members]; members[memberIndex] = event.target.value; updateTeam(teamIndex, { members }); }} /></label>)}</fieldset>
-            ))}
-          </div>
-          <div className="initial-bracket-preview"><div className="team-entry-heading"><h3>최초 대진 미리보기</h3><span>위 화살표로 배치 순서를 직접 변경</span></div>{bracketFormat === "winner_loser_split" ? <div className="preview-match-grid"><div><span>1경기</span><strong>{teamDrafts[0]?.name} <small>vs</small> {teamDrafts[2]?.name}</strong></div><div><span>2경기</span><strong>{teamDrafts[1]?.name} <small>vs</small> {teamDrafts[3]?.name}</strong></div><div><span>후속 진입</span><strong>{teamDrafts[4]?.name}</strong></div></div> : <SingleEliminationPreview teams={teamDrafts} />}</div>
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <section className="create-modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
+      <header><div><p className="eyebrow">NEW TOURNAMENT</p><h2 id="create-title">새 대회 만들기</h2></div><button onClick={onClose} aria-label="닫기">×</button></header>
+      <div className="modal-body">
+        <div className="form-grid tournament-fields">
+          <label><span>대회명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label><span>첫 경기 기본 일시</span><input type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} /></label>
+          <label><span>참가 팀 수</span><select value={teamDrafts.length} onChange={(event) => updateTeamCount(Number(event.target.value))}>{Array.from({ length: 15 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>{count}팀</option>)}</select></label>
+          {hasLeague && <label><span>팀 간 경기 수</span><input type="number" min="1" max="10" value={matchesPerPair} onChange={(event) => setMatchesPerPair(Number(event.target.value))} /><small>총 {leagueMatchCount}경기</small></label>}
+          {competitionFormat.startsWith("league_then") && <label><span>본선 진출</span><select value={advancingTeamCount} onChange={(event) => setAdvancingTeamCount(Number(event.target.value))}>{Array.from({ length: teamDrafts.length - 1 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>리그 상위 {count}팀</option>)}</select></label>}
+          <label><span>참가 기본 포인트</span><input type="number" min="0" step="100" value={starterPoints} onChange={(event) => setStarterPoints(Number(event.target.value))} /></label>
         </div>
-        <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, teams: teamDrafts })}>{busy ? "생성 중…" : preliminaryFormat === "none" ? "대회 및 본선 대진 생성" : "대회 및 리그 대진 생성"}</button></footer>
-      </section>
-    </div>
-  );
+        <div className="format-section"><div className="team-entry-heading"><h3>대회 진행 방식</h3><span>5가지 조합 중 선택</span></div><div className="format-choice-grid five-options">{FORMAT_OPTIONS.map(([id, title, detail]) => <button type="button" key={id} className={competitionFormat === id ? "selected" : ""} onClick={() => setCompetitionFormat(id)}><strong>{title}</strong><span>{detail}</span></button>)}</div></div>
+        <div className="format-section"><div className="team-entry-heading"><h3>경기별 세트 기본값</h3><span>경기 시작 전 개별 변경 가능</span></div><div className="form-grid bo-grid">{hasLeague && <BestOfSelect label="리그 경기" value={leagueBestOf} onChange={setLeagueBestOf} />}{hasLeague && <BestOfSelect label="순위 결정전" value={tiebreakBestOf} onChange={setTiebreakBestOf} />}{hasBracket && <BestOfSelect label="본선 초반" value={bracketBestOf} onChange={setBracketBestOf} />}{hasBracket && <BestOfSelect label="준결승·조 결승" value={semifinalBestOf} onChange={setSemifinalBestOf} />}{hasBracket && <BestOfSelect label="최종 결승" value={finalBestOf} onChange={setFinalBestOf} />}</div></div>
+        <div className="team-entry-heading"><h3>팀 및 선수 등록</h3><span>각 팀 5명 · TOP / JGL / MID / ADC / SUP</span></div>
+        <div className="team-entry-grid">{teamDrafts.map((team, teamIndex) => <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>시드 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <label key={memberIndex}><span>{POSITIONS_LABEL[memberIndex]}</span><input value={member} onChange={(event) => { const members = [...team.members]; members[memberIndex] = event.target.value; updateTeam(teamIndex, { members }); }} /></label>)}</fieldset>)}</div>
+        {hasBracket && <div className="initial-bracket-preview"><div className="team-entry-heading"><h3>최초 대진 미리보기</h3><span>{split ? "승자조 패배 팀은 패자조로 이동" : "상위 시드 자동 부전승"}</span></div><SingleEliminationPreview teams={teamDrafts.slice(0, competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length)} /></div>}
+      </div>
+      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, competitionFormat, advancingTeamCount: hasBracket ? (competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length) : 0, leagueBestOf, bracketBestOf, semifinalBestOf, finalBestOf, tiebreakBestOf, teams: teamDrafts })}>{busy ? "생성 중…" : "대회 생성 및 코드 발급"}</button></footer>
+    </section>
+  </div>;
 }
 
 const POSITIONS_LABEL = ["TOP", "JGL", "MID", "ADC", "SUP"];

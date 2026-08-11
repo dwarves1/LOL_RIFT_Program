@@ -76,10 +76,22 @@ export const tournaments = sqliteTable(
       .notNull()
       .default("round_robin"),
     bracketFormat: text("bracket_format", {
-      enum: ["single_elimination", "winner_loser_split"],
+      enum: ["none", "single_elimination", "winner_loser_split"],
     })
       .notNull()
       .default("single_elimination"),
+    competitionFormat: text("competition_format", {
+      enum: ["league_only", "bracket_only", "split_only", "league_then_bracket", "league_then_split"],
+    }).notNull().default("league_then_bracket"),
+    advancingTeamCount: integer("advancing_team_count"),
+    leagueBestOf: integer("league_best_of").notNull().default(1),
+    bracketBestOf: integer("bracket_best_of").notNull().default(3),
+    semifinalBestOf: integer("semifinal_best_of").notNull().default(5),
+    finalBestOf: integer("final_best_of").notNull().default(5),
+    tiebreakBestOf: integer("tiebreak_best_of").notNull().default(1),
+    accessCodeHash: text("access_code_hash"),
+    accessCodeHint: text("access_code_hint"),
+    accessCodeUpdatedAt: text("access_code_updated_at"),
     starterPoints: integer("starter_points").notNull().default(1000),
     createdBy: text("created_by").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -95,6 +107,7 @@ export const teams = sqliteTable(
     name: text("name").notNull(),
     color: text("color").notNull(),
     seed: integer("seed"),
+    representativeUserId: text("representative_user_id"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
@@ -108,6 +121,7 @@ export const matchResultImages = sqliteTable(
   {
     id: text("id").primaryKey(),
     matchId: text("match_id").notNull(),
+    setNo: integer("set_no").notNull().default(1),
     objectKey: text("object_key").notNull(),
     fileName: text("file_name").notNull(),
     contentType: text("content_type").notNull(),
@@ -121,7 +135,7 @@ export const matchResultImages = sqliteTable(
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
-    uniqueIndex("idx_match_result_images_match").on(table.matchId),
+    uniqueIndex("idx_match_result_images_match_set").on(table.matchId, table.setNo),
     uniqueIndex("idx_match_result_images_key").on(table.objectKey),
   ],
 );
@@ -130,6 +144,7 @@ export const matchTeamStats = sqliteTable(
   "match_team_stats",
   {
     matchId: text("match_id").notNull(),
+    setNo: integer("set_no").notNull().default(1),
     side: integer("side").notNull(),
     teamId: text("team_id").notNull(),
     kills: integer("kills").notNull(),
@@ -139,7 +154,7 @@ export const matchTeamStats = sqliteTable(
     won: integer("won", { mode: "boolean" }).notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.matchId, table.side] }),
+    primaryKey({ columns: [table.matchId, table.setNo, table.side] }),
     index("idx_match_team_stats_team").on(table.teamId, table.matchId),
   ],
 );
@@ -149,6 +164,7 @@ export const playerMatchStats = sqliteTable(
   {
     id: text("id").primaryKey(),
     matchId: text("match_id").notNull(),
+    setNo: integer("set_no").notNull().default(1),
     teamId: text("team_id").notNull(),
     userId: text("user_id"),
     side: integer("side").notNull(),
@@ -170,7 +186,7 @@ export const playerMatchStats = sqliteTable(
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
-    uniqueIndex("idx_player_match_stats_row").on(table.matchId, table.rowOrder),
+    uniqueIndex("idx_player_match_stats_row").on(table.matchId, table.setNo, table.rowOrder),
     index("idx_player_match_stats_user").on(table.userId, table.matchId),
     index("idx_player_match_stats_team").on(table.teamId, table.matchId),
   ],
@@ -200,6 +216,10 @@ export const matches = sqliteTable(
     phase: text("phase", { enum: ["league", "bracket"] }).notNull(),
     matchNo: text("match_no").notNull(),
     roundLabel: text("round_label").notNull(),
+    matchType: text("match_type", { enum: ["regular", "tiebreaker"] }).notNull().default("regular"),
+    bestOf: integer("best_of").notNull().default(1),
+    seriesScoreA: integer("series_score_a").notNull().default(0),
+    seriesScoreB: integer("series_score_b").notNull().default(0),
     teamAId: text("team_a_id"),
     teamBId: text("team_b_id"),
     sourceA: text("source_a"),
@@ -228,6 +248,74 @@ export const matches = sqliteTable(
       table.phase,
       table.matchNo,
     ),
+  ],
+);
+
+export const matchGames = sqliteTable(
+  "match_games",
+  {
+    id: text("id").primaryKey(),
+    matchId: text("match_id").notNull(),
+    setNo: integer("set_no").notNull(),
+    blueTeamId: text("blue_team_id"),
+    redTeamId: text("red_team_id"),
+    winnerTeamId: text("winner_team_id"),
+    status: text("status", { enum: ["scheduled", "completed", "cancelled"] }).notNull().default("scheduled"),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("idx_match_games_match_set").on(table.matchId, table.setNo),
+    index("idx_match_games_match").on(table.matchId, table.setNo),
+  ],
+);
+
+export const tournamentMembers = sqliteTable(
+  "tournament_members",
+  {
+    tournamentId: text("tournament_id").notNull(),
+    userId: text("user_id").notNull(),
+    role: text("role", { enum: ["owner", "operator", "team_rep", "viewer"] }).notNull().default("viewer"),
+    teamId: text("team_id"),
+    joinedAt: text("joined_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tournamentId, table.userId] }),
+    index("idx_tournament_members_user").on(table.userId, table.tournamentId),
+    index("idx_tournament_members_team").on(table.teamId),
+  ],
+);
+
+export const draftSessions = sqliteTable(
+  "draft_sessions",
+  {
+    id: text("id").primaryKey(),
+    context: text("context", { enum: ["match", "practice"] }).notNull(),
+    tournamentId: text("tournament_id"),
+    matchId: text("match_id"),
+    ownerUserId: text("owner_user_id").notNull(),
+    name: text("name"),
+    mode: text("mode", { enum: ["standard", "fearless", "hard_fearless"] }).notNull(),
+    bestOf: integer("best_of").notNull(),
+    timerMode: text("timer_mode", { enum: ["limited", "unlimited"] }).notNull(),
+    timerSeconds: integer("timer_seconds"),
+    undoEnabled: integer("undo_enabled", { mode: "boolean" }).notNull().default(false),
+    status: text("status", { enum: ["lobby", "active", "completed"] }).notNull().default("lobby"),
+    blueTeamId: text("blue_team_id"),
+    redTeamId: text("red_team_id"),
+    blueUserId: text("blue_user_id"),
+    redUserId: text("red_user_id"),
+    currentSet: integer("current_set").notNull().default(1),
+    currentStep: integer("current_step").notNull().default(0),
+    turnExpiresAt: text("turn_expires_at"),
+    version: integer("version").notNull().default(1),
+    stateJson: text("state_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_draft_sessions_match").on(table.matchId, table.createdAt),
+    index("idx_draft_sessions_owner").on(table.ownerUserId, table.context, table.updatedAt),
   ],
 );
 

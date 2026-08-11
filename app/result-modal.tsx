@@ -4,11 +4,12 @@ import { useMemo, useState } from "react";
 import { extractFixedLolScoreboard, type ExtractedScoreboardPlayer } from "../lib/scoreboard-ocr";
 
 type ResultTeam = { id: string; name: string; color: string };
-type ResultMatch = { id: string; matchNo: string; roundLabel: string; teamAId: string | null; teamBId: string | null };
+type ResultMatch = { id: string; matchNo: string; roundLabel: string; teamAId: string | null; teamBId: string | null; bestOf?: number };
 type ResultAccount = { id: string; displayName: string; riotGameName: string | null; riotTagline: string | null };
 export type ResultPlayerStat = {
   id?: string;
   matchId?: string;
+  setNo?: number;
   teamId?: string;
   userId: string | null;
   side: number;
@@ -86,6 +87,7 @@ export function ResultReviewModal({
   const [side1TeamId, setSide1TeamId] = useState(match.teamAId ?? "");
   const [side2TeamId, setSide2TeamId] = useState(match.teamBId ?? "");
   const [winnerSide, setWinnerSide] = useState<1 | 2>(1);
+  const [setNo, setSetNo] = useState(1);
   const [rawExtraction, setRawExtraction] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState({ value: 0, detail: "" });
@@ -173,6 +175,7 @@ export function ResultReviewModal({
           </div>
           <div className="result-fields-panel">
             <div className="result-meta-fields">
+              <label><span>세트</span><select value={setNo} onChange={(event) => setSetNo(Number(event.target.value))}>{Array.from({ length: match.bestOf ?? 1 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}세트</option>)}</select></label>
               <label><span>경기 시간</span><input value={duration} onChange={(event) => setDuration(event.target.value)} placeholder="28:07" /></label>
               <label><span>이미지 1팀</span><select value={side1TeamId} onChange={(event) => setSide1TeamId(event.target.value)}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
               <button type="button" className="side-swap" onClick={() => { setSide1TeamId(side2TeamId); setSide2TeamId(side1TeamId); }}>⇄</button>
@@ -195,6 +198,7 @@ export function ResultReviewModal({
         <footer><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="button" className="primary-button" disabled={busy || analyzing || !valid} onClick={async () => {
           const ok = await onSubmit({
             matchId: match.id,
+            setNo,
             winnerTeamId: winnerSide === 1 ? side1TeamId : side2TeamId,
             side1TeamId,
             side2TeamId,

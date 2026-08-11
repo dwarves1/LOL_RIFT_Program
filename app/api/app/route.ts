@@ -3,17 +3,35 @@ import {
   createBracket,
   createTournament,
   confirmMatchSchedule,
+  createTiebreakerMatch,
   getDashboard,
   getRequestUser,
   setMatchWinner,
   setMatchSchedule,
+  setMatchBestOf,
   saveMatchResult,
   setUserRole,
+  joinTournamentByCode,
+  rotateTournamentCode,
   updateUserProfile,
   type CreateTournamentInput,
   type SaveMatchResultInput,
   type UserRole,
 } from "../../../lib/tournament-service";
+import {
+  advanceDraftSet,
+  createDraft,
+  deleteDraft,
+  draftAction,
+  joinDraft,
+  renameDraft,
+  resetDraft,
+  resumeDraft,
+  startDraft,
+  undoDraft,
+  type DraftMode,
+  type DraftSide,
+} from "../../../lib/draft-service";
 import { env } from "cloudflare:workers";
 
 export const dynamic = "force-dynamic";
@@ -56,8 +74,16 @@ export async function POST(request: Request) {
     }
 
     if (action === "create_tournament") {
-      const tournamentId = await createTournament(payload.input as CreateTournamentInput, user);
+      const created = await createTournament(payload.input as CreateTournamentInput, user);
+      return Response.json({ ok: true, ...created });
+    }
+    if (action === "join_tournament") {
+      const tournamentId = await joinTournamentByCode(String(payload.code ?? ""), user);
       return Response.json({ ok: true, tournamentId });
+    }
+    if (action === "rotate_tournament_code") {
+      const accessCode = await rotateTournamentCode(String(payload.tournamentId), user);
+      return Response.json({ ok: true, accessCode });
     }
     if (action === "create_bracket") {
       await createBracket(
@@ -79,6 +105,36 @@ export async function POST(request: Request) {
       await confirmMatchSchedule(String(payload.matchId), user);
       return Response.json({ ok: true });
     }
+    if (action === "set_match_best_of") {
+      await setMatchBestOf(String(payload.matchId), Number(payload.bestOf), user);
+      return Response.json({ ok: true });
+    }
+    if (action === "create_tiebreaker") {
+      await createTiebreakerMatch(String(payload.tournamentId), String(payload.teamAId), String(payload.teamBId), String(payload.scheduledAt), Number(payload.bestOf), user);
+      return Response.json({ ok: true });
+    }
+    if (action === "create_draft") {
+      const draftId = await createDraft({
+        context: payload.context === "practice" ? "practice" : "match",
+        matchId: payload.matchId ? String(payload.matchId) : undefined,
+        name: payload.name ? String(payload.name) : undefined,
+        mode: String(payload.mode) as DraftMode,
+        bestOf: Number(payload.bestOf),
+        timerMode: payload.timerMode === "unlimited" ? "unlimited" : "limited",
+        timerSeconds: Number(payload.timerSeconds ?? 30),
+        undoEnabled: Boolean(payload.undoEnabled),
+      }, user);
+      return Response.json({ ok: true, draftId });
+    }
+    if (action === "join_draft") { await joinDraft(String(payload.draftId), String(payload.side) as DraftSide, user); return Response.json({ ok: true }); }
+    if (action === "start_draft") { await startDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
+    if (action === "draft_action") { await draftAction(String(payload.draftId), String(payload.championId), Number(payload.version), user); return Response.json({ ok: true }); }
+    if (action === "undo_draft") { await undoDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
+    if (action === "advance_draft_set") { await advanceDraftSet(String(payload.draftId), user); return Response.json({ ok: true }); }
+    if (action === "reset_draft") { await resetDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
+    if (action === "resume_draft") { await resumeDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
+    if (action === "rename_draft") { await renameDraft(String(payload.draftId), String(payload.name), user); return Response.json({ ok: true }); }
+    if (action === "delete_draft") { await deleteDraft(String(payload.draftId), user); return Response.json({ ok: true }); }
     if (action === "create_bet") {
       await createBet(
         String(payload.tournamentId),
@@ -106,7 +162,8 @@ export async function POST(request: Request) {
       if (bytes.byteLength > 10 * 1024 * 1024) throw new Error("이미지는 10MB 이하로 올려 주세요.");
       const matchId = String(input.matchId ?? "");
       const extension = matched[1] === "image/png" ? "png" : matched[1] === "image/webp" ? "webp" : "jpg";
-      const objectKey = `match-results/${matchId}/${crypto.randomUUID()}.${extension}`;
+      const setNo = Math.max(1, Number(input.setNo ?? 1));
+      const objectKey = `match-results/${matchId}/set-${setNo}/${crypto.randomUUID()}.${extension}`;
       await env.RESULT_IMAGES.put(objectKey, bytes, {
         httpMetadata: { contentType: matched[1], cacheControl: "public, max-age=31536000, immutable" },
         customMetadata: { matchId, uploadedBy: user.id },

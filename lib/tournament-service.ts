@@ -12,6 +12,7 @@ import {
   auditLogs,
   bets,
   matchResultImages,
+  matchGames,
   matchTeamStats,
   matches,
   playerMatchStats,
@@ -19,9 +20,11 @@ import {
   pointLedger,
   teams,
   tournamentEntries,
+  tournamentMembers,
   tournaments,
   users,
   riotIdHistory,
+  draftSessions,
 } from "../db/schema";
 
 export type UserRole = "viewer" | "operator" | "admin";
@@ -334,6 +337,62 @@ async function ensureTournamentEntry(userId: string, tournamentId: string) {
   return created ?? null;
 }
 
+function normalizeAccessCode(value: string) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+async function hashAccessCode(value: string) {
+  const bytes = new TextEncoder().encode(normalizeAccessCode(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function issueAccessCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  const token = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+  return `RIFT-${token.slice(0, 4)}-${token.slice(4)}`;
+}
+
+export async function hasTournamentAccess(user: RequestUser | null, tournamentId: string) {
+  if (!user) return false;
+  if (user.role === "admin" || user.isLocalDemo) return true;
+  const [member] = await getDb().select().from(tournamentMembers).where(and(
+    eq(tournamentMembers.tournamentId, tournamentId),
+    eq(tournamentMembers.userId, user.id),
+  )).limit(1);
+  return Boolean(member);
+}
+
+export async function joinTournamentByCode(code: string, actor: RequestUser) {
+  const normalized = normalizeAccessCode(code);
+  if (normalized.length < 8) throw new Error("대회 코드를 확인해 주세요.");
+  const codeHash = await hashAccessCode(normalized);
+  const [tournament] = await getDb().select().from(tournaments).where(eq(tournaments.accessCodeHash, codeHash)).limit(1);
+  if (!tournament) throw new Error("유효하지 않은 대회 코드입니다.");
+  await getDb().insert(tournamentMembers).values({
+    tournamentId: tournament.id,
+    userId: actor.id,
+    role: "viewer",
+  }).onConflictDoNothing();
+  await ensureTournamentEntry(actor.id, tournament.id);
+  await audit(actor, "tournament_joined", "tournament", tournament.id, tournament.id, null, { via: "access_code" });
+  return tournament.id;
+}
+
+export async function rotateTournamentCode(tournamentId: string, actor: RequestUser) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  if (!(await hasTournamentAccess(actor, tournamentId))) throw new Error("이 대회를 운영할 권한이 없습니다.");
+  const accessCode = issueAccessCode();
+  await getDb().update(tournaments).set({
+    accessCodeHash: await hashAccessCode(accessCode),
+    accessCodeHint: accessCode.slice(-4),
+    accessCodeUpdatedAt: new Date().toISOString(),
+  }).where(eq(tournaments.id, tournamentId));
+  await audit(actor, "tournament_code_rotated", "tournament", tournamentId, tournamentId, null, { hint: accessCode.slice(-4) });
+  return accessCode;
+}
+
 export type CreateTournamentInput = {
   name: string;
   startAt: string;
@@ -341,11 +400,22 @@ export type CreateTournamentInput = {
   starterPoints: number;
   preliminaryFormat: "none" | "round_robin";
   bracketFormat: "single_elimination" | "winner_loser_split";
+  competitionFormat?: "league_only" | "bracket_only" | "split_only" | "league_then_bracket" | "league_then_split";
+  advancingTeamCount?: number;
+  leagueBestOf?: number;
+  bracketBestOf?: number;
+  semifinalBestOf?: number;
+  finalBestOf?: number;
+  tiebreakBestOf?: number;
   teams: Array<{ name: string; members: string[] }>;
 };
 
+function normalizeBestOf(value: number | undefined, fallback: 1 | 3 | 5): 1 | 3 | 5 {
+  return value === 3 || value === 5 ? value : value === 1 ? 1 : fallback;
+}
+
 export async function createTournament(input: CreateTournamentInput, actor: RequestUser) {
-  if (actor.role !== "admin") throw new Error("관리자만 대회를 생성할 수 있습니다.");
+  if (actor.role === "viewer") throw new Error("관리자나 운영자만 대회를 생성할 수 있습니다.");
   return createTournamentInternal(input, actor);
 }
 
@@ -361,15 +431,30 @@ async function createTournamentInternal(
   if (input.teams.some((team) => !team.name.trim() || !Array.isArray(team.members) || team.members.filter(Boolean).length !== 5)) {
     throw new Error("각 팀의 팀명과 선수 5명을 모두 입력해 주세요.");
   }
-  const preliminaryFormat = input.preliminaryFormat === "none" ? "none" : "round_robin";
-  const bracketFormat = input.bracketFormat === "winner_loser_split"
-    ? "winner_loser_split"
-    : "single_elimination";
-  if (bracketFormat === "winner_loser_split" && input.teams.length !== 5) {
-    throw new Error("승·패자 분기형 토너먼트는 5팀으로 만들어 주세요.");
-  }
+  const competitionFormat = input.competitionFormat ?? (
+    input.preliminaryFormat === "none"
+      ? input.bracketFormat === "winner_loser_split" ? "split_only" : "bracket_only"
+      : input.bracketFormat === "winner_loser_split" ? "league_then_split" : "league_then_bracket"
+  );
+  const preliminaryFormat = competitionFormat === "league_only" || competitionFormat.startsWith("league_then")
+    ? "round_robin" as const
+    : "none" as const;
+  const bracketFormat = competitionFormat === "league_only"
+    ? "none" as const
+    : competitionFormat === "split_only" || competitionFormat === "league_then_split"
+      ? "winner_loser_split" as const
+      : "single_elimination" as const;
   const matchesPerPair = Math.min(10, Math.max(1, Math.floor(input.matchesPerPair)));
   const starterPoints = Math.min(100000, Math.max(0, Math.floor(input.starterPoints)));
+  const advancingTeamCount = bracketFormat === "none"
+    ? null
+    : Math.min(input.teams.length, Math.max(2, Math.floor(input.advancingTeamCount ?? input.teams.length)));
+  const leagueBestOf = normalizeBestOf(input.leagueBestOf, 1);
+  const bracketBestOf = normalizeBestOf(input.bracketBestOf, 3);
+  const semifinalBestOf = normalizeBestOf(input.semifinalBestOf, 5);
+  const finalBestOf = normalizeBestOf(input.finalBestOf, 5);
+  const tiebreakBestOf = normalizeBestOf(input.tiebreakBestOf, 1);
+  const accessCode = issueAccessCode();
   const startAt = new Date(input.startAt);
   if (Number.isNaN(startAt.getTime())) throw new Error("대회 시작 시간을 확인해 주세요.");
 
@@ -391,10 +476,21 @@ async function createTournamentInternal(
     matchesPerPair,
     preliminaryFormat,
     bracketFormat,
+    competitionFormat,
+    advancingTeamCount,
+    leagueBestOf,
+    bracketBestOf,
+    semifinalBestOf,
+    finalBestOf,
+    tiebreakBestOf,
+    accessCodeHash: await hashAccessCode(accessCode),
+    accessCodeHint: accessCode.slice(-4),
+    accessCodeUpdatedAt: new Date().toISOString(),
     starterPoints,
     createdBy: actor.id,
   });
   await db.insert(teams).values(teamRows);
+  await db.insert(tournamentMembers).values({ tournamentId, userId: actor.id, role: "owner" }).onConflictDoNothing();
 
   const playerRows = teamRows.flatMap((team, teamIndex) =>
     input.teams[teamIndex].members.map((nickname, index) => ({
@@ -418,6 +514,8 @@ async function createTournamentInternal(
           phase: "league",
           matchNo: `L${order}`,
           roundLabel: `${leg}차 리그`,
+          matchType: "regular",
+          bestOf: leagueBestOf,
           teamAId: swapSides ? teamRows[j].id : teamRows[i].id,
           teamBId: swapSides ? teamRows[i].id : teamRows[j].id,
           scheduledAt: isoAfter(startAt.toISOString(), (order - 1) * 60),
@@ -445,11 +543,11 @@ async function createTournamentInternal(
     bracketFormat,
   });
 
-  if (preliminaryFormat === "none") {
-    await createBracketInternal(tournamentId, teamRows.map((team) => team.id), actor);
+  if (preliminaryFormat === "none" && bracketFormat !== "none") {
+    await createBracketInternal(tournamentId, teamRows.slice(0, advancingTeamCount ?? teamRows.length).map((team) => team.id), actor);
   }
 
-  return tournamentId;
+  return { tournamentId, accessCode };
 }
 
 function calculateStandings(
@@ -459,13 +557,17 @@ function calculateStandings(
   const stats = new Map(
     tournamentTeams.map((team) => [
       team.id,
-      { teamId: team.id, teamName: team.name, color: team.color, played: 0, wins: 0, losses: 0 },
+      { teamId: team.id, teamName: team.name, color: team.color, played: 0, wins: 0, losses: 0, tiebreakWins: 0 },
     ]),
   );
   for (const match of leagueMatches) {
     if (match.status !== "completed" || !match.winnerId || !match.loserId) continue;
     const winner = stats.get(match.winnerId);
     const loser = stats.get(match.loserId);
+    if (match.matchType === "tiebreaker") {
+      if (winner) winner.tiebreakWins += 1;
+      continue;
+    }
     if (winner) {
       winner.played += 1;
       winner.wins += 1;
@@ -476,14 +578,14 @@ function calculateStandings(
     }
   }
   const ordered = [...stats.values()].sort(
-    (a, b) => b.wins - a.wins || a.losses - b.losses || a.teamName.localeCompare(b.teamName),
+    (a, b) => b.wins - a.wins || a.losses - b.losses || b.tiebreakWins - a.tiebreakWins || a.teamName.localeCompare(b.teamName),
   );
   return ordered.map((row, index) => ({
     ...row,
     rank: index + 1,
     winRate: row.played ? Math.round((row.wins / row.played) * 100) : 0,
     tied: ordered.some(
-      (other, otherIndex) => otherIndex !== index && other.wins === row.wins && other.losses === row.losses,
+      (other, otherIndex) => otherIndex !== index && other.wins === row.wins && other.losses === row.losses && other.tiebreakWins === row.tiebreakWins,
     ),
   }));
 }
@@ -499,10 +601,11 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
   if (
     tournamentTeams.length < 2 ||
     tournamentTeams.length > 16 ||
-    seedOrder.length !== tournamentTeams.length ||
-    new Set(seedOrder).size !== tournamentTeams.length
+    seedOrder.length < 2 ||
+    seedOrder.length > tournamentTeams.length ||
+    new Set(seedOrder).size !== seedOrder.length
   ) {
-    throw new Error(`1위부터 ${tournamentTeams.length}위까지 모든 팀의 순서를 확인해 주세요.`);
+    throw new Error("본선에 진출할 팀 순서를 확인해 주세요.");
   }
   if (seedOrder.some((id) => !tournamentTeams.some((team) => team.id === id))) {
     throw new Error("이 대회에 속하지 않은 팀이 포함되어 있습니다.");
@@ -531,24 +634,16 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
     .where(eq(tournaments.id, tournamentId))
     .limit(1);
   if (!tournament) throw new Error("대회를 찾을 수 없습니다.");
+  if (tournament.bracketFormat === "none") throw new Error("리그전만 진행하는 대회입니다.");
+  const advancingCount = Math.min(tournamentTeams.length, Math.max(2, tournament.advancingTeamCount ?? seedOrder.length));
+  if (seedOrder.length < advancingCount) throw new Error(`본선 진출 ${advancingCount}팀의 순서를 확인해 주세요.`);
+  const bracketSeeds = seedOrder.slice(0, advancingCount);
   const bracketStart = tournament.preliminaryFormat === "none"
     ? tournament.startAt
     : isoAfter(tournament.startAt, leagueMatches.length * 60 + 180);
-  if (tournament.bracketFormat === "winner_loser_split" && tournamentTeams.length !== 5) {
-    throw new Error("승·패자 분기형 토너먼트는 5팀으로 진행해야 합니다.");
-  }
   const definitions: Array<[string, string, string, string]> = tournament.bracketFormat === "winner_loser_split"
-    ? [
-        ["G1", "1경기", `seed:${seedOrder[0]}`, `seed:${seedOrder[2]}`],
-        ["G2", "2경기", `seed:${seedOrder[1]}`, `seed:${seedOrder[3]}`],
-        ["G3", "3경기 · 패자전", "loser:G1", "loser:G2"],
-        ["G4", "4경기 · 5위 결정", "loser:G3", `seed:${seedOrder[4]}`],
-        ["G5", "5경기 · 승자전", "winner:G1", "winner:G2"],
-        ["G6", "6경기 · 패자부활", "winner:G3", "winner:G4"],
-        ["G7", "7경기 · 3위 결정", "loser:G5", "winner:G6"],
-        ["F", "결승", "winner:G5", "winner:G7"],
-      ]
-    : buildSingleEliminationDefinitions(seedOrder);
+    ? buildWinnerLoserDefinitions(bracketSeeds)
+    : buildSingleEliminationDefinitions(bracketSeeds);
 
   const bracketRows = definitions.map(([matchNo, roundLabel, sourceA, sourceB], index) => ({
       id: uid("match"),
@@ -558,6 +653,11 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
       roundLabel,
       sourceA,
       sourceB,
+      bestOf: matchNo === "F" || roundLabel === "최종 결승"
+        ? tournament.finalBestOf
+        : roundLabel.includes("준결승") || roundLabel.includes("조 결승")
+          ? tournament.semifinalBestOf
+          : tournament.bracketBestOf,
       teamAId: sourceA.startsWith("seed:") ? sourceA.slice(5) : null,
       teamBId: sourceB.startsWith("seed:") ? sourceB.slice(5) : null,
       scheduledAt: isoAfter(bracketStart, index * 90),
@@ -569,7 +669,7 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
   }
   await db.update(tournaments).set({ status: "bracket" }).where(eq(tournaments.id, tournamentId));
   await audit(actor, "bracket_created", "tournament", tournamentId, tournamentId, null, {
-    seedOrder,
+    seedOrder: bracketSeeds,
     format: tournament.bracketFormat,
   });
 }
@@ -613,6 +713,96 @@ function buildSingleEliminationDefinitions(seedOrder: string[]) {
   }
 
   return definitions;
+}
+
+export async function createTiebreakerMatch(
+  tournamentId: string,
+  teamAId: string,
+  teamBId: string,
+  scheduledAt: string,
+  bestOf: number,
+  actor: RequestUser,
+) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  if (!(await hasTournamentAccess(actor, tournamentId))) throw new Error("이 대회를 운영할 권한이 없습니다.");
+  if (teamAId === teamBId) throw new Error("서로 다른 두 팀을 선택해 주세요.");
+  const date = new Date(scheduledAt);
+  if (Number.isNaN(date.getTime())) throw new Error("순위 결정전 일정을 확인해 주세요.");
+  const db = getDb();
+  const tournamentTeams = await db.select().from(teams).where(eq(teams.tournamentId, tournamentId));
+  if (![teamAId, teamBId].every((id) => tournamentTeams.some((team) => team.id === id))) {
+    throw new Error("이 대회의 팀만 선택할 수 있습니다.");
+  }
+  const leagueRows = await db.select().from(matches).where(and(eq(matches.tournamentId, tournamentId), eq(matches.phase, "league")));
+  if (leagueRows.some((match) => match.matchType === "regular" && match.status !== "completed")) {
+    throw new Error("정규 리그전 결과를 모두 확정한 뒤 순위 결정전을 생성해 주세요.");
+  }
+  const standings = calculateStandings(tournamentTeams, leagueRows.filter((match) => match.matchType === "regular"));
+  const rowA = standings.find((row) => row.teamId === teamAId);
+  const rowB = standings.find((row) => row.teamId === teamBId);
+  if (!rowA || !rowB || rowA.wins !== rowB.wins || rowA.losses !== rowB.losses) {
+    throw new Error("정규 리그 승패가 같은 팀끼리만 순위 결정전을 만들 수 있습니다.");
+  }
+  const count = leagueRows.filter((match) => match.matchType === "tiebreaker").length + 1;
+  const normalizedBestOf = normalizeBestOf(bestOf, 1);
+  await db.insert(matches).values({
+    id: uid("match"), tournamentId, phase: "league", matchNo: `T${count}`,
+    roundLabel: `순위 결정전 ${count}`, matchType: "tiebreaker", bestOf: normalizedBestOf,
+    teamAId, teamBId, scheduledAt: date.toISOString(), scheduleConfirmed: false,
+    status: "scheduled", sortOrder: leagueRows.length + count,
+  });
+  await audit(actor, "tiebreaker_created", "match", `T${count}`, tournamentId, null, { teamAId, teamBId, bestOf: normalizedBestOf });
+}
+
+function buildEliminationFromSources(
+  initialSources: string[],
+  prefix: string,
+  labelPrefix: string,
+): Array<[string, string, string, string]> {
+  let bracketSize = 2;
+  while (bracketSize < initialSources.length) bracketSize *= 2;
+  let seedPositions = [1, 2];
+  while (seedPositions.length < bracketSize) {
+    const nextSize = seedPositions.length * 2;
+    seedPositions = seedPositions.flatMap((seed) => [seed, nextSize + 1 - seed]);
+  }
+  let sources: Array<string | null> = seedPositions.map((seed) => initialSources[seed - 1] ?? null);
+  const definitions: Array<[string, string, string, string]> = [];
+  let round = 1;
+  while (sources.length > 1) {
+    const nextSources: Array<string | null> = [];
+    const isFinal = sources.length === 2;
+    for (let index = 0; index < sources.length; index += 2) {
+      const sourceA = sources[index];
+      const sourceB = sources[index + 1];
+      if (!sourceA || !sourceB) {
+        nextSources.push(sourceA ?? sourceB);
+        continue;
+      }
+      const matchNo = isFinal ? `${prefix}F` : `${prefix}R${round}M${index / 2 + 1}`;
+      definitions.push([matchNo, isFinal ? `${labelPrefix} 결승` : `${labelPrefix} ${round}라운드`, sourceA, sourceB]);
+      nextSources.push(`winner:${matchNo}`);
+    }
+    sources = nextSources;
+    round += 1;
+  }
+  return definitions;
+}
+
+// Scalable two-life bracket: every upper-bracket loser enters a seeded lower
+// bracket. This keeps the winner/loser branches explicit for any 2-16 teams,
+// including non-power-of-two fields with automatic byes.
+function buildWinnerLoserDefinitions(seedOrder: string[]) {
+  const upper = buildEliminationFromSources(seedOrder.map((teamId) => `seed:${teamId}`), "U", "승자조");
+  const lower = buildEliminationFromSources([...upper].reverse().map(([matchNo]) => `loser:${matchNo}`), "L", "패자조");
+  const upperFinal = upper.at(-1)?.[0];
+  const lowerFinal = lower.at(-1)?.[0];
+  if (!upperFinal || !lowerFinal) return buildSingleEliminationDefinitions(seedOrder);
+  return [
+    ...upper,
+    ...lower,
+    ["F", "최종 결승", `winner:${upperFinal}`, `winner:${lowerFinal}`] as [string, string, string, string],
+  ];
 }
 
 function resolveSource(
@@ -737,12 +927,25 @@ export async function setMatchWinner(matchId: string, winnerId: string, actor: R
 
   const loserId = match.teamAId === winnerId ? match.teamBId : match.teamAId;
   if (match.status === "completed") await rollbackBets(match.id, false);
+  const scoreA = match.teamAId === winnerId ? 1 : 0;
+  const scoreB = match.teamBId === winnerId ? 1 : 0;
+  if (match.bestOf === 1) {
+    await db.insert(matchGames).values({
+      id: uid("game"), matchId: match.id, setNo: 1,
+      blueTeamId: match.teamAId, redTeamId: match.teamBId,
+      winnerTeamId: winnerId, status: "completed", completedAt: new Date().toISOString(),
+    }).onConflictDoUpdate({
+      target: [matchGames.matchId, matchGames.setNo],
+      set: { blueTeamId: match.teamAId, redTeamId: match.teamBId, winnerTeamId: winnerId, status: "completed", completedAt: new Date().toISOString() },
+    });
+  }
   await db
     .update(matches)
     .set({
       status: "completed",
       winnerId,
       loserId,
+      ...(match.bestOf === 1 ? { seriesScoreA: scoreA, seriesScoreB: scoreB } : {}),
       completedAt: new Date().toISOString(),
     })
     .where(eq(matches.id, match.id));
@@ -750,6 +953,15 @@ export async function setMatchWinner(matchId: string, winnerId: string, actor: R
   if (match.phase === "bracket") await propagateBracket(match.tournamentId);
   if (match.matchNo === "F") {
     await db.update(tournaments).set({ status: "completed" }).where(eq(tournaments.id, match.tournamentId));
+  }
+  if (match.phase === "league") {
+    const [tournament] = await db.select().from(tournaments).where(eq(tournaments.id, match.tournamentId)).limit(1);
+    if (tournament?.bracketFormat === "none") {
+      const leagueMatches = await db.select().from(matches).where(and(eq(matches.tournamentId, match.tournamentId), eq(matches.phase, "league")));
+      if (leagueMatches.every((item) => item.id === match.id || item.status === "completed")) {
+        await db.update(tournaments).set({ status: "completed" }).where(eq(tournaments.id, match.tournamentId));
+      }
+    }
   }
   await audit(actor, match.winnerId ? "match_result_changed" : "match_result_set", "match", match.id, match.tournamentId, {
     winnerId: match.winnerId,
@@ -778,6 +990,7 @@ type ResultPlayerInput = {
 
 export type SaveMatchResultInput = {
   matchId: string;
+  setNo?: number;
   winnerTeamId: string;
   side1TeamId: string;
   side2TeamId: string;
@@ -811,6 +1024,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId)).limit(1);
   if (!match || !match.teamAId || !match.teamBId) throw new Error("결과를 등록할 경기를 찾을 수 없습니다.");
+  const setNo = Math.min(match.bestOf, Math.max(1, Math.floor(input.setNo ?? 1)));
   const matchTeams = new Set([match.teamAId, match.teamBId]);
   if (
     input.side1TeamId === input.side2TeamId ||
@@ -833,7 +1047,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const [previousImage] = await db
     .select()
     .from(matchResultImages)
-    .where(eq(matchResultImages.matchId, match.id))
+    .where(and(eq(matchResultImages.matchId, match.id), eq(matchResultImages.setNo, setNo)))
     .limit(1);
   const reviewedAt = new Date().toISOString();
   const imageValues = {
@@ -854,15 +1068,17 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     await db.insert(matchResultImages).values({
       id: uid("result_image"),
       matchId: match.id,
+      setNo,
       ...imageValues,
     });
   }
 
-  await db.delete(matchTeamStats).where(eq(matchTeamStats.matchId, match.id));
-  await db.delete(playerMatchStats).where(eq(playerMatchStats.matchId, match.id));
+  await db.delete(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo)));
+  await db.delete(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo)));
   const sideTeam = new Map<number, string>([[1, input.side1TeamId], [2, input.side2TeamId]]);
   await db.insert(matchTeamStats).values(input.teams.map((team) => ({
     matchId: match.id,
+    setNo,
     side: team.side,
     teamId: sideTeam.get(team.side)!,
     kills: statInteger(team.kills),
@@ -874,6 +1090,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   await db.insert(playerMatchStats).values(input.players.map((player, index) => ({
     id: uid("player_stat"),
     matchId: match.id,
+    setNo,
     teamId: sideTeam.get(player.side)!,
     userId: player.userId || null,
     side: player.side,
@@ -892,9 +1109,27 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     updatedAt: reviewedAt,
   })));
 
-  await setMatchWinner(match.id, input.winnerTeamId, actor);
+  const [existingGame] = await db.select().from(matchGames).where(and(eq(matchGames.matchId, match.id), eq(matchGames.setNo, setNo))).limit(1);
+  const gameValues = {
+    blueTeamId: input.side1TeamId,
+    redTeamId: input.side2TeamId,
+    winnerTeamId: input.winnerTeamId,
+    status: "completed" as const,
+    completedAt: reviewedAt,
+  };
+  if (existingGame) await db.update(matchGames).set(gameValues).where(eq(matchGames.id, existingGame.id));
+  else await db.insert(matchGames).values({ id: uid("game"), matchId: match.id, setNo, ...gameValues });
+  const games = await db.select().from(matchGames).where(eq(matchGames.matchId, match.id));
+  const scoreA = games.filter((game) => game.status === "completed" && game.winnerTeamId === match.teamAId).length;
+  const scoreB = games.filter((game) => game.status === "completed" && game.winnerTeamId === match.teamBId).length;
+  const winsNeeded = Math.ceil(match.bestOf / 2);
+  await db.update(matches).set({ seriesScoreA: scoreA, seriesScoreB: scoreB }).where(eq(matches.id, match.id));
+  if (scoreA >= winsNeeded || scoreB >= winsNeeded) {
+    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor);
+  }
   await audit(actor, previousImage ? "match_detail_updated" : "match_detail_registered", "match", match.id, match.tournamentId, null, {
     winnerTeamId: input.winnerTeamId,
+    setNo,
     resultImageId: previousImage?.id ?? "new",
   });
   return { previousObjectKey: previousImage?.objectKey ?? null };
@@ -934,6 +1169,20 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
     scheduledAt: nextScheduledAt,
     scheduleConfirmed: false,
   });
+}
+
+export async function setMatchBestOf(matchId: string, bestOf: number, actor: RequestUser) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  if (match.status !== "scheduled") throw new Error("시작 전 경기만 세트 수를 변경할 수 있습니다.");
+  const completedGames = await db.select().from(matchGames).where(and(eq(matchGames.matchId, matchId), eq(matchGames.status, "completed")));
+  if (completedGames.length) throw new Error("세트 결과가 등록된 경기는 BO를 변경할 수 없습니다.");
+  const normalized = normalizeBestOf(bestOf, 1);
+  await db.update(matches).set({ bestOf: normalized, seriesScoreA: 0, seriesScoreB: 0 }).where(eq(matches.id, matchId));
+  await db.update(draftSessions).set({ bestOf: normalized, updatedAt: new Date().toISOString() }).where(and(eq(draftSessions.matchId, matchId), eq(draftSessions.status, "lobby")));
+  await audit(actor, "match_best_of_changed", "match", match.id, match.tournamentId, { bestOf: match.bestOf }, { bestOf: normalized });
 }
 
 export async function confirmMatchSchedule(matchId: string, actor: RequestUser) {
@@ -1019,7 +1268,14 @@ export async function setUserRole(targetUserId: string, role: UserRole, actor: R
 export async function getDashboard(tournamentId: string | null, requestUser: RequestUser | null) {
   await ensureSchema();
   const db = getDb();
-  const tournamentList = await db.select().from(tournaments).orderBy(desc(tournaments.startAt));
+  const allTournaments = await db.select().from(tournaments).orderBy(desc(tournaments.startAt));
+  const memberships = requestUser
+    ? await db.select().from(tournamentMembers).where(eq(tournamentMembers.userId, requestUser.id))
+    : [];
+  const allowedIds = new Set(memberships.map((membership) => membership.tournamentId));
+  const tournamentList = requestUser?.role === "admin" || requestUser?.isLocalDemo
+    ? allTournaments
+    : allTournaments.filter((tournament) => allowedIds.has(tournament.id));
   const selected = tournamentList.find((item) => item.id === tournamentId) ?? tournamentList[0] ?? null;
   if (!selected) {
     return {
@@ -1028,6 +1284,9 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       tournament: null,
       teams: [],
       matches: [],
+      games: [],
+      draftSessions: [],
+      practiceDrafts: [],
       standings: [],
       placements: [],
       resultImages: [],
@@ -1043,14 +1302,14 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     };
   }
 
-  if (requestUser?.profileComplete) {
+  if (requestUser?.profileComplete && await hasTournamentAccess(requestUser, selected.id)) {
     const entry = await ensureTournamentEntry(requestUser.id, selected.id);
     requestUser.pointsBalance = entry?.pointsBalance ?? 0;
   } else if (requestUser) {
     requestUser.pointsBalance = 0;
   }
 
-  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows] = await Promise.all([
+  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows, gameRows, tournamentDraftRows] = await Promise.all([
     db.select().from(teams).where(eq(teams.tournamentId, selected.id)).orderBy(asc(teams.seed), asc(teams.name)),
     db.select().from(players),
     db.select().from(matches).where(eq(matches.tournamentId, selected.id)).orderBy(asc(matches.phase), asc(matches.sortOrder)),
@@ -1064,6 +1323,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     db.select({
       id: matchResultImages.id,
       matchId: matchResultImages.matchId,
+      setNo: matchResultImages.setNo,
       fileName: matchResultImages.fileName,
       width: matchResultImages.width,
       height: matchResultImages.height,
@@ -1074,6 +1334,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       .where(eq(matches.tournamentId, selected.id)),
     db.select({
       matchId: matchTeamStats.matchId,
+      setNo: matchTeamStats.setNo,
       side: matchTeamStats.side,
       teamId: matchTeamStats.teamId,
       kills: matchTeamStats.kills,
@@ -1087,6 +1348,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     db.select({
       id: playerMatchStats.id,
       matchId: playerMatchStats.matchId,
+      setNo: playerMatchStats.setNo,
       teamId: playerMatchStats.teamId,
       userId: playerMatchStats.userId,
       side: playerMatchStats.side,
@@ -1111,7 +1373,20 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       riotGameName: users.riotGameName,
       riotTagline: users.riotTagline,
       profileCompletedAt: users.profileCompletedAt,
-    }).from(users).orderBy(asc(users.displayName)),
+    }).from(tournamentMembers)
+      .innerJoin(users, eq(users.id, tournamentMembers.userId))
+      .where(eq(tournamentMembers.tournamentId, selected.id))
+      .orderBy(asc(users.displayName)),
+    db.select({
+      id: matchGames.id,
+      matchId: matchGames.matchId,
+      setNo: matchGames.setNo,
+      blueTeamId: matchGames.blueTeamId,
+      redTeamId: matchGames.redTeamId,
+      winnerTeamId: matchGames.winnerTeamId,
+      status: matchGames.status,
+    }).from(matchGames).innerJoin(matches, eq(matches.id, matchGames.matchId)).where(eq(matches.tournamentId, selected.id)),
+    db.select().from(draftSessions).where(eq(draftSessions.tournamentId, selected.id)).orderBy(desc(draftSessions.updatedAt)),
   ]);
 
   const userBets = requestUser
@@ -1119,6 +1394,12 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     : [];
   const ledgerRows = requestUser
     ? await db.select().from(pointLedger).where(and(eq(pointLedger.userId, requestUser.id), eq(pointLedger.tournamentId, selected.id))).orderBy(desc(pointLedger.createdAt)).limit(30)
+    : [];
+  const practiceDraftRows = requestUser
+    ? await db.select().from(draftSessions).where(and(
+        eq(draftSessions.ownerUserId, requestUser.id),
+        eq(draftSessions.context, "practice"),
+      )).orderBy(desc(draftSessions.updatedAt)).limit(5)
     : [];
   const adminUsers = requestUser?.role === "admin"
     ? (await db
@@ -1166,11 +1447,14 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     tournament: selected,
     teams: teamData,
     matches: matchRows,
+    games: gameRows,
+    draftSessions: tournamentDraftRows,
+    practiceDrafts: practiceDraftRows,
     standings,
     placements,
     resultImages: resultImageRows.map((image) => ({
       ...image,
-      imageUrl: `/api/results/${encodeURIComponent(image.matchId)}/image`,
+      imageUrl: `/api/results/${encodeURIComponent(image.matchId)}/image?set=${image.setNo}`,
     })),
     teamStats: teamStatRows,
     playerStats: playerStatRows,

@@ -1,20 +1,26 @@
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { ensureSchema, getDb } from "../../../../../db";
-import { matchResultImages } from "../../../../../db/schema";
+import { matchResultImages, matches } from "../../../../../db/schema";
+import { getRequestUser, hasTournamentAccess } from "../../../../../lib/tournament-service";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ matchId: string }> },
 ) {
   await ensureSchema();
   const { matchId } = await context.params;
+  const setNo = Math.max(1, Number(new URL(request.url).searchParams.get("set") ?? 1));
+  const [match] = await getDb().select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || !(await hasTournamentAccess(await getRequestUser(request), match.tournamentId))) {
+    return new Response("Forbidden", { status: 403 });
+  }
   const [image] = await getDb()
     .select({ objectKey: matchResultImages.objectKey })
     .from(matchResultImages)
-    .where(eq(matchResultImages.matchId, matchId))
+    .where(and(eq(matchResultImages.matchId, matchId), eq(matchResultImages.setNo, setNo)))
     .limit(1);
   if (!image) return new Response("Not found", { status: 404 });
 
