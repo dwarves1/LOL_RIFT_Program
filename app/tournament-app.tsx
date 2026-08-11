@@ -2,14 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isPredictionOpen } from "../lib/match-rules";
+import { ProfileModal } from "./profile-modal";
+import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
 
 type Role = "viewer" | "operator" | "admin";
-type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "points" | "admin";
+type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "stats" | "points" | "admin";
 
 type Viewer = {
   id: string;
   email: string;
   displayName: string;
+  authDisplayName: string;
+  realName: string | null;
+  riotGameName: string | null;
+  riotTagline: string | null;
+  profileComplete: boolean;
   role: Role;
   pointsBalance: number;
   isLocalDemo: boolean;
@@ -22,6 +29,8 @@ type Tournament = {
   startAt: string;
   matchesPerPair: number;
   starterPoints: number;
+  preliminaryFormat: "none" | "round_robin";
+  bracketFormat: "single_elimination" | "winner_loser_split";
 };
 
 type Team = {
@@ -78,6 +87,10 @@ type Dashboard = {
   matches: Match[];
   standings: Standing[];
   placements: Array<{ rank: number; teamId: string }>;
+  resultImages: Array<{ id: string; matchId: string; fileName: string; width: number | null; height: number | null; durationSeconds: number | null; reviewedAt: string; imageUrl: string }>;
+  teamStats: Array<{ matchId: string; side: number; teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
+  playerStats: ResultPlayerStat[];
+  accounts: Array<{ id: string; displayName: string; riotGameName: string | null; riotTagline: string | null }>;
   bets: Bet[];
   ledger: Array<{
     id: string;
@@ -121,6 +134,7 @@ const NAV_ITEMS: Array<{ id: Tab; label: string; short: string }> = [
   { id: "standings", label: "리그 순위", short: "순위" },
   { id: "bracket", label: "토너먼트", short: "대진" },
   { id: "teams", label: "팀 · 선수", short: "팀" },
+  { id: "stats", label: "경기 통계", short: "통계" },
   { id: "points", label: "포인트 예측", short: "포인트" },
 ];
 
@@ -145,6 +159,10 @@ const AUDIT_LABEL: Record<string, string> = {
   match_schedule_changed: "경기 일정을 변경했습니다",
   match_schedule_confirmed: "경기 일정을 확정했습니다",
   user_role_changed: "사용자 권한을 변경했습니다",
+  profile_completed: "공개 프로필을 등록했습니다",
+  profile_updated: "공개 프로필을 변경했습니다",
+  match_detail_registered: "경기 이미지와 상세 통계를 등록했습니다",
+  match_detail_updated: "경기 이미지와 상세 통계를 수정했습니다",
 };
 
 function formatDate(value: string, withTime = true) {
@@ -210,6 +228,9 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   const [message, setMessage] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [reviewMatch, setReviewMatch] = useState<Match | null>(null);
+  const [detailMatch, setDetailMatch] = useState<Match | null>(null);
   const activeLoad = useRef<AbortController | null>(null);
 
   const load = useCallback(async (tournamentId?: string) => {
@@ -308,6 +329,15 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
             }}
           />
         )}
+        {viewer && (!viewer.profileComplete || showProfile) && (
+          <ProfileModal
+            viewer={viewer}
+            busy={busy}
+            required={!viewer.profileComplete}
+            onClose={() => setShowProfile(false)}
+            onSave={(profile) => command({ action: "update_profile", ...profile }, "프로필을 저장했습니다.")}
+          />
+        )}
       </main>
     );
   }
@@ -331,7 +361,16 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   const completedMatches = data.matches.filter((match) => match.status === "completed").length;
   const progress = totalMatches ? Math.round((completedMatches / totalMatches) * 100) : 0;
 
-  const shared = { data, teamMap, isStaff: Boolean(isStaff), busy, command, signInPath };
+  const shared = {
+    data,
+    teamMap,
+    isStaff: Boolean(isStaff),
+    busy,
+    command,
+    signInPath,
+    openResultReview: setReviewMatch,
+    openResultDetail: setDetailMatch,
+  };
 
   return (
     <div className="app-shell">
@@ -352,7 +391,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         </nav>
         <div className="account-area">
           {viewer ? (
-            <button className="account-chip" onClick={() => setActiveTab("points")}>
+            <button className="account-chip" onClick={() => setShowProfile(true)} title="내 프로필 수정">
               <span className="account-avatar">{viewer.displayName.slice(0, 1)}</span>
               <span><strong>{viewer.pointsBalance.toLocaleString()}P</strong><small>{ROLE_LABEL[viewer.role]}</small></span>
             </button>
@@ -403,6 +442,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         {activeTab === "standings" && <StandingsView {...shared} />}
         {activeTab === "bracket" && <BracketView {...shared} matches={bracketMatches} />}
         {activeTab === "teams" && <TeamsView data={data} />}
+        {activeTab === "stats" && <StatsView data={data} teamMap={teamMap} />}
         {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} />}
         {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} />}
       </main>
@@ -414,7 +454,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
             {item.short}
           </button>
         ))}
-        <button className={["teams", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab(isStaff ? "admin" : "points")}>
+        <button className={["teams", "stats", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab(isStaff ? "admin" : "stats")}>
           <span>•••</span>더보기
         </button>
       </nav>
@@ -429,6 +469,36 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
           }}
         />
       )}
+      {viewer && (!viewer.profileComplete || showProfile) && (
+        <ProfileModal
+          viewer={viewer}
+          busy={busy}
+          required={!viewer.profileComplete}
+          onClose={() => setShowProfile(false)}
+          onSave={(profile) => command({ action: "update_profile", ...profile }, "프로필을 저장했습니다.")}
+        />
+      )}
+      {reviewMatch && (
+        <ResultReviewModal
+          match={reviewMatch}
+          teams={data.teams}
+          accounts={data.accounts}
+          busy={busy}
+          onClose={() => setReviewMatch(null)}
+          onSubmit={(input) => command({ action: "save_match_result", input }, "경기 결과와 통계를 등록했습니다.")}
+        />
+      )}
+      {detailMatch && (() => {
+        const resultImage = data.resultImages.find((image) => image.matchId === detailMatch.id);
+        return resultImage ? <ResultDetailModal
+          match={detailMatch}
+          teams={data.teams}
+          imageUrl={resultImage.imageUrl}
+          durationSeconds={resultImage.durationSeconds}
+          stats={data.playerStats.filter((stat) => stat.matchId === detailMatch.id)}
+          onClose={() => setDetailMatch(null)}
+        /> : null;
+      })()}
     </div>
   );
 }
@@ -440,6 +510,8 @@ type SharedProps = {
   busy: boolean;
   command: (payload: Record<string, unknown>, successMessage: string) => Promise<boolean>;
   signInPath: string;
+  openResultReview: (match: Match) => void;
+  openResultDetail: (match: Match) => void;
 };
 
 function HomeView({
@@ -463,15 +535,18 @@ function HomeView({
   const nextMatch = upcoming[0];
   const lastResults = data.matches.filter((match) => match.status === "completed").slice(-3).reverse();
   const teamCount = data.teams.length;
-  const bracketFormat = teamCount === 5 ? "패자부활 토너먼트" : "싱글 엘리미네이션 토너먼트";
+  const bracketFormat = data.tournament?.bracketFormat === "winner_loser_split" ? "승·패자 분기형 토너먼트" : "일반 토너먼트";
+  const preliminaryLabel = data.tournament?.preliminaryFormat === "round_robin"
+    ? `서로 ${data.tournament?.matchesPerPair}경기 · 총 ${data.summary.leagueTotal}경기 후`
+    : "리그전 없이 바로";
   return (
     <>
       <section className="hero-grid">
         <article className="hero-card">
           <div className="hero-copy">
-            <p className="eyebrow">{teamCount} TEAMS · {data.tournament?.matchesPerPair} MATCHES PER PAIR</p>
+            <p className="eyebrow">{teamCount} TEAMS · {data.tournament?.preliminaryFormat === "none" ? "DIRECT BRACKET" : `${data.tournament?.matchesPerPair} MATCHES PER PAIR`}</p>
             <h1>{data.tournament?.name}</h1>
-            <p>{teamCount}개 팀이 서로 {data.tournament?.matchesPerPair}경기 · 총 {data.summary.leagueTotal}경기 후 {bracketFormat}</p>
+            <p>{teamCount}개 팀이 {preliminaryLabel} {bracketFormat}</p>
             <div className="hero-meta">
               <span>개막 {formatDate(data.tournament!.startAt, false)}</span>
               <span>참가 기본 {data.tournament?.starterPoints.toLocaleString()}P</span>
@@ -572,7 +647,7 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Omit
   );
 }
 
-function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, bracketMatches }: SharedProps & { leagueMatches: Match[]; bracketMatches: Match[] }) {
+function ScheduleView({ data, teamMap, isStaff, busy, command, openResultReview, openResultDetail, leagueMatches, bracketMatches }: SharedProps & { leagueMatches: Match[]; bracketMatches: Match[] }) {
   const [phase, setPhase] = useState<"league" | "bracket">(data.tournament?.status === "league" ? "league" : "bracket");
   const visible = [...(phase === "league" ? leagueMatches : bracketMatches)].sort(
     (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime() || a.sortOrder - b.sortOrder,
@@ -583,7 +658,7 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, br
     <section className="page-section">
       <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="경기는 시간순으로 표시되며, 남은 경기와 진행한 경기를 나누어 확인할 수 있습니다." />
       <div className="segmented-control">
-        <button className={phase === "league" ? "active" : ""} onClick={() => setPhase("league")}>리그전 <span>{leagueMatches.length}</span></button>
+        {data.tournament?.preliminaryFormat === "round_robin" && <button className={phase === "league" ? "active" : ""} onClick={() => setPhase("league")}>리그전 <span>{leagueMatches.length}</span></button>}
         <button className={phase === "bracket" ? "active" : ""} onClick={() => setPhase("bracket")}>토너먼트 <span>{bracketMatches.length}</span></button>
       </div>
       {visible.length ? (
@@ -597,6 +672,9 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, br
             isStaff={isStaff}
             busy={busy}
             command={command}
+            data={data}
+            openResultReview={openResultReview}
+            openResultDetail={openResultDetail}
           />
           <ScheduleGroup
             title="진행한 경기"
@@ -607,6 +685,9 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, br
             isStaff={isStaff}
             busy={busy}
             command={command}
+            data={data}
+            openResultReview={openResultReview}
+            openResultDetail={openResultDetail}
           />
         </div>
       ) : (
@@ -616,7 +697,7 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, leagueMatches, br
   );
 }
 
-function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, teamMap, isStaff, busy, command }: {
+function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, teamMap, isStaff, busy, command, data, openResultReview, openResultDetail }: {
   title: string;
   detail: string;
   matches: Match[];
@@ -625,6 +706,9 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   isStaff: boolean;
   busy: boolean;
   command: SharedProps["command"];
+  data: Dashboard;
+  openResultReview: (match: Match) => void;
+  openResultDetail: (match: Match) => void;
 }) {
   return (
     <section className="schedule-group" aria-label={title}>
@@ -635,7 +719,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
       {groupMatches.length ? (
         <div className="schedule-list">
           {groupMatches.map((match) => (
-            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} />
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} busy={busy} command={command} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
           ))}
         </div>
       ) : (
@@ -645,7 +729,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   );
 }
 
-function ScheduleCard({ match, teamMap, isStaff, busy, command }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"] }) {
+function ScheduleCard({ match, teamMap, isStaff, busy, command, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"]; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
   return (
@@ -668,6 +752,8 @@ function ScheduleCard({ match, teamMap, isStaff, busy, command }: { match: Match
         })}
       </div>
       <div className="match-actions">
+        {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
+        {isStaff && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy} onClick={() => openResultReview(match)}>{hasDetail ? "결과 이미지 수정" : "결과 이미지 등록"}</button>}
         {isStaff && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} />}
         {match.status === "scheduled" && (
           <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
@@ -746,6 +832,10 @@ function StandingsView({ data, busy, command }: SharedProps) {
   const canOperate = data.viewer?.role === "operator" || data.viewer?.role === "admin";
   const orderRows = seedOrder.map((id) => data.standings.find((row) => row.teamId === id)!).filter(Boolean);
   const selectedTeam = data.teams.find((team) => team.id === selectedTeamId);
+
+  if (data.tournament?.preliminaryFormat === "none") {
+    return <section className="page-section"><PageTitle eyebrow="DIRECT BRACKET" title="리그전 없는 대회" description="이 대회는 생성할 때 확정한 최초 팀 배치로 바로 토너먼트를 진행합니다." /><EmptyState title="본선 대진을 확인해 주세요" detail="토너먼트 메뉴에서 승·패 결과와 다음 경기 경로를 확인할 수 있습니다." /></section>;
+  }
 
   function move(index: number, direction: -1 | 1) {
     const next = [...seedOrder];
@@ -937,6 +1027,67 @@ function TeamsView({ data }: { data: Dashboard }) {
   );
 }
 
+function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Team> }) {
+  const accountMap = new Map(data.accounts.map((account) => [account.id, account.displayName]));
+  const playerRows = [...data.playerStats.reduce((map, row) => {
+    const key = row.userId ?? `snapshot:${row.accountName}`;
+    const current = map.get(key) ?? {
+      key,
+      name: row.userId ? (accountMap.get(row.userId) ?? row.accountName) : row.accountName,
+      games: 0,
+      wins: 0,
+      kills: 0,
+      deaths: 0,
+      assists: 0,
+      damage: 0,
+      gold: 0,
+      goldPerMinute: 0,
+      champions: new Map<string, number>(),
+      lanes: new Map<string, number>(),
+    };
+    current.games += 1;
+    current.wins += row.won ? 1 : 0;
+    current.kills += row.kills;
+    current.deaths += row.deaths;
+    current.assists += row.assists;
+    current.damage += row.damage;
+    current.gold += row.gold;
+    current.goldPerMinute += row.goldPerMinute;
+    current.champions.set(row.championName, (current.champions.get(row.championName) ?? 0) + 1);
+    current.lanes.set(row.lane, (current.lanes.get(row.lane) ?? 0) + 1);
+    map.set(key, current);
+    return map;
+  }, new Map<string, {
+    key: string; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; damage: number; gold: number; goldPerMinute: number; champions: Map<string, number>; lanes: Map<string, number>;
+  }>()).values()].sort((a, b) => b.games - a.games || b.wins - a.wins || b.damage - a.damage);
+  const teamRows = [...data.teams.map((team) => {
+    const rows = data.teamStats.filter((row) => row.teamId === team.id);
+    return {
+      team,
+      games: rows.length,
+      wins: rows.filter((row) => row.won).length,
+      kills: rows.reduce((sum, row) => sum + row.kills, 0),
+      deaths: rows.reduce((sum, row) => sum + row.deaths, 0),
+      assists: rows.reduce((sum, row) => sum + row.assists, 0),
+      gold: rows.reduce((sum, row) => sum + row.gold, 0),
+    };
+  })].filter((row) => row.games).sort((a, b) => b.wins - a.wins || b.games - a.games);
+
+  if (!data.playerStats.length) {
+    return <section className="page-section"><PageTitle eyebrow="ANALYTICS" title="경기 통계" description="결과 이미지를 등록하면 계정·챔피언·라인별 기록이 자동으로 쌓입니다." /><EmptyState title="아직 통계가 없습니다" detail="운영자가 경기 결과 이미지를 검토하고 등록하면 통계를 확인할 수 있습니다." /></section>;
+  }
+  return <section className="page-section stats-page">
+    <PageTitle eyebrow="ANALYTICS" title="경기 통계" description="등록된 결과 이미지를 기준으로 계산한 대회 누적 통계입니다." />
+    <div className="stats-summary-grid"><div><span>분석 경기</span><strong>{new Set(data.playerStats.map((row) => row.matchId)).size}</strong></div><div><span>기록 계정</span><strong>{playerRows.length}</strong></div><div><span>총 킬</span><strong>{data.teamStats.reduce((sum, row) => sum + row.kills, 0)}</strong></div><div><span>등록 이미지</span><strong>{data.resultImages.length}</strong></div></div>
+    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 딜량</span><span>평균 골드</span><span>주력 챔피언</span><span>주 라인</span></div>{playerRows.map((row) => {
+      const topChampion = [...row.champions].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
+      const topLane = [...row.lanes].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
+      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games}</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.damage / row.games).toLocaleString()}</span><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{topChampion}</span><span>{topLane}</span></div>;
+    })}</div></article>
+    <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as React.CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>
+  </section>;
+}
+
 function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: SharedProps & { upcoming: Match[] }) {
   if (!data.viewer) {
     return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 선택한 대회의 기본 포인트를 받고, 대회별 지갑으로 따로 관리됩니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
@@ -1091,18 +1242,42 @@ function createTeamDraft(teamIndex: number): TeamDraft {
   };
 }
 
-function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onClose: () => void; onCreate: (input: { name: string; startAt: string; matchesPerPair: number; starterPoints: number; teams: TeamDraft[] }) => void }) {
+function SingleEliminationPreview({ teams }: { teams: TeamDraft[] }) {
+  let bracketSize = 2;
+  while (bracketSize < teams.length) bracketSize *= 2;
+  let seedPositions = [1, 2];
+  while (seedPositions.length < bracketSize) {
+    const nextSize = seedPositions.length * 2;
+    seedPositions = seedPositions.flatMap((seed) => [seed, nextSize + 1 - seed]);
+  }
+  const slots = seedPositions.map((seed) => teams[seed - 1]?.name ?? "부전승");
+  return <div className="preview-match-grid">{Array.from({ length: slots.length / 2 }, (_, index) => <div key={index}><span>{bracketSize}강 {index + 1}경기</span><strong>{slots[index * 2]} <small>vs</small> {slots[index * 2 + 1]}</strong></div>)}</div>;
+}
+
+function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onClose: () => void; onCreate: (input: { name: string; startAt: string; matchesPerPair: number; starterPoints: number; preliminaryFormat: "none" | "round_robin"; bracketFormat: "single_elimination" | "winner_loser_split"; teams: TeamDraft[] }) => void }) {
   const [name, setName] = useState("새 소환사의 컵");
   const [startAt, setStartAt] = useState("2026-09-05T10:00");
   const [matchesPerPair, setMatchesPerPair] = useState(2);
   const [starterPoints, setStarterPoints] = useState(1000);
+  const [preliminaryFormat, setPreliminaryFormat] = useState<"none" | "round_robin">("none");
+  const [bracketFormat, setBracketFormat] = useState<"single_elimination" | "winner_loser_split">("winner_loser_split");
   const [teamDrafts, setTeamDrafts] = useState<TeamDraft[]>(Array.from({ length: 5 }, (_, teamIndex) => createTeamDraft(teamIndex)));
 
   const leagueMatchCount = (teamDrafts.length * (teamDrafts.length - 1) / 2) * matchesPerPair;
 
   function updateTeamCount(value: number) {
-    const count = Math.min(16, Math.max(2, Math.floor(value)));
+    const count = bracketFormat === "winner_loser_split" ? 5 : Math.min(16, Math.max(2, Math.floor(value)));
     setTeamDrafts((current) => Array.from({ length: count }, (_, index) => current[index] ?? createTeamDraft(index)));
+  }
+
+  function moveTeam(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= teamDrafts.length) return;
+    setTeamDrafts((current) => {
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
   }
 
   function updateTeam(teamIndex: number, patch: Partial<TeamDraft>) {
@@ -1117,18 +1292,21 @@ function CreateTournamentModal({ busy, onClose, onCreate }: { busy: boolean; onC
           <div className="form-grid tournament-fields">
             <label><span>대회명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
             <label><span>첫 경기 기본 일시</span><input type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} /><small>생성 후 일정 화면에서 경기별로 수정</small></label>
-            <label><span>참가 팀 수</span><select value={teamDrafts.length} onChange={(event) => updateTeamCount(Number(event.target.value))}>{Array.from({ length: 15 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>{count}팀</option>)}</select><small>2팀부터 16팀까지</small></label>
-            <label><span>팀 간 경기 수</span><input type="number" min="1" max="10" value={matchesPerPair} onChange={(event) => setMatchesPerPair(Number(event.target.value))} /><small>리그전 총 {leagueMatchCount}경기</small></label>
+            <label><span>참가 팀 수</span><select value={teamDrafts.length} disabled={bracketFormat === "winner_loser_split"} onChange={(event) => updateTeamCount(Number(event.target.value))}>{Array.from({ length: 15 }, (_, index) => index + 2).map((count) => <option key={count} value={count}>{count}팀</option>)}</select><small>{bracketFormat === "winner_loser_split" ? "승·패자 분기형은 5팀 고정" : "2팀부터 16팀까지"}</small></label>
+            {preliminaryFormat === "round_robin" && <label><span>팀 간 경기 수</span><input type="number" min="1" max="10" value={matchesPerPair} onChange={(event) => setMatchesPerPair(Number(event.target.value))} /><small>리그전 총 {leagueMatchCount}경기</small></label>}
             <label><span>참가 기본 포인트</span><input type="number" min="0" step="100" value={starterPoints} onChange={(event) => setStarterPoints(Number(event.target.value))} /></label>
           </div>
+          <div className="format-section"><div className="team-entry-heading"><h3>대회 진행 방식</h3><span>예선과 본선 방식을 대회마다 선택</span></div><div className="format-choice-grid"><button type="button" className={preliminaryFormat === "none" ? "selected" : ""} onClick={() => setPreliminaryFormat("none")}><strong>바로 토너먼트</strong><span>팀 등록과 최초 배치를 마치면 본선 대진을 즉시 생성합니다.</span></button><button type="button" className={preliminaryFormat === "round_robin" ? "selected" : ""} onClick={() => setPreliminaryFormat("round_robin")}><strong>풀리그 후 토너먼트</strong><span>모든 팀이 리그전을 치른 뒤 최종 순서로 본선 대진을 생성합니다.</span></button></div></div>
+          <div className="format-section"><div className="team-entry-heading"><h3>토너먼트 형식</h3><span>본선 대진 진행 규칙</span></div><div className="format-choice-grid"><button type="button" className={bracketFormat === "single_elimination" ? "selected" : ""} onClick={() => setBracketFormat("single_elimination")}><strong>일반 토너먼트</strong><span>패배 즉시 탈락 · 상위 순서 부전승 지원</span></button><button type="button" className={bracketFormat === "winner_loser_split" ? "selected" : ""} onClick={() => { setBracketFormat("winner_loser_split"); setTeamDrafts((current) => Array.from({ length: 5 }, (_, index) => current[index] ?? createTeamDraft(index))); }}><strong>승·패자 분기형</strong><span>5팀 · 승자전, 패자전, 패자부활전과 순위 결정</span></button></div></div>
           <div className="team-entry-heading"><h3>팀 및 선수 등록</h3><span>각 팀 5명 · TOP / JGL / MID / ADC / SUP 순서</span></div>
           <div className="team-entry-grid">
             {teamDrafts.map((team, teamIndex) => (
-              <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>팀 {teamIndex + 1}</legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <label key={memberIndex}><span>{POSITIONS_LABEL[memberIndex]}</span><input value={member} onChange={(event) => { const members = [...team.members]; members[memberIndex] = event.target.value; updateTeam(teamIndex, { members }); }} /></label>)}</fieldset>
+              <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>배치 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <label key={memberIndex}><span>{POSITIONS_LABEL[memberIndex]}</span><input value={member} onChange={(event) => { const members = [...team.members]; members[memberIndex] = event.target.value; updateTeam(teamIndex, { members }); }} /></label>)}</fieldset>
             ))}
           </div>
+          <div className="initial-bracket-preview"><div className="team-entry-heading"><h3>최초 대진 미리보기</h3><span>위 화살표로 배치 순서를 직접 변경</span></div>{bracketFormat === "winner_loser_split" ? <div className="preview-match-grid"><div><span>1경기</span><strong>{teamDrafts[0]?.name} <small>vs</small> {teamDrafts[2]?.name}</strong></div><div><span>2경기</span><strong>{teamDrafts[1]?.name} <small>vs</small> {teamDrafts[3]?.name}</strong></div><div><span>후속 진입</span><strong>{teamDrafts[4]?.name}</strong></div></div> : <SingleEliminationPreview teams={teamDrafts} />}</div>
         </div>
-        <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, teams: teamDrafts })}>{busy ? "생성 중…" : "대회 및 리그 대진 생성"}</button></footer>
+        <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, teams: teamDrafts })}>{busy ? "생성 중…" : preliminaryFormat === "none" ? "대회 및 본선 대진 생성" : "대회 및 리그 대진 생성"}</button></footer>
       </section>
     </div>
   );

@@ -11,13 +11,17 @@ import { isPredictionOpen, shouldSwapLeagueSides } from "./match-rules";
 import {
   auditLogs,
   bets,
+  matchResultImages,
+  matchTeamStats,
   matches,
+  playerMatchStats,
   players,
   pointLedger,
   teams,
   tournamentEntries,
   tournaments,
   users,
+  riotIdHistory,
 } from "../db/schema";
 
 export type UserRole = "viewer" | "operator" | "admin";
@@ -26,6 +30,11 @@ export type RequestUser = {
   id: string;
   email: string;
   displayName: string;
+  authDisplayName: string;
+  realName: string | null;
+  riotGameName: string | null;
+  riotTagline: string | null;
+  profileComplete: boolean;
   role: UserRole;
   pointsBalance: number;
   isLocalDemo: boolean;
@@ -54,6 +63,14 @@ const COLORS = [
 const POSITIONS = ["TOP", "JGL", "MID", "ADC", "SUP"];
 
 const uid = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
+
+function normalizeIdentityPart(value: string) {
+  return value.trim().normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+function publicDisplayName(gameName: string, tagline: string, realName: string) {
+  return `${gameName}#${tagline}(${realName})`;
+}
 
 function isoAfter(start: string, minutes: number) {
   const date = new Date(start);
@@ -88,7 +105,7 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
     }
   }
 
-  const displayName = isLocalDemo ? "대회 운영자" : (fullName ?? email.split("@")[0]);
+  const authDisplayName = isLocalDemo ? "대회 운영자" : (fullName ?? email.split("@")[0]);
   const db = getDb();
   const [existing] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
 
@@ -98,30 +115,123 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
     await db.insert(users).values({
       id: userId,
       email,
-      displayName,
+      displayName: authDisplayName,
+      authDisplayName,
       role,
       pointsBalance: 0,
     });
-    return { id: userId, email, displayName, role, pointsBalance: 0, isLocalDemo };
+    return {
+      id: userId,
+      email,
+      displayName: authDisplayName,
+      authDisplayName,
+      realName: null,
+      riotGameName: null,
+      riotTagline: null,
+      profileComplete: false,
+      role,
+      pointsBalance: 0,
+      isLocalDemo,
+    };
   }
 
   // Dashboard polling should remain read-only for existing users. Writing a
   // last-seen timestamp on every refresh creates unnecessary D1 contention.
-  if (existing.email !== email || existing.displayName !== displayName) {
+  if (existing.email !== email || existing.authDisplayName !== authDisplayName) {
     await db
       .update(users)
-      .set({ email, displayName })
+      .set({ email, authDisplayName })
       .where(eq(users.id, userId));
   }
 
   return {
     id: existing.id,
     email,
-    displayName,
+    displayName: existing.displayName,
+    authDisplayName,
+    realName: existing.realName,
+    riotGameName: existing.riotGameName,
+    riotTagline: existing.riotTagline,
+    profileComplete: Boolean(existing.profileCompletedAt),
     role: existing.role,
     pointsBalance: existing.pointsBalance,
     isLocalDemo,
   };
+}
+
+export type UpdateProfileInput = {
+  realName: string;
+  riotGameName: string;
+  riotTagline: string;
+};
+
+export async function updateUserProfile(input: UpdateProfileInput, actor: RequestUser) {
+  const realName = input.realName?.trim().normalize("NFKC");
+  const riotGameName = input.riotGameName?.trim().normalize("NFKC");
+  const riotTagline = input.riotTagline?.trim().normalize("NFKC").toUpperCase();
+  if (!realName || realName.length > 50) throw new Error("실명을 확인해 주세요.");
+  if (!riotGameName || riotGameName.length > 32 || riotGameName.includes("#")) {
+    throw new Error("본계정 이름에는 #을 제외하고 입력해 주세요.");
+  }
+  if (!riotTagline || riotTagline.length > 16 || riotTagline.includes("#")) {
+    throw new Error("태그에는 #을 제외하고 입력해 주세요.");
+  }
+
+  const gameNameNormalized = normalizeIdentityPart(riotGameName);
+  const taglineNormalized = normalizeIdentityPart(riotTagline);
+  const db = getDb();
+  const [duplicate] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(
+      eq(users.riotGameNameNormalized, gameNameNormalized),
+      eq(users.riotTaglineNormalized, taglineNormalized),
+      ne(users.id, actor.id),
+    ))
+    .limit(1);
+  if (duplicate) throw new Error("이미 다른 회원이 사용 중인 본계정입니다.");
+
+  const [existing] = await db.select().from(users).where(eq(users.id, actor.id)).limit(1);
+  if (!existing) throw new Error("사용자 정보를 찾을 수 없습니다.");
+  const changedAt = new Date().toISOString();
+  if (
+    existing.riotGameName &&
+    existing.riotTagline &&
+    (existing.riotGameNameNormalized !== gameNameNormalized ||
+      existing.riotTaglineNormalized !== taglineNormalized)
+  ) {
+    await db.insert(riotIdHistory).values({
+      id: uid("riot_history"),
+      userId: actor.id,
+      gameName: existing.riotGameName,
+      tagline: existing.riotTagline,
+      gameNameNormalized: existing.riotGameNameNormalized ?? normalizeIdentityPart(existing.riotGameName),
+      taglineNormalized: existing.riotTaglineNormalized ?? normalizeIdentityPart(existing.riotTagline),
+      changedAt,
+    });
+  }
+
+  const displayName = publicDisplayName(riotGameName, riotTagline, realName);
+  await db.update(users).set({
+    displayName,
+    realName,
+    riotGameName,
+    riotTagline,
+    riotGameNameNormalized: gameNameNormalized,
+    riotTaglineNormalized: taglineNormalized,
+    profileCompletedAt: existing.profileCompletedAt ?? changedAt,
+    profileUpdatedAt: changedAt,
+  }).where(eq(users.id, actor.id));
+
+  await audit(
+    { id: actor.id, displayName },
+    existing.profileCompletedAt ? "profile_updated" : "profile_completed",
+    "user",
+    actor.id,
+    null,
+    { displayName: existing.displayName },
+    { displayName },
+  );
 }
 
 async function audit(
@@ -229,6 +339,8 @@ export type CreateTournamentInput = {
   startAt: string;
   matchesPerPair: number;
   starterPoints: number;
+  preliminaryFormat: "none" | "round_robin";
+  bracketFormat: "single_elimination" | "winner_loser_split";
   teams: Array<{ name: string; members: string[] }>;
 };
 
@@ -249,6 +361,13 @@ async function createTournamentInternal(
   if (input.teams.some((team) => !team.name.trim() || !Array.isArray(team.members) || team.members.filter(Boolean).length !== 5)) {
     throw new Error("각 팀의 팀명과 선수 5명을 모두 입력해 주세요.");
   }
+  const preliminaryFormat = input.preliminaryFormat === "none" ? "none" : "round_robin";
+  const bracketFormat = input.bracketFormat === "winner_loser_split"
+    ? "winner_loser_split"
+    : "single_elimination";
+  if (bracketFormat === "winner_loser_split" && input.teams.length !== 5) {
+    throw new Error("승·패자 분기형 토너먼트는 5팀으로 만들어 주세요.");
+  }
   const matchesPerPair = Math.min(10, Math.max(1, Math.floor(input.matchesPerPair)));
   const starterPoints = Math.min(100000, Math.max(0, Math.floor(input.starterPoints)));
   const startAt = new Date(input.startAt);
@@ -267,9 +386,11 @@ async function createTournamentInternal(
   await db.insert(tournaments).values({
     id: tournamentId,
     name,
-    status: "league",
+    status: preliminaryFormat === "round_robin" ? "league" : "draft",
     startAt: startAt.toISOString(),
     matchesPerPair,
+    preliminaryFormat,
+    bracketFormat,
     starterPoints,
     createdBy: actor.id,
   });
@@ -287,7 +408,7 @@ async function createTournamentInternal(
 
   const leagueMatches: Array<typeof matches.$inferInsert> = [];
   let order = 1;
-  for (let leg = 1; leg <= matchesPerPair; leg += 1) {
+  for (let leg = 1; preliminaryFormat === "round_robin" && leg <= matchesPerPair; leg += 1) {
     for (let i = 0; i < teamRows.length; i += 1) {
       for (let j = i + 1; j < teamRows.length; j += 1) {
         const swapSides = shouldSwapLeagueSides(leg);
@@ -320,7 +441,13 @@ async function createTournamentInternal(
     name,
     teams: teamRows.length,
     leagueMatches: leagueMatches.length,
+    preliminaryFormat,
+    bracketFormat,
   });
+
+  if (preliminaryFormat === "none") {
+    await createBracketInternal(tournamentId, teamRows.map((team) => team.id), actor);
+  }
 
   return tournamentId;
 }
@@ -404,8 +531,13 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
     .where(eq(tournaments.id, tournamentId))
     .limit(1);
   if (!tournament) throw new Error("대회를 찾을 수 없습니다.");
-  const bracketStart = isoAfter(tournament.startAt, leagueMatches.length * 60 + 180);
-  const definitions: Array<[string, string, string, string]> = tournamentTeams.length === 5
+  const bracketStart = tournament.preliminaryFormat === "none"
+    ? tournament.startAt
+    : isoAfter(tournament.startAt, leagueMatches.length * 60 + 180);
+  if (tournament.bracketFormat === "winner_loser_split" && tournamentTeams.length !== 5) {
+    throw new Error("승·패자 분기형 토너먼트는 5팀으로 진행해야 합니다.");
+  }
+  const definitions: Array<[string, string, string, string]> = tournament.bracketFormat === "winner_loser_split"
     ? [
         ["G1", "1경기", `seed:${seedOrder[0]}`, `seed:${seedOrder[2]}`],
         ["G2", "2경기", `seed:${seedOrder[1]}`, `seed:${seedOrder[3]}`],
@@ -438,7 +570,7 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
   await db.update(tournaments).set({ status: "bracket" }).where(eq(tournaments.id, tournamentId));
   await audit(actor, "bracket_created", "tournament", tournamentId, tournamentId, null, {
     seedOrder,
-    format: tournamentTeams.length === 5 ? "five_team_loser_bracket" : "single_elimination",
+    format: tournament.bracketFormat,
   });
 }
 
@@ -628,6 +760,146 @@ export async function setMatchWinner(matchId: string, winnerId: string, actor: R
   });
 }
 
+type ResultPlayerInput = {
+  side: 1 | 2;
+  rowOrder: number;
+  userId?: string | null;
+  accountName: string;
+  championName: string;
+  championLevel: number;
+  lane: "TOP" | "JGL" | "MID" | "ADC" | "SUP";
+  kills: number;
+  deaths: number;
+  assists: number;
+  damage: number;
+  gold: number;
+  goldPerMinute: number;
+};
+
+export type SaveMatchResultInput = {
+  matchId: string;
+  winnerTeamId: string;
+  side1TeamId: string;
+  side2TeamId: string;
+  durationSeconds: number;
+  image: {
+    objectKey: string;
+    fileName: string;
+    contentType: string;
+    fileSize: number;
+    width?: number | null;
+    height?: number | null;
+  };
+  teams: Array<{
+    side: 1 | 2;
+    kills: number;
+    deaths: number;
+    assists: number;
+    gold: number;
+  }>;
+  players: ResultPlayerInput[];
+  extraction: unknown;
+};
+
+function statInteger(value: number, max = 10_000_000) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(max, Math.floor(value)));
+}
+
+export async function saveMatchResult(input: SaveMatchResultInput, actor: RequestUser) {
+  if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId)).limit(1);
+  if (!match || !match.teamAId || !match.teamBId) throw new Error("결과를 등록할 경기를 찾을 수 없습니다.");
+  const matchTeams = new Set([match.teamAId, match.teamBId]);
+  if (
+    input.side1TeamId === input.side2TeamId ||
+    !matchTeams.has(input.side1TeamId) ||
+    !matchTeams.has(input.side2TeamId) ||
+    !matchTeams.has(input.winnerTeamId)
+  ) {
+    throw new Error("이미지의 1팀·2팀과 실제 대진 팀을 확인해 주세요.");
+  }
+  if (input.teams.length !== 2 || input.players.length !== 10) {
+    throw new Error("두 팀과 선수 10명의 결과를 확인해 주세요.");
+  }
+  if ([1, 2].some((side) => input.players.filter((player) => player.side === side).length !== 5)) {
+    throw new Error("각 팀에 선수 5명이 필요합니다.");
+  }
+  if (!input.image.objectKey || !input.image.contentType.startsWith("image/")) {
+    throw new Error("결과 이미지를 확인해 주세요.");
+  }
+
+  const [previousImage] = await db
+    .select()
+    .from(matchResultImages)
+    .where(eq(matchResultImages.matchId, match.id))
+    .limit(1);
+  const reviewedAt = new Date().toISOString();
+  const imageValues = {
+    objectKey: input.image.objectKey,
+    fileName: input.image.fileName.slice(0, 255),
+    contentType: input.image.contentType,
+    fileSize: statInteger(input.image.fileSize, 15_000_000),
+    width: input.image.width ? statInteger(input.image.width, 10_000) : null,
+    height: input.image.height ? statInteger(input.image.height, 10_000) : null,
+    durationSeconds: statInteger(input.durationSeconds, 24 * 60 * 60),
+    extractionJson: JSON.stringify(input.extraction ?? null),
+    createdBy: actor.id,
+    reviewedAt,
+  };
+  if (previousImage) {
+    await db.update(matchResultImages).set(imageValues).where(eq(matchResultImages.id, previousImage.id));
+  } else {
+    await db.insert(matchResultImages).values({
+      id: uid("result_image"),
+      matchId: match.id,
+      ...imageValues,
+    });
+  }
+
+  await db.delete(matchTeamStats).where(eq(matchTeamStats.matchId, match.id));
+  await db.delete(playerMatchStats).where(eq(playerMatchStats.matchId, match.id));
+  const sideTeam = new Map<number, string>([[1, input.side1TeamId], [2, input.side2TeamId]]);
+  await db.insert(matchTeamStats).values(input.teams.map((team) => ({
+    matchId: match.id,
+    side: team.side,
+    teamId: sideTeam.get(team.side)!,
+    kills: statInteger(team.kills),
+    deaths: statInteger(team.deaths),
+    assists: statInteger(team.assists),
+    gold: statInteger(team.gold),
+    won: sideTeam.get(team.side) === input.winnerTeamId,
+  })));
+  await db.insert(playerMatchStats).values(input.players.map((player, index) => ({
+    id: uid("player_stat"),
+    matchId: match.id,
+    teamId: sideTeam.get(player.side)!,
+    userId: player.userId || null,
+    side: player.side,
+    rowOrder: statInteger(player.rowOrder || index + 1, 10),
+    accountNameSnapshot: player.accountName.trim().slice(0, 64) || `선수 ${index + 1}`,
+    championName: player.championName.trim().slice(0, 40) || "미인식",
+    championLevel: statInteger(player.championLevel, 30),
+    lane: player.lane,
+    kills: statInteger(player.kills),
+    deaths: statInteger(player.deaths),
+    assists: statInteger(player.assists),
+    damage: statInteger(player.damage),
+    gold: statInteger(player.gold),
+    goldPerMinute: statInteger(player.goldPerMinute),
+    won: sideTeam.get(player.side) === input.winnerTeamId,
+    updatedAt: reviewedAt,
+  })));
+
+  await setMatchWinner(match.id, input.winnerTeamId, actor);
+  await audit(actor, previousImage ? "match_detail_updated" : "match_detail_registered", "match", match.id, match.tournamentId, null, {
+    winnerTeamId: input.winnerTeamId,
+    resultImageId: previousImage?.id ?? "new",
+  });
+  return { previousObjectKey: previousImage?.objectKey ?? null };
+}
+
 export async function setMatchSchedule(matchId: string, scheduledAt: string, actor: RequestUser) {
   if (actor.role === "viewer") throw new Error("운영 권한이 필요합니다.");
   const date = new Date(scheduledAt);
@@ -758,6 +1030,10 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       matches: [],
       standings: [],
       placements: [],
+      resultImages: [],
+      teamStats: [],
+      playerStats: [],
+      accounts: [],
       bets: [],
       ledger: [],
       leaderboard: [],
@@ -767,12 +1043,14 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     };
   }
 
-  if (requestUser) {
+  if (requestUser?.profileComplete) {
     const entry = await ensureTournamentEntry(requestUser.id, selected.id);
     requestUser.pointsBalance = entry?.pointsBalance ?? 0;
+  } else if (requestUser) {
+    requestUser.pointsBalance = 0;
   }
 
-  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows] = await Promise.all([
+  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows] = await Promise.all([
     db.select().from(teams).where(eq(teams.tournamentId, selected.id)).orderBy(asc(teams.seed), asc(teams.name)),
     db.select().from(players),
     db.select().from(matches).where(eq(matches.tournamentId, selected.id)).orderBy(asc(matches.phase), asc(matches.sortOrder)),
@@ -783,6 +1061,57 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       .orderBy(desc(tournamentEntries.pointsBalance), asc(users.displayName))
       .limit(20),
     db.select().from(auditLogs).where(eq(auditLogs.tournamentId, selected.id)).orderBy(desc(auditLogs.createdAt)).limit(30),
+    db.select({
+      id: matchResultImages.id,
+      matchId: matchResultImages.matchId,
+      fileName: matchResultImages.fileName,
+      width: matchResultImages.width,
+      height: matchResultImages.height,
+      durationSeconds: matchResultImages.durationSeconds,
+      reviewedAt: matchResultImages.reviewedAt,
+    }).from(matchResultImages)
+      .innerJoin(matches, eq(matches.id, matchResultImages.matchId))
+      .where(eq(matches.tournamentId, selected.id)),
+    db.select({
+      matchId: matchTeamStats.matchId,
+      side: matchTeamStats.side,
+      teamId: matchTeamStats.teamId,
+      kills: matchTeamStats.kills,
+      deaths: matchTeamStats.deaths,
+      assists: matchTeamStats.assists,
+      gold: matchTeamStats.gold,
+      won: matchTeamStats.won,
+    }).from(matchTeamStats)
+      .innerJoin(matches, eq(matches.id, matchTeamStats.matchId))
+      .where(eq(matches.tournamentId, selected.id)),
+    db.select({
+      id: playerMatchStats.id,
+      matchId: playerMatchStats.matchId,
+      teamId: playerMatchStats.teamId,
+      userId: playerMatchStats.userId,
+      side: playerMatchStats.side,
+      rowOrder: playerMatchStats.rowOrder,
+      accountName: playerMatchStats.accountNameSnapshot,
+      championName: playerMatchStats.championName,
+      championLevel: playerMatchStats.championLevel,
+      lane: playerMatchStats.lane,
+      kills: playerMatchStats.kills,
+      deaths: playerMatchStats.deaths,
+      assists: playerMatchStats.assists,
+      damage: playerMatchStats.damage,
+      gold: playerMatchStats.gold,
+      goldPerMinute: playerMatchStats.goldPerMinute,
+      won: playerMatchStats.won,
+    }).from(playerMatchStats)
+      .innerJoin(matches, eq(matches.id, playerMatchStats.matchId))
+      .where(eq(matches.tournamentId, selected.id)),
+    db.select({
+      id: users.id,
+      displayName: users.displayName,
+      riotGameName: users.riotGameName,
+      riotTagline: users.riotTagline,
+      profileCompletedAt: users.profileCompletedAt,
+    }).from(users).orderBy(asc(users.displayName)),
   ]);
 
   const userBets = requestUser
@@ -839,6 +1168,18 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     matches: matchRows,
     standings,
     placements,
+    resultImages: resultImageRows.map((image) => ({
+      ...image,
+      imageUrl: `/api/results/${encodeURIComponent(image.matchId)}/image`,
+    })),
+    teamStats: teamStatRows,
+    playerStats: playerStatRows,
+    accounts: accountRows.filter((account) => account.profileCompletedAt).map((account) => ({
+      id: account.id,
+      displayName: account.displayName,
+      riotGameName: account.riotGameName,
+      riotTagline: account.riotTagline,
+    })),
     bets: userBets,
     ledger: ledgerRows,
     leaderboard: leaderboardRows,

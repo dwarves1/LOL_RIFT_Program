@@ -14,6 +14,14 @@ export const users = sqliteTable(
     id: text("id").primaryKey(),
     email: text("email").notNull(),
     displayName: text("display_name").notNull(),
+    authDisplayName: text("auth_display_name"),
+    realName: text("real_name"),
+    riotGameName: text("riot_game_name"),
+    riotTagline: text("riot_tagline"),
+    riotGameNameNormalized: text("riot_game_name_normalized"),
+    riotTaglineNormalized: text("riot_tagline_normalized"),
+    profileCompletedAt: text("profile_completed_at"),
+    profileUpdatedAt: text("profile_updated_at"),
     role: text("role", { enum: ["viewer", "operator", "admin"] })
       .notNull()
       .default("viewer"),
@@ -21,7 +29,33 @@ export const users = sqliteTable(
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     lastSeenAt: text("last_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [uniqueIndex("idx_users_email").on(table.email)],
+  (table) => [
+    uniqueIndex("idx_users_email").on(table.email),
+    uniqueIndex("idx_users_riot_id").on(
+      table.riotGameNameNormalized,
+      table.riotTaglineNormalized,
+    ),
+  ],
+);
+
+export const riotIdHistory = sqliteTable(
+  "riot_id_history",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    gameName: text("game_name").notNull(),
+    tagline: text("tagline").notNull(),
+    gameNameNormalized: text("game_name_normalized").notNull(),
+    taglineNormalized: text("tagline_normalized").notNull(),
+    changedAt: text("changed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_riot_history_user").on(table.userId, table.changedAt),
+    index("idx_riot_history_lookup").on(
+      table.gameNameNormalized,
+      table.taglineNormalized,
+    ),
+  ],
 );
 
 export const tournaments = sqliteTable(
@@ -36,6 +70,16 @@ export const tournaments = sqliteTable(
       .default("league"),
     startAt: text("start_at").notNull(),
     matchesPerPair: integer("matches_per_pair").notNull().default(2),
+    preliminaryFormat: text("preliminary_format", {
+      enum: ["none", "round_robin"],
+    })
+      .notNull()
+      .default("round_robin"),
+    bracketFormat: text("bracket_format", {
+      enum: ["single_elimination", "winner_loser_split"],
+    })
+      .notNull()
+      .default("single_elimination"),
     starterPoints: integer("starter_points").notNull().default(1000),
     createdBy: text("created_by").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -59,16 +103,93 @@ export const teams = sqliteTable(
   ],
 );
 
+export const matchResultImages = sqliteTable(
+  "match_result_images",
+  {
+    id: text("id").primaryKey(),
+    matchId: text("match_id").notNull(),
+    objectKey: text("object_key").notNull(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    fileSize: integer("file_size").notNull(),
+    width: integer("width"),
+    height: integer("height"),
+    durationSeconds: integer("duration_seconds"),
+    extractionJson: text("extraction_json"),
+    createdBy: text("created_by").notNull(),
+    reviewedAt: text("reviewed_at").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("idx_match_result_images_match").on(table.matchId),
+    uniqueIndex("idx_match_result_images_key").on(table.objectKey),
+  ],
+);
+
+export const matchTeamStats = sqliteTable(
+  "match_team_stats",
+  {
+    matchId: text("match_id").notNull(),
+    side: integer("side").notNull(),
+    teamId: text("team_id").notNull(),
+    kills: integer("kills").notNull(),
+    deaths: integer("deaths").notNull(),
+    assists: integer("assists").notNull(),
+    gold: integer("gold").notNull(),
+    won: integer("won", { mode: "boolean" }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.matchId, table.side] }),
+    index("idx_match_team_stats_team").on(table.teamId, table.matchId),
+  ],
+);
+
+export const playerMatchStats = sqliteTable(
+  "player_match_stats",
+  {
+    id: text("id").primaryKey(),
+    matchId: text("match_id").notNull(),
+    teamId: text("team_id").notNull(),
+    userId: text("user_id"),
+    side: integer("side").notNull(),
+    rowOrder: integer("row_order").notNull(),
+    accountNameSnapshot: text("account_name_snapshot").notNull(),
+    championName: text("champion_name").notNull(),
+    championLevel: integer("champion_level").notNull(),
+    lane: text("lane", {
+      enum: ["TOP", "JGL", "MID", "ADC", "SUP"],
+    }).notNull(),
+    kills: integer("kills").notNull(),
+    deaths: integer("deaths").notNull(),
+    assists: integer("assists").notNull(),
+    damage: integer("damage").notNull(),
+    gold: integer("gold").notNull(),
+    goldPerMinute: integer("gold_per_minute").notNull(),
+    won: integer("won", { mode: "boolean" }).notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("idx_player_match_stats_row").on(table.matchId, table.rowOrder),
+    index("idx_player_match_stats_user").on(table.userId, table.matchId),
+    index("idx_player_match_stats_team").on(table.teamId, table.matchId),
+  ],
+);
+
 export const players = sqliteTable(
   "players",
   {
     id: text("id").primaryKey(),
     teamId: text("team_id").notNull(),
+    userId: text("user_id"),
     nickname: text("nickname").notNull(),
     position: text("position").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index("idx_players_team").on(table.teamId)],
+  (table) => [
+    index("idx_players_team").on(table.teamId),
+    index("idx_players_user").on(table.userId),
+  ],
 );
 
 export const matches = sqliteTable(
