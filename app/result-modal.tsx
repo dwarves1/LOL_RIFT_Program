@@ -1,10 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { extractFixedLolScoreboard, type ExtractedScoreboardPlayer } from "../lib/scoreboard-ocr";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  extractFixedLolScoreboard,
+  findBestKnownLabel,
+  type ExtractedScoreboardPlayer,
+  type OcrFieldConfidence,
+  type OcrPlayerField,
+} from "../lib/scoreboard-ocr";
 import { PLAYER_POSITIONS, positionLabel } from "../lib/positions";
 
-type ResultTeam = { id: string; name: string; color: string };
+type ResultTeam = {
+  id: string;
+  name: string;
+  color: string;
+  logoUrl?: string | null;
+  players?: Array<{ id: string; nickname: string; position: string; userId: string | null; riotAccountId: string | null }>;
+};
 type ResultMatch = { id: string; matchNo: string; roundLabel: string; teamAId: string | null; teamBId: string | null; bestOf?: number };
 type ResultAccount = { id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null };
 export type ResultPlayerStat = {
@@ -27,9 +39,39 @@ export type ResultPlayerStat = {
   goldPerMinute: number;
   won?: boolean;
   confidence?: number;
+  fieldConfidence?: OcrFieldConfidence;
+  sourceAccountName?: string;
 };
 
 const LANES = PLAYER_POSITIONS;
+const EDITABLE_NUMBER_FIELDS = ["championLevel", "kills", "deaths", "assists", "damage", "gold", "goldPerMinute"] as const;
+const FIELD_LABELS: Record<(typeof EDITABLE_NUMBER_FIELDS)[number], string> = {
+  championLevel: "Lv",
+  kills: "K",
+  deaths: "D",
+  assists: "A",
+  damage: "딜량",
+  gold: "골드",
+  goldPerMinute: "G/분",
+};
+
+let championNamesCache: string[] | null = null;
+let championNamesRequest: Promise<string[]> | null = null;
+
+async function loadChampionNames() {
+  if (championNamesCache) return championNamesCache;
+  if (!championNamesRequest) {
+    championNamesRequest = fetch("/api/champions")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("챔피언 목록을 불러오지 못했습니다.");
+        const payload = await response.json() as { champions?: Array<{ name?: string }> };
+        return (payload.champions ?? []).map((champion) => champion.name?.trim() ?? "").filter(Boolean);
+      })
+      .catch(() => []);
+  }
+  championNamesCache = await championNamesRequest;
+  return championNamesCache;
+}
 
 function emptyPlayers(): ResultPlayerStat[] {
   return Array.from({ length: 10 }, (_, index) => ({
@@ -47,6 +89,7 @@ function emptyPlayers(): ResultPlayerStat[] {
     gold: 0,
     goldPerMinute: 0,
     confidence: 0,
+    fieldConfidence: {},
   }));
 }
 
@@ -97,6 +140,8 @@ export function ResultReviewModal({
   const [progress, setProgress] = useState({ value: 0, detail: "" });
   const [analysisError, setAnalysisError] = useState("");
 
+  useEffect(() => { void loadChampionNames(); }, []);
+
   const teamTotals = useMemo(() => [1, 2].map((side) => {
     const rows = players.filter((player) => player.side === side);
     return {
@@ -112,11 +157,59 @@ export function ResultReviewModal({
     setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? { ...player, ...patch } : player));
   }
 
-  function applyExtractedRows(rows: ExtractedScoreboardPlayer[], topOutcome: "win" | "loss" | "unknown", topOutcomeConfidence: number) {
-    const mapped = rows.map((row) => {
-      const account = accounts.find((item) => item.riotGameName && normalize(item.riotGameName) === normalize(row.accountName));
-      return { ...row, userId: account?.userId ?? null };
+  function patchPlayerField(index: number, field: OcrPlayerField, value: string | number) {
+    setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? {
+      ...player,
+      [field]: value,
+      ...(field === "accountName" ? { sourceAccountName: String(value) } : {}),
+      fieldConfidence: { ...player.fieldConfidence, [field]: 100 },
+    } : player));
+  }
+
+  function teamAccountCandidates(teamId: string) {
+    const roster = teams.find((team) => team.id === teamId)?.players ?? [];
+    const exactAccountIds = new Set(roster.map((player) => player.riotAccountId).filter(Boolean));
+    const rosterUserIds = new Set(roster.map((player) => player.userId).filter(Boolean));
+    return accounts.filter((account) => exactAccountIds.has(account.id) || rosterUserIds.has(account.userId));
+  }
+
+  function remapAccounts(rows: ResultPlayerStat[], firstTeamId: string, secondTeamId: string) {
+    return rows.map((row) => {
+      const candidates = teamAccountCandidates(row.side === 1 ? firstTeamId : secondTeamId);
+      const sourceName = row.sourceAccountName ?? row.accountName;
+      const knownNames = candidates.map((candidate) => candidate.riotGameName ?? "").filter(Boolean);
+      const accountMatch = findBestKnownLabel(sourceName, knownNames, 0.55);
+      const account = accountMatch
+        ? candidates.find((candidate) => candidate.riotGameName && normalize(candidate.riotGameName) === normalize(accountMatch.value))
+        : undefined;
+      return {
+        ...row,
+        sourceAccountName: sourceName,
+        accountName: account?.riotGameName ?? sourceName,
+        userId: account?.userId ?? null,
+        fieldConfidence: {
+          ...row.fieldConfidence,
+          accountName: accountMatch ? Math.round(accountMatch.score * 100) : row.fieldConfidence?.accountName,
+        },
+      };
     });
+  }
+
+  function applyExtractedRows(rows: ExtractedScoreboardPlayer[], topOutcome: "win" | "loss" | "unknown", topOutcomeConfidence: number, championNames: string[]) {
+    const championCorrected: ResultPlayerStat[] = rows.map((row) => {
+      const championMatch = findBestKnownLabel(row.championName, championNames, 0.62);
+      return {
+        ...row,
+        sourceAccountName: row.accountName,
+        championName: championMatch?.value ?? row.championName,
+        fieldConfidence: {
+          ...row.fieldConfidence,
+          championName: championMatch ? Math.round(championMatch.score * 100) : row.fieldConfidence.championName,
+        },
+        userId: null,
+      };
+    });
+    const mapped = remapAccounts(championCorrected, side1TeamId, side2TeamId);
     setPlayers(mapped);
     const reliableOutcome = topOutcomeConfidence >= 50 ? topOutcome : "unknown";
     setDetectedOutcome({ value: reliableOutcome, confidence: topOutcomeConfidence });
@@ -151,8 +244,11 @@ export function ResultReviewModal({
     setAnalyzing(true);
     setProgress({ value: 1, detail: "OCR 엔진을 준비하는 중" });
     try {
-      const extracted = await extractFixedLolScoreboard(image, (value, detail) => setProgress({ value, detail }));
-      applyExtractedRows(extracted.players, extracted.topOutcome, extracted.topOutcomeConfidence);
+      const [extracted, championNames] = await Promise.all([
+        extractFixedLolScoreboard(image, (value, detail) => setProgress({ value, detail })),
+        loadChampionNames(),
+      ]);
+      applyExtractedRows(extracted.players, extracted.topOutcome, extracted.topOutcomeConfidence, championNames);
       setDuration(durationLabel(extracted.durationSeconds));
       setRawExtraction(extracted.rawText);
     } catch (error) {
@@ -163,6 +259,23 @@ export function ResultReviewModal({
     } finally {
       setAnalyzing(false);
     }
+  }
+
+  const validationIssues = useMemo(() => {
+    const issues: string[] = [];
+    const first = teamTotals[0];
+    const second = teamTotals[1];
+    const lowConfidenceFields = players.reduce((count, player) => count + Object.values(player.fieldConfidence ?? {}).filter((value) => (value ?? 100) < 55).length, 0);
+    if (lowConfidenceFields) issues.push(`신뢰도가 낮은 항목 ${lowConfidenceFields}개를 원본과 비교해 주세요.`);
+    if (first.kills !== second.deaths || second.kills !== first.deaths) issues.push("양 팀 킬 합계와 상대 데스 합계가 다릅니다. 처형 여부와 K/D/A를 확인해 주세요.");
+    const missingMetrics = players.filter((player) => player.damage <= 0 || player.gold <= 0).length;
+    if (missingMetrics) issues.push(`딜량 또는 골드가 0인 선수 ${missingMetrics}명의 수치를 확인해 주세요.`);
+    return issues;
+  }, [players, teamTotals]);
+
+  function lowConfidence(player: ResultPlayerStat, field: OcrPlayerField) {
+    const confidence = player.fieldConfidence?.[field];
+    return confidence !== undefined && confidence < 55;
   }
 
   const valid = dataUrl && winnerSide && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && players.every((player) => player.accountName.trim() && player.championName.trim());
@@ -183,9 +296,9 @@ export function ResultReviewModal({
             <div className="result-meta-fields">
               <label><span>세트</span><select value={setNo} onChange={(event) => setSetNo(Number(event.target.value))}>{Array.from({ length: match.bestOf ?? 1 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}세트</option>)}</select></label>
               <label><span>경기 시간</span><input value={duration} onChange={(event) => setDuration(event.target.value)} placeholder="28:07" /></label>
-              <label><span>이미지 1팀</span><select value={side1TeamId} onChange={(event) => setSide1TeamId(event.target.value)}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
-              <button type="button" className="side-swap" onClick={() => { setSide1TeamId(side2TeamId); setSide2TeamId(side1TeamId); }}>⇄</button>
-              <label><span>이미지 2팀</span><select value={side2TeamId} onChange={(event) => setSide2TeamId(event.target.value)}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
+              <label><span>블루팀</span><select value={side1TeamId} onChange={(event) => { const next = event.target.value; setSide1TeamId(next); setPlayers((current) => remapAccounts(current, next, side2TeamId)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
+              <button type="button" className="side-swap" aria-label="블루팀과 레드팀 바꾸기" onClick={() => { setSide1TeamId(side2TeamId); setSide2TeamId(side1TeamId); setPlayers((current) => remapAccounts(current, side2TeamId, side1TeamId)); }}>⇄</button>
+              <label><span>레드팀</span><select value={side2TeamId} onChange={(event) => { const next = event.target.value; setSide2TeamId(next); setPlayers((current) => remapAccounts(current, side1TeamId, next)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
             </div>
             <div className={`outcome-detection ${detectedOutcome.value}`}>
               <span>이미지 상단 판독</span>
@@ -193,17 +306,26 @@ export function ResultReviewModal({
               {detectedOutcome.confidence > 0 && <small>신뢰도 {detectedOutcome.confidence}%</small>}
             </div>
             <div className="winner-review"><span>최종 승리팀 확인</span>{([1, 2] as const).map((side) => <button type="button" key={side} className={winnerSide === side ? "active" : ""} onClick={() => setWinnerSide(side)}><b>{side}팀</b>{side === 1 ? availableTeams.find((team) => team.id === side1TeamId)?.name : availableTeams.find((team) => team.id === side2TeamId)?.name}<small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></button>)}</div>
-            <div className="result-player-table">
-              <div className="result-player-head"><span>라인</span><span>계정 연결</span><span>이미지 계정명</span><span>챔피언</span><span>Lv</span><span>K</span><span>D</span><span>A</span><span>딜량</span><span>골드</span><span>G/분</span></div>
-              {players.map((player, index) => <div className={`result-player-row ${(player.confidence ?? 0) < 55 ? "low-confidence" : ""}`} key={player.rowOrder}>
-                <select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select>
-                <select value={player.userId ?? ""} onChange={(event) => patchPlayer(index, { userId: event.target.value || null })}><option value="">미연결</option>{accounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline} · {account.displayName}</option>)}</select>
-                <input value={player.accountName} onChange={(event) => patchPlayer(index, { accountName: event.target.value })} />
-                <input value={player.championName} onChange={(event) => patchPlayer(index, { championName: event.target.value })} />
-                {(["championLevel", "kills", "deaths", "assists", "damage", "gold", "goldPerMinute"] as const).map((field) => <input key={field} type="number" min="0" value={player[field]} onChange={(event) => patchPlayer(index, { [field]: Number(event.target.value) })} />)}
-              </div>)}
-            </div>
-            <p className="review-help">노란 행은 인식 신뢰도가 낮습니다. 원본과 비교하여 계정명과 수치를 확인해 주세요.</p>
+            <div className="result-team-review-grid">{([1, 2] as const).map((side) => {
+              const teamId = side === 1 ? side1TeamId : side2TeamId;
+              const team = availableTeams.find((item) => item.id === teamId);
+              const sideAccounts = teamAccountCandidates(teamId);
+              const rows = players.map((player, index) => ({ player, index })).filter(({ player }) => player.side === side);
+              return <section className={`result-team-review side-${side}`} style={{ "--review-team-color": team?.color ?? (side === 1 ? "#3b82f6" : "#ef4444") } as CSSProperties} key={side}>
+                <header><div><span>{side === 1 ? "BLUE TEAM" : "RED TEAM"}</span><strong>{team?.name ?? `${side}팀`}</strong></div><small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></header>
+                <div className="result-team-players">{rows.map(({ player, index }) => <article className="result-player-card" key={player.rowOrder}>
+                  <div className="result-player-identity">
+                    <label><span>라인</span><select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select></label>
+                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, sourceAccountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}</option>)}</select></label>
+                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>이미지 계정명</span><input value={player.accountName} onChange={(event) => patchPlayerField(index, "accountName", event.target.value)} /></label>
+                    <label className={lowConfidence(player, "championName") ? "low-confidence-field" : ""}><span>챔피언</span><input value={player.championName} onChange={(event) => patchPlayerField(index, "championName", event.target.value)} /></label>
+                  </div>
+                  <div className="result-player-metrics">{EDITABLE_NUMBER_FIELDS.map((field) => <label className={lowConfidence(player, field) ? "low-confidence-field" : ""} key={field}><span>{FIELD_LABELS[field]}</span><input type="number" min="0" value={player[field]} onChange={(event) => patchPlayerField(index, field, Number(event.target.value))} /></label>)}</div>
+                </article>)}</div>
+              </section>;
+            })}</div>
+            {validationIssues.length > 0 && <div className="ocr-validation" role="status"><strong>자동 검증 확인 필요</strong>{validationIssues.map((issue) => <span key={issue}>{issue}</span>)}</div>}
+            <p className="review-help">노란 항목은 OCR 신뢰도가 낮습니다. 원본과 비교해 수정하면 해당 항목은 확인 완료로 처리됩니다.</p>
           </div>
         </div>
         <footer><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="button" className="primary-button" disabled={busy || analyzing || !valid} onClick={async () => {

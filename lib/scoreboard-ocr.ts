@@ -1,3 +1,18 @@
+import type { Worker } from "tesseract.js";
+
+export type OcrPlayerField =
+  | "accountName"
+  | "championName"
+  | "championLevel"
+  | "kills"
+  | "deaths"
+  | "assists"
+  | "damage"
+  | "gold"
+  | "goldPerMinute";
+
+export type OcrFieldConfidence = Partial<Record<OcrPlayerField, number>>;
+
 export type ExtractedScoreboardPlayer = {
   side: 1 | 2;
   rowOrder: number;
@@ -12,6 +27,7 @@ export type ExtractedScoreboardPlayer = {
   gold: number;
   goldPerMinute: number;
   confidence: number;
+  fieldConfidence: OcrFieldConfidence;
 };
 
 export type ExtractedScoreboard = {
@@ -21,6 +37,8 @@ export type ExtractedScoreboard = {
   players: ExtractedScoreboardPlayer[];
   rawText: string;
 };
+
+export type KnownLabelMatch = { value: string; score: number };
 
 const REFERENCE_WIDTH = 1048;
 const REFERENCE_HEIGHT = 622;
@@ -38,17 +56,48 @@ function scaledRectangle(width: number, height: number, left: number, top: numbe
   };
 }
 
+function otsuThreshold(pixels: Uint8ClampedArray) {
+  const histogram = new Array<number>(256).fill(0);
+  let pixelCount = 0;
+  for (let index = 0; index < pixels.length; index += 4) {
+    const luminance = Math.round(pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114);
+    histogram[luminance] += 1;
+    pixelCount += 1;
+  }
+  let total = 0;
+  for (let index = 0; index < histogram.length; index += 1) total += index * histogram[index];
+  let backgroundWeight = 0;
+  let backgroundTotal = 0;
+  let bestVariance = -1;
+  let threshold = 110;
+  for (let index = 0; index < histogram.length; index += 1) {
+    backgroundWeight += histogram[index];
+    if (!backgroundWeight) continue;
+    const foregroundWeight = pixelCount - backgroundWeight;
+    if (!foregroundWeight) break;
+    backgroundTotal += index * histogram[index];
+    const backgroundMean = backgroundTotal / backgroundWeight;
+    const foregroundMean = (total - backgroundTotal) / foregroundWeight;
+    const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2;
+    if (variance > bestVariance) {
+      bestVariance = variance;
+      threshold = index;
+    }
+  }
+  return Math.max(72, Math.min(176, threshold));
+}
+
 function cropForOcr(
   image: HTMLImageElement,
   left: number,
   top: number,
   width: number,
   height: number,
-  kind: "text" | "number",
+  variant: "binary" | "contrast" = "binary",
 ) {
   const rectangle = scaledRectangle(image.naturalWidth, image.naturalHeight, left, top, width, height);
-  const scale = 3;
-  const padding = 8;
+  const scale = 4;
+  const padding = 10;
   const canvas = document.createElement("canvas");
   canvas.width = rectangle.width * scale + padding * 2;
   canvas.height = rectangle.height * scale + padding * 2;
@@ -71,13 +120,10 @@ function cropForOcr(
   );
 
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-  const threshold = kind === "number" ? 112 : 92;
+  const threshold = otsuThreshold(pixels.data);
   for (let index = 0; index < pixels.data.length; index += 4) {
-    const red = pixels.data[index];
-    const green = pixels.data[index + 1];
-    const blue = pixels.data[index + 2];
-    const luminance = red * 0.299 + green * 0.587 + blue * 0.114;
-    const value = luminance >= threshold ? 0 : 255;
+    const luminance = pixels.data[index] * 0.299 + pixels.data[index + 1] * 0.587 + pixels.data[index + 2] * 0.114;
+    const value = variant === "binary" ? (luminance >= threshold ? 0 : 255) : Math.max(0, Math.min(255, Math.round(255 - (luminance - 24) * 1.35)));
     pixels.data[index] = value;
     pixels.data[index + 1] = value;
     pixels.data[index + 2] = value;
@@ -87,8 +133,19 @@ function cropForOcr(
   return canvas;
 }
 
-function cleanLines(value: string) {
-  return value.split(/\r?\n/).map((line) => line.replace(/[<>|_[\]{}]/g, "").trim()).filter(Boolean);
+async function recognizeBest(
+  worker: Worker,
+  image: HTMLImageElement,
+  rectangle: [number, number, number, number],
+) {
+  const first = await worker.recognize(cropForOcr(image, ...rectangle, "binary"));
+  if (first.data.confidence >= 62 && first.data.text.trim()) return first;
+  const second = await worker.recognize(cropForOcr(image, ...rectangle, "contrast"));
+  return second.data.confidence > first.data.confidence ? second : first;
+}
+
+function cleanText(value: string) {
+  return value.replace(/[<>|_[\]{}]/g, "").replace(/\s+/g, " ").trim();
 }
 
 function parseInteger(value: string | undefined) {
@@ -102,19 +159,51 @@ export function parseTopOutcome(value: string) {
   return "unknown" as const;
 }
 
-function parseNumericRow(text: string) {
-  const kda = text.match(/(\d+)\s*[|/]\s*(\d+)\s*[|/]\s*(\d+)/);
-  const largeValues = [...text.matchAll(/\b\d{1,3}(?:,\d{3})+\b/g)].map((match) => parseInteger(match[0]));
-  const perMinuteLine = cleanLines(text).find((line) => /\/|min|분/i.test(line) && !/\d+\s*\/\s*\d+\s*\//.test(line));
-  const perMinute = perMinuteLine?.match(/(\d{2,4})/);
+export function parseKda(value: string) {
+  const normalized = value.replace(/[|Il]/g, "/");
+  const matched = normalized.match(/(\d{1,2})\s*[/:.]\s*(\d{1,2})\s*[/:.]\s*(\d{1,2})/);
+  const fallback = normalized.match(/\d{1,2}/g) ?? [];
   return {
-    kills: parseInteger(kda?.[1]),
-    deaths: parseInteger(kda?.[2]),
-    assists: parseInteger(kda?.[3]),
-    damage: largeValues[0] ?? 0,
-    gold: largeValues[1] ?? 0,
-    goldPerMinute: parseInteger(perMinute?.[1]),
+    kills: parseInteger(matched?.[1] ?? fallback[0]),
+    deaths: parseInteger(matched?.[2] ?? fallback[1]),
+    assists: parseInteger(matched?.[3] ?? fallback[2]),
   };
+}
+
+function normalizeKnownLabel(value: string) {
+  return value.normalize("NFKC").toLocaleLowerCase("ko-KR").replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+function editDistance(left: string, right: string) {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    let diagonal = previous[0];
+    previous[0] = leftIndex;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const above = previous[rightIndex];
+      previous[rightIndex] = Math.min(
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + 1,
+        diagonal + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+      diagonal = above;
+    }
+  }
+  return previous[right.length];
+}
+
+export function findBestKnownLabel(input: string, candidates: string[], minimumScore = 0.6): KnownLabelMatch | null {
+  const normalizedInput = normalizeKnownLabel(input);
+  if (!normalizedInput || !candidates.length) return null;
+  let best: KnownLabelMatch | null = null;
+  for (const candidate of candidates) {
+    const normalizedCandidate = normalizeKnownLabel(candidate);
+    if (!normalizedCandidate) continue;
+    const distance = editDistance(normalizedInput, normalizedCandidate);
+    const score = 1 - distance / Math.max(normalizedInput.length, normalizedCandidate.length);
+    if (!best || score > best.score) best = { value: candidate, score };
+  }
+  return best && best.score >= minimumScore ? best : null;
 }
 
 export async function extractFixedLolScoreboard(
@@ -143,26 +232,16 @@ export async function extractFixedLolScoreboard(
   ]);
 
   try {
-    await nameWorker.setParameters({ preserve_interword_spaces: "1", tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
+    await nameWorker.setParameters({ preserve_interword_spaces: "1", tessedit_pageseg_mode: PSM.SINGLE_LINE });
     await numberWorker.setParameters({
-      tessedit_char_whitelist: "0123456789/,.: KDAmin",
+      tessedit_char_whitelist: "0123456789/,.: ",
       preserve_interword_spaces: "1",
-      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+      tessedit_pageseg_mode: PSM.SINGLE_LINE,
     });
 
-    let outcomeResult = await nameWorker.recognize(cropForOcr(image, 52, 0, 118, 52, "text"));
-    let topOutcome = parseTopOutcome(outcomeResult.data.text);
-    if (topOutcome === "unknown") {
-      const rawOutcomeResult = await nameWorker.recognize(image, {
-        rectangle: scaledRectangle(image.naturalWidth, image.naturalHeight, 52, 0, 118, 52),
-      });
-      if (parseTopOutcome(rawOutcomeResult.data.text) !== "unknown") {
-        outcomeResult = rawOutcomeResult;
-        topOutcome = parseTopOutcome(rawOutcomeResult.data.text);
-      }
-    }
-
-    const durationResult = await numberWorker.recognize(cropForOcr(image, 232, 20, 92, 30, "number"));
+    const outcomeResult = await recognizeBest(nameWorker, image, [52, 0, 118, 52]);
+    const topOutcome = parseTopOutcome(outcomeResult.data.text);
+    const durationResult = await recognizeBest(numberWorker, image, [232, 20, 92, 30]);
     const durationMatch = durationResult.data.text.match(/(\d{1,2})\s*[:.]\s*(\d{2})/);
     const durationSeconds = durationMatch ? parseInteger(durationMatch[1]) * 60 + parseInteger(durationMatch[2]) : 0;
     const players: ExtractedScoreboardPlayer[] = [];
@@ -171,24 +250,43 @@ export async function extractFixedLolScoreboard(
     for (let index = 0; index < ROW_CENTERS.length; index += 1) {
       const center = ROW_CENTERS[index];
       onProgress?.(10 + index * 8, `${index + 1}/10 선수 행 분석 중`);
-      const [nameResult, numericResult, levelResult] = await Promise.all([
-        nameWorker.recognize(cropForOcr(image, 184, center - 20, 175, 40, "text")),
-        numberWorker.recognize(cropForOcr(image, 700, center - 18, 286, 42, "number")),
-        numberWorker.recognize(cropForOcr(image, 70, center - 17, 30, 34, "number")),
+      const [accountResult, championResult, levelResult, kdaResult, damageResult, goldResult] = await Promise.all([
+        recognizeBest(nameWorker, image, [184, center - 22, 175, 22]),
+        recognizeBest(nameWorker, image, [184, center, 150, 21]),
+        recognizeBest(numberWorker, image, [68, center - 18, 36, 36]),
+        recognizeBest(numberWorker, image, [708, center - 22, 96, 24]),
+        recognizeBest(numberWorker, image, [806, center - 22, 96, 24]),
+        recognizeBest(numberWorker, image, [908, center - 22, 82, 24]),
       ]);
-      const lines = cleanLines(nameResult.data.text);
-      const numbers = parseNumericRow(numericResult.data.text);
-      raw.push(nameResult.data.text, numericResult.data.text, levelResult.data.text);
+      const kda = parseKda(kdaResult.data.text);
+      const damage = parseInteger(damageResult.data.text);
+      const gold = parseInteger(goldResult.data.text);
+      const goldPerMinute = gold && durationSeconds ? Math.round(gold / (durationSeconds / 60)) : 0;
+      const fieldConfidence: OcrFieldConfidence = {
+        accountName: Math.round(accountResult.data.confidence),
+        championName: Math.round(championResult.data.confidence),
+        championLevel: Math.round(levelResult.data.confidence),
+        kills: Math.round(kdaResult.data.confidence),
+        deaths: Math.round(kdaResult.data.confidence),
+        assists: Math.round(kdaResult.data.confidence),
+        damage: Math.round(damageResult.data.confidence),
+        gold: Math.round(goldResult.data.confidence),
+        goldPerMinute: Math.round(goldResult.data.confidence),
+      };
+      raw.push(accountResult.data.text, championResult.data.text, levelResult.data.text, kdaResult.data.text, damageResult.data.text, goldResult.data.text);
       players.push({
         side: index < 5 ? 1 : 2,
         rowOrder: index + 1,
-        accountName: lines[0] ?? "",
-        championName: lines[1] ?? "",
+        accountName: cleanText(accountResult.data.text),
+        championName: cleanText(championResult.data.text),
         championLevel: parseInteger(levelResult.data.text),
         lane: LANES[index % 5],
-        ...numbers,
-        goldPerMinute: numbers.gold && durationSeconds ? Math.round(numbers.gold / (durationSeconds / 60)) : numbers.goldPerMinute,
-        confidence: Math.round((nameResult.data.confidence + numericResult.data.confidence + levelResult.data.confidence) / 3),
+        ...kda,
+        damage,
+        gold,
+        goldPerMinute,
+        fieldConfidence,
+        confidence: Math.round(Object.values(fieldConfidence).reduce((sum, value) => sum + (value ?? 0), 0) / Object.keys(fieldConfidence).length),
       });
     }
     onProgress?.(100, "자동 추출 완료");
