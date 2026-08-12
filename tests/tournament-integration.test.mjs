@@ -197,6 +197,66 @@ test("five competition formats create and progress with the configured BO rules"
   }
 });
 
+test("scrim season supports ten registered players, manual betting, single picks, and 2x settlement", async () => {
+  const created = await tournament.createScrimSeason({
+    name: "2026 1시즌 내전",
+    startAt: "2026-08-12T12:00:00.000Z",
+    starterPoints: 1000,
+  }, actors.get("admin"));
+
+  for (let index = 1; index <= 11; index += 1) {
+    await tournament.joinTournamentByCode(created.accessCode, actors.get(`player${index}`));
+  }
+
+  const matchCreated = await tournament.createScrimMatch({
+    tournamentId: created.tournamentId,
+    scheduledAt: "2026-08-12T13:00:00.000Z",
+    blueAccountIds: accountIds.slice(0, 5),
+    redAccountIds: accountIds.slice(5, 10),
+  }, actors.get("admin"));
+  let data = await dashboard(created.tournamentId);
+  assert.equal(data.tournament.competitionKind, "scrim_season");
+  const match = data.matches.find((item) => item.id === matchCreated.matchId);
+  assert.equal(match.phase, "scrim");
+  assert.equal(match.bettingStatus, "scheduled");
+  assert.equal(data.teams.find((team) => team.id === match.teamAId).players.length, 5);
+  assert.equal(data.teams.find((team) => team.id === match.teamBId).players.length, 5);
+  assert.match(matchCreated.sharePath, new RegExp(`/scrim/${created.tournamentId}/bet/`));
+
+  await assert.rejects(
+    () => tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("player1")),
+    /배팅이 열려 있는 내전 경기가 아닙니다/,
+  );
+  await tournament.setScrimBetting(match.id, "open", actors.get("admin"));
+  await tournament.createBet(created.tournamentId, match.id, match.teamAId, 300, actors.get("player1"));
+  await assert.rejects(
+    () => tournament.createBet(created.tournamentId, match.id, match.teamBId, 100, actors.get("player1")),
+    /이미 예측/,
+  );
+  data = await dashboard(created.tournamentId);
+  assert.equal(data.matches.find((item) => item.id === match.id).bettingStatus, "open");
+  assert.equal(data.predictionSummaries.find((item) => item.matchId === match.id).teamAPercent, 100);
+
+  await tournament.setScrimBetting(match.id, "closed", actors.get("admin"));
+  await assert.rejects(
+    () => tournament.createBet(created.tournamentId, match.id, match.teamBId, 100, actors.get("player2")),
+    /배팅이 열려 있는 내전 경기가 아닙니다/,
+  );
+  await tournament.setMatchWinner(match.id, match.teamAId, actors.get("admin"));
+  const playerData = await tournament.getDashboard(created.tournamentId, actors.get("player1"));
+  assert.equal(playerData.viewer.pointsBalance, 1300);
+  assert.equal(playerData.bets[0].status, "won");
+  assert.equal(playerData.bets[0].payout, 600);
+  assert.equal(playerData.matches.find((item) => item.id === match.id).bettingStatus, "settled");
+
+  const unauthorized = await tournament.getDashboard(created.tournamentId, actors.get("outsider"));
+  assert.equal(unauthorized.tournament, null);
+  await assert.rejects(
+    () => tournament.createScrimMatch({ tournamentId: created.tournamentId, scheduledAt: new Date().toISOString(), blueAccountIds: accountIds.slice(10, 15), redAccountIds: accountIds.slice(15, 20) }, actors.get("foreign_operator")),
+    /운영할 권한/,
+  );
+});
+
 test("tournament isolation, team leadership, result correction, and draft permissions", async () => {
   const created = await createCompetition("QA 권한", "league_then_bracket");
   let data = await dashboard(created.tournamentId);

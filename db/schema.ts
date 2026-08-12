@@ -82,6 +82,11 @@ export const tournaments = sqliteTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    competitionKind: text("competition_kind", {
+      enum: ["tournament", "scrim_season"],
+    })
+      .notNull()
+      .default("tournament"),
     status: text("status", {
       enum: ["draft", "league", "bracket", "completed"],
     })
@@ -100,7 +105,7 @@ export const tournaments = sqliteTable(
       .notNull()
       .default("single_elimination"),
     competitionFormat: text("competition_format", {
-      enum: ["league_only", "bracket_only", "split_only", "league_then_bracket", "league_then_split"],
+      enum: ["league_only", "bracket_only", "split_only", "league_then_bracket", "league_then_split", "scrim_season"],
     }).notNull().default("league_then_bracket"),
     advancingTeamCount: integer("advancing_team_count"),
     leagueBestOf: integer("league_best_of").notNull().default(1),
@@ -124,6 +129,7 @@ export const teams = sqliteTable(
   {
     id: text("id").primaryKey(),
     tournamentId: text("tournament_id").notNull(),
+    matchId: text("match_id"),
     name: text("name").notNull(),
     color: text("color").notNull(),
     seed: integer("seed"),
@@ -140,6 +146,7 @@ export const teams = sqliteTable(
   },
   (table) => [
     index("idx_teams_tournament").on(table.tournamentId),
+    index("idx_teams_match").on(table.matchId),
     uniqueIndex("idx_teams_tournament_name").on(table.tournamentId, table.name),
   ],
 );
@@ -244,10 +251,10 @@ export const matches = sqliteTable(
   {
     id: text("id").primaryKey(),
     tournamentId: text("tournament_id").notNull(),
-    phase: text("phase", { enum: ["league", "bracket"] }).notNull(),
+    phase: text("phase", { enum: ["league", "bracket", "scrim"] }).notNull(),
     matchNo: text("match_no").notNull(),
     roundLabel: text("round_label").notNull(),
-    matchType: text("match_type", { enum: ["regular", "tiebreaker"] }).notNull().default("regular"),
+    matchType: text("match_type", { enum: ["regular", "tiebreaker", "scrim"] }).notNull().default("regular"),
     bestOf: integer("best_of").notNull().default(1),
     seriesScoreA: integer("series_score_a").notNull().default(0),
     seriesScoreB: integer("series_score_b").notNull().default(0),
@@ -261,6 +268,13 @@ export const matches = sqliteTable(
       .default(false),
     scheduleUpdatedBy: text("schedule_updated_by"),
     scheduleUpdatedAt: text("schedule_updated_at"),
+    bettingStatus: text("betting_status", {
+      enum: ["scheduled", "open", "closed", "settled"],
+    })
+      .notNull()
+      .default("scheduled"),
+    bettingOpenedAt: text("betting_opened_at"),
+    bettingClosedAt: text("betting_closed_at"),
     status: text("status", { enum: ["scheduled", "completed"] })
       .notNull()
       .default("scheduled"),
@@ -281,6 +295,7 @@ export const matches = sqliteTable(
       table.phase,
       table.matchNo,
     ),
+    index("idx_matches_betting_status").on(table.tournamentId, table.bettingStatus),
   ],
 );
 

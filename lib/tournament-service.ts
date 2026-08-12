@@ -7,7 +7,7 @@ import {
   ne,
   sql,
 } from "drizzle-orm";
-import { ensureSchema, getConfiguredOwnerEmail, getDb } from "../db";
+import { ensureSchema, getConfiguredOwnerEmail, getDb, getRawDb } from "../db";
 import { isPredictionOpen, shouldSwapLeagueSides } from "./match-rules";
 import {
   auditLogs,
@@ -620,6 +620,165 @@ export async function createTournament(input: CreateTournamentInput, actor: Requ
   return createTournamentInternal(input, actor);
 }
 
+export type CreateScrimSeasonInput = {
+  name: string;
+  startAt: string;
+  starterPoints: number;
+};
+
+export type CreateScrimMatchInput = {
+  tournamentId: string;
+  scheduledAt: string;
+  blueAccountIds: string[];
+  redAccountIds: string[];
+};
+
+export async function createScrimSeason(input: CreateScrimSeasonInput, actor: RequestUser) {
+  if (!isStaff(actor)) throw new Error("관리자나 운영자만 내전 시즌을 생성할 수 있습니다.");
+  const name = input.name.trim();
+  if (!name || name.length > 80) throw new Error("내전 시즌명을 확인해 주세요.");
+  const startAt = new Date(input.startAt);
+  if (Number.isNaN(startAt.getTime())) throw new Error("시즌 시작 일시를 확인해 주세요.");
+  const starterPoints = Math.min(100000, Math.max(0, Math.floor(input.starterPoints)));
+  const tournamentId = uid("scrim");
+  const accessCode = issueAccessCode();
+  const db = getDb();
+
+  await db.insert(tournaments).values({
+    id: tournamentId,
+    name,
+    competitionKind: "scrim_season",
+    status: "league",
+    startAt: startAt.toISOString(),
+    matchesPerPair: 1,
+    preliminaryFormat: "none",
+    bracketFormat: "none",
+    competitionFormat: "scrim_season",
+    advancingTeamCount: null,
+    leagueBestOf: 1,
+    bracketBestOf: 1,
+    semifinalBestOf: 1,
+    finalBestOf: 1,
+    tiebreakBestOf: 1,
+    accessCodeHash: await hashAccessCode(accessCode),
+    accessCodeHint: accessCode.slice(-4),
+    accessCodeUpdatedAt: new Date().toISOString(),
+    rosterMode: "registered_accounts",
+    starterPoints,
+    createdBy: actor.id,
+  });
+  await db.insert(tournamentMembers).values({ tournamentId, userId: actor.id, role: "owner" }).onConflictDoNothing();
+  await audit(actor, "scrim_season_created", "tournament", tournamentId, tournamentId, null, {
+    name,
+    starterPoints,
+  });
+  return { tournamentId, accessCode };
+}
+
+export async function createScrimMatch(input: CreateScrimMatchInput, actor: RequestUser) {
+  await requireTournamentOperator(actor, input.tournamentId);
+  const date = new Date(input.scheduledAt);
+  if (Number.isNaN(date.getTime())) throw new Error("경기 일시를 확인해 주세요.");
+  if (input.blueAccountIds.length !== 5 || input.redAccountIds.length !== 5) {
+    throw new Error("블루팀과 레드팀을 각각 5명으로 구성해 주세요.");
+  }
+  const accountIds = [...input.blueAccountIds, ...input.redAccountIds];
+  if (new Set(accountIds).size !== 10 || accountIds.some((id) => !id)) {
+    throw new Error("서로 다른 등록 롤 계정 10명을 선택해 주세요.");
+  }
+
+  const db = getDb();
+  const [tournament] = await db.select().from(tournaments).where(eq(tournaments.id, input.tournamentId)).limit(1);
+  if (!tournament || tournament.competitionKind !== "scrim_season") throw new Error("내전 시즌을 찾을 수 없습니다.");
+  const accounts = await db.select().from(riotAccounts).where(inArray(riotAccounts.id, accountIds));
+  if (accounts.length !== 10 || new Set(accounts.map((account) => account.userId)).size !== 10) {
+    throw new Error("한 회원은 한 경기에서 하나의 롤 계정으로만 참가할 수 있습니다.");
+  }
+  const memberRows = await db.select({ userId: tournamentMembers.userId }).from(tournamentMembers).where(and(
+    eq(tournamentMembers.tournamentId, tournament.id),
+    inArray(tournamentMembers.userId, accounts.map((account) => account.userId)),
+  ));
+  const memberIds = new Set(memberRows.map((member) => member.userId));
+  if (accounts.some((account) => !memberIds.has(account.userId))) {
+    throw new Error("시즌 코드를 입력해 참가한 회원의 롤 계정만 선택할 수 있습니다.");
+  }
+
+  const existingMatches = await db.select({ id: matches.id }).from(matches).where(and(
+    eq(matches.tournamentId, tournament.id),
+    eq(matches.phase, "scrim"),
+  ));
+  const sequence = existingMatches.length + 1;
+  const matchId = uid("scrim_match");
+  const blueTeamId = uid("scrim_team");
+  const redTeamId = uid("scrim_team");
+  const accountMap = new Map(accounts.map((account) => [account.id, account]));
+  const teamRows = [
+    { id: blueTeamId, tournamentId: tournament.id, matchId, name: `${sequence}경기 블루팀`, color: "#3b82f6", seed: null },
+    { id: redTeamId, tournamentId: tournament.id, matchId, name: `${sequence}경기 레드팀`, color: "#ef4444", seed: null },
+  ];
+  await db.insert(teams).values(teamRows);
+  await db.insert(matches).values({
+    id: matchId,
+    tournamentId: tournament.id,
+    phase: "scrim",
+    matchNo: `S${sequence}`,
+    roundLabel: `${sequence}차 내전`,
+    matchType: "scrim",
+    bestOf: 1,
+    teamAId: blueTeamId,
+    teamBId: redTeamId,
+    scheduledAt: date.toISOString(),
+    scheduleConfirmed: true,
+    bettingStatus: "scheduled",
+    status: "scheduled",
+    sortOrder: sequence,
+  });
+  const playerRows = [
+    ...input.blueAccountIds.map((accountId, index) => ({ accountId, teamId: blueTeamId, index })),
+    ...input.redAccountIds.map((accountId, index) => ({ accountId, teamId: redTeamId, index })),
+  ].map(({ accountId, teamId, index }) => {
+    const account = accountMap.get(accountId)!;
+    return {
+      id: uid("scrim_player"),
+      teamId,
+      userId: account.userId,
+      riotAccountId: account.id,
+      teamRole: "member" as const,
+      nickname: `${account.gameName}#${account.tagline}`,
+      position: POSITIONS[index],
+    };
+  });
+  await db.insert(players).values(playerRows);
+  await audit(actor, "scrim_match_created", "match", matchId, tournament.id, null, {
+    sequence,
+    scheduledAt: date.toISOString(),
+    blueAccountIds: input.blueAccountIds,
+    redAccountIds: input.redAccountIds,
+  });
+  return { matchId, sharePath: `/scrim/${encodeURIComponent(tournament.id)}/bet/${encodeURIComponent(matchId)}` };
+}
+
+export async function setScrimBetting(matchId: string, nextStatus: "open" | "closed", actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) throw new Error("진행 전인 내전 경기만 배팅 상태를 변경할 수 있습니다.");
+  if (nextStatus === "open" && match.bettingStatus === "open") return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
+  if (nextStatus === "closed" && match.bettingStatus !== "open") throw new Error("현재 배팅이 진행 중인 경기가 아닙니다.");
+  const now = new Date().toISOString();
+  await db.update(matches).set(nextStatus === "open"
+    ? { bettingStatus: "open", bettingOpenedAt: now, bettingClosedAt: null }
+    : { bettingStatus: "closed", bettingClosedAt: now }
+  ).where(eq(matches.id, match.id));
+  await audit(actor, nextStatus === "open" ? "scrim_betting_opened" : "scrim_betting_closed", "match", match.id, match.tournamentId, {
+    bettingStatus: match.bettingStatus,
+  }, {
+    bettingStatus: nextStatus,
+  });
+  return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
+}
+
 async function createTournamentInternal(
   input: CreateTournamentInput,
   actor: Actor,
@@ -1147,6 +1306,9 @@ export async function setMatchWinner(
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  if (match.phase === "scrim" && match.bettingStatus === "open") {
+    throw new Error("배팅을 종료한 뒤 내전 결과를 확정해 주세요.");
+  }
   const maySetWinner = (isStaff(actor) && await hasTournamentAccess(actor, match.tournamentId))
     || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]));
   if (!maySetWinner) throw new Error("이 경기의 결과를 등록할 권한이 없습니다.");
@@ -1175,6 +1337,7 @@ export async function setMatchWinner(
       status: "completed",
       winnerId,
       loserId,
+      ...(match.phase === "scrim" ? { bettingStatus: "settled" as const } : {}),
       ...(match.bestOf === 1 ? { seriesScoreA: scoreA, seriesScoreB: scoreB } : {}),
       completedAt: new Date().toISOString(),
     })
@@ -1392,7 +1555,7 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
 
   await db
     .update(matches)
-    .set({ scheduledAt: nextScheduledAt, scheduleConfirmed: false, scheduleUpdatedBy: actor.id, scheduleUpdatedAt: new Date().toISOString() })
+    .set({ scheduledAt: nextScheduledAt, scheduleConfirmed: match.phase === "scrim", scheduleUpdatedBy: actor.id, scheduleUpdatedAt: new Date().toISOString() })
     .where(eq(matches.id, matchId));
   if (match.phase === "league") {
     const ordered = await db
@@ -1464,8 +1627,12 @@ export async function createBet(
   if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) {
     throw new Error("현재 예측할 수 없는 경기입니다.");
   }
-  if (!match.scheduleConfirmed) throw new Error("운영자가 일정을 확정한 경기만 예측할 수 있습니다.");
-  if (!isPredictionOpen(match.scheduledAt)) throw new Error("경기 시작 1시간 전부터는 예측할 수 없습니다.");
+  if (match.phase === "scrim") {
+    if (match.bettingStatus !== "open") throw new Error("현재 배팅이 열려 있는 내전 경기가 아닙니다.");
+  } else {
+    if (!match.scheduleConfirmed) throw new Error("운영자가 일정을 확정한 경기만 예측할 수 있습니다.");
+    if (!isPredictionOpen(match.scheduledAt)) throw new Error("경기 시작 1시간 전부터는 예측할 수 없습니다.");
+  }
   if (![match.teamAId, match.teamBId].includes(teamId)) throw new Error("대진에 포함된 팀을 선택해 주세요.");
   const normalizedStake = Math.floor(stake);
   if (normalizedStake < 10) throw new Error("최소 10P부터 예측할 수 있습니다.");
@@ -1478,22 +1645,50 @@ export async function createBet(
   if (existing) throw new Error("이 경기는 이미 예측했습니다.");
 
   const betId = uid("bet");
-  await db.insert(bets).values({
-    id: betId,
-    tournamentId,
-    matchId,
-    userId: actor.id,
-    teamId,
-    stake: normalizedStake,
-  });
-  await adjustPoints(
-    actor.id,
-    -normalizedStake,
-    "bet_stake",
-    "승리팀 예측 참여",
-    tournamentId,
-    betId,
-  );
+  try {
+    await db.insert(bets).values({
+      id: betId,
+      tournamentId,
+      matchId,
+      userId: actor.id,
+      teamId,
+      stake: normalizedStake,
+    });
+  } catch {
+    throw new Error("이 경기는 이미 예측했습니다.");
+  }
+
+  const raw = getRawDb();
+  const reserved = await raw.prepare(`
+    UPDATE tournament_entries
+    SET points_balance = points_balance - ?
+    WHERE tournament_id = ? AND user_id = ? AND points_balance >= ?
+  `).bind(normalizedStake, tournamentId, actor.id, normalizedStake).run();
+  if (Number(reserved.meta.changes ?? 0) !== 1) {
+    await db.delete(bets).where(eq(bets.id, betId));
+    throw new Error("현재 대회의 보유 포인트가 부족합니다.");
+  }
+  const balance = await raw.prepare("SELECT points_balance FROM tournament_entries WHERE tournament_id = ? AND user_id = ?")
+    .bind(tournamentId, actor.id)
+    .first<{ points_balance: number }>();
+  try {
+    await db.insert(pointLedger).values({
+      id: uid("point"),
+      userId: actor.id,
+      tournamentId,
+      betId,
+      type: "bet_stake",
+      amount: -normalizedStake,
+      balanceAfter: Number(balance?.points_balance ?? 0),
+      description: "승리팀 예측 참여",
+    });
+  } catch (error) {
+    await raw.prepare("UPDATE tournament_entries SET points_balance = points_balance + ? WHERE tournament_id = ? AND user_id = ?")
+      .bind(normalizedStake, tournamentId, actor.id)
+      .run();
+    await db.delete(bets).where(eq(bets.id, betId));
+    throw error;
+  }
 }
 
 export async function setUserRole(targetUserId: string, role: UserRole, actor: RequestUser) {
@@ -1536,11 +1731,13 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
   const tournamentList = requestUser?.role === "admin" || requestUser?.isLocalDemo
     ? allTournaments
     : allTournaments.filter((tournament) => allowedIds.has(tournament.id));
-  const selected = tournamentList.find((item) => item.id === tournamentId) ?? tournamentList[0] ?? null;
+  const selected = tournamentId
+    ? tournamentList.find((item) => item.id === tournamentId) ?? null
+    : tournamentList[0] ?? null;
   if (!selected) {
     return {
       viewer: requestUser,
-      tournaments: [],
+      tournaments: tournamentList,
       tournament: null,
       teams: [],
       matches: [],

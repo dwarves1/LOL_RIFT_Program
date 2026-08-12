@@ -229,6 +229,24 @@ async function migrateRegisteredRosters(raw: D1Database) {
   ]);
 }
 
+async function migrateScrimSeasons(raw: D1Database) {
+  const tournamentColumns = (await raw.prepare("PRAGMA table_info(tournaments)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "tournaments", tournamentColumns, "competition_kind", "TEXT NOT NULL DEFAULT 'tournament'");
+
+  const teamColumns = (await raw.prepare("PRAGMA table_info(teams)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "teams", teamColumns, "match_id", "TEXT");
+
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "betting_status", "TEXT NOT NULL DEFAULT 'scheduled'");
+  await addColumnIfMissing(raw, "matches", matchColumns, "betting_opened_at", "TEXT");
+  await addColumnIfMissing(raw, "matches", matchColumns, "betting_closed_at", "TEXT");
+
+  await raw.batch([
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_teams_match ON teams(match_id)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_matches_betting_status ON matches(tournament_id, betting_status)"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -239,13 +257,14 @@ export function ensureSchema(): Promise<void> {
         WHERE (type = 'index' AND name = 'idx_entries_tournament_balance')
            OR (type = 'index' AND name = 'idx_match_result_images_match_set')
            OR (type = 'index' AND name = 'idx_players_riot_account')
+           OR (type = 'index' AND name = 'idx_matches_betting_status')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 3) return;
+        if (Number(schemaState?.marker_count ?? 0) === 4) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -259,6 +278,7 @@ export function ensureSchema(): Promise<void> {
         await migrateCompetitionDraftAccess(raw);
         await migrateTeamLogos(raw);
         await migrateRegisteredRosters(raw);
+        await migrateScrimSeasons(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

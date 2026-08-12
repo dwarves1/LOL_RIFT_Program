@@ -42,6 +42,7 @@ type Tournament = {
   tiebreakBestOf: number;
   accessCodeHint: string | null;
   rosterMode: "legacy_free_text" | "registered_accounts";
+  competitionKind: "tournament" | "scrim_season";
 };
 
 type Team = {
@@ -52,16 +53,17 @@ type Team = {
   logoUrl: string | null;
   logoFileName: string | null;
   logoUpdatedAt: string | null;
+  matchId: string | null;
   players: Array<{ id: string; nickname: string; position: string; userId: string | null; riotAccountId: string | null; teamRole: "member" | "captain" | "vice_captain" }>;
 };
 
 type Match = {
   id: string;
   tournamentId: string;
-  phase: "league" | "bracket";
+  phase: "league" | "bracket" | "scrim";
   matchNo: string;
   roundLabel: string;
-  matchType: "regular" | "tiebreaker";
+  matchType: "regular" | "tiebreaker" | "scrim";
   bestOf: number;
   seriesScoreA: number;
   seriesScoreB: number;
@@ -75,6 +77,9 @@ type Match = {
   winnerId: string | null;
   loserId: string | null;
   sortOrder: number;
+  bettingStatus: "scheduled" | "open" | "closed" | "settled";
+  bettingOpenedAt: string | null;
+  bettingClosedAt: string | null;
 };
 
 type DraftSession = {
@@ -230,6 +235,10 @@ const AUDIT_LABEL: Record<string, string> = {
   team_logo_updated: "팀 로고를 변경했습니다",
   team_logo_cleared: "팀 로고를 기본값으로 되돌렸습니다",
   team_leaders_updated: "팀장·부팀장을 변경했습니다",
+  scrim_season_created: "내전 시즌을 생성했습니다",
+  scrim_match_created: "내전 경기를 생성했습니다",
+  scrim_betting_opened: "내전 배팅을 시작했습니다",
+  scrim_betting_closed: "내전 배팅을 종료했습니다",
 };
 
 function formatDate(value: string, withTime = true) {
@@ -239,6 +248,16 @@ function formatDate(value: string, withTime = true) {
     weekday: "short",
     ...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
   }).format(new Date(value));
+}
+
+async function shareOrCopy(path: string, title: string) {
+  const url = new URL(path, window.location.origin).toString();
+  if (navigator.share) {
+    await navigator.share({ title, text: `${title} 승리팀을 예측해 보세요.`, url });
+    return "공유 화면을 열었습니다.";
+  }
+  await navigator.clipboard.writeText(url);
+  return "링크를 복사했습니다.";
 }
 
 function teamInitials(name: string) {
@@ -291,15 +310,28 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-export function TournamentApp({ signInPath }: { signInPath: string }) {
+export function TournamentApp({
+  signInPath,
+  initialTournamentId = "",
+  initialMatchId = null,
+  initialTab = "home",
+}: {
+  signInPath: string;
+  initialTournamentId?: string;
+  initialMatchId?: string | null;
+  initialTab?: Tab;
+}) {
   const [data, setData] = useState<Dashboard | null>(null);
-  const [selectedTournament, setSelectedTournament] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [selectedTournament, setSelectedTournament] = useState<string>(initialTournamentId);
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showCreateScrim, setShowCreateScrim] = useState(false);
+  const [showCreateScrimMatch, setShowCreateScrimMatch] = useState(false);
+  const [isKakaoBrowser, setIsKakaoBrowser] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [reviewMatch, setReviewMatch] = useState<Match | null>(null);
   const [detailMatch, setDetailMatch] = useState<Match | null>(null);
@@ -342,9 +374,15 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   useEffect(() => {
     // Initial data loading is an intentional client-side synchronization with the API.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
+    void load(initialTournamentId || undefined);
     return () => activeLoad.current?.abort();
-  }, [load]);
+  }, [initialTournamentId, load]);
+
+  useEffect(() => {
+    // Browser-specific guidance is available only after hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsKakaoBrowser(/KAKAOTALK/i.test(window.navigator.userAgent));
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -362,7 +400,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as { ok?: boolean; error?: string; tournamentId?: string; accessCode?: string; draftId?: string };
+      const result = (await response.json()) as { ok?: boolean; error?: string; tournamentId?: string; accessCode?: string; draftId?: string; matchId?: string; sharePath?: string };
       if (!response.ok) throw new Error(result.error ?? "요청을 처리하지 못했습니다.");
       setMessage(result.accessCode ? `${successMessage} 대회 코드: ${result.accessCode}` : successMessage);
       await load(result.tournamentId ?? selectedTournament);
@@ -389,10 +427,10 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
           <div className="join-tournament-box">
             <input value={joinCode} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="RIFT-XXXX-XXXX" aria-label="대회 코드" />
             <button className="primary-button" disabled={busy || !joinCode.trim()} onClick={() => command({ action: "join_tournament", code: joinCode }, "대회 참가가 완료되었습니다.")}>대회 코드로 참가</button>
-            {(viewer.role === "admin" || viewer.role === "operator") && <button className="secondary-button" onClick={() => setShowCreate(true)}>＋ 새 대회 생성</button>}
+            {(viewer.role === "admin" || viewer.role === "operator") && <><button className="secondary-button" onClick={() => setShowCreate(true)}>＋ 새 대회 생성</button><button className="secondary-button" onClick={() => setShowCreateScrim(true)}>＋ 내전 시즌 생성</button></>}
           </div>
         ) : (
-          <a className="primary-button" href={signInPath}>로그인 후 대회 코드 입력</a>
+          <><a className="primary-button" href={signInPath}>로그인 후 대회 코드 입력</a>{isKakaoBrowser && <p className="kakao-browser-help">카카오톡 안에서 로그인이 열리지 않으면 우측 상단 메뉴에서 ‘다른 브라우저로 열기’를 선택해 주세요.</p>}</>
         )}
         {showCreate && (
           <CreateTournamentModal
@@ -404,6 +442,12 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
               if (ok) setShowCreate(false);
             }}
           />
+        )}
+        {showCreateScrim && (
+          <CreateScrimSeasonModal busy={busy} onClose={() => setShowCreateScrim(false)} onCreate={async (input) => {
+            const ok = await command({ action: "create_scrim_season", input }, "내전 시즌을 생성했습니다.");
+            if (ok) setShowCreateScrim(false);
+          }} />
         )}
         {viewer && (!viewer.profileComplete || showProfile) && (
           <ProfileModal
@@ -421,8 +465,9 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
 
   const viewer = data.viewer;
   const isStaff = viewer?.role === "operator" || viewer?.role === "admin";
+  const isScrim = data.tournament.competitionKind === "scrim_season";
   const teamMap = new Map(data.teams.map((team) => [team.id, team]));
-  const leagueMatches = data.matches.filter((match) => match.phase === "league");
+  const leagueMatches = data.matches.filter((match) => match.phase === "league" || match.phase === "scrim");
   const bracketMatches = data.matches.filter((match) => match.phase === "bracket");
   const upcoming = data.matches
     .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId)
@@ -430,9 +475,12 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
   // Prediction availability is refreshed with the dashboard polling cycle.
   // eslint-disable-next-line react-hooks/purity
   const predictionNow = Date.now();
-  const predictionMatches = upcoming.filter(
-    (match) => match.scheduleConfirmed && isPredictionOpen(match.scheduledAt, predictionNow),
-  );
+  const predictionMatches = upcoming.filter((match) => isScrim
+    ? match.bettingStatus === "open"
+    : match.scheduleConfirmed && isPredictionOpen(match.scheduledAt, predictionNow));
+  const visibleNavItems = isScrim
+    ? NAV_ITEMS.filter((item) => !["standings", "bracket", "teams", "draft"].includes(item.id))
+    : NAV_ITEMS;
   const totalMatches = data.matches.length;
   const completedMatches = data.matches.filter((match) => match.status === "completed").length;
   const progress = totalMatches ? Math.round((completedMatches / totalMatches) * 100) : 0;
@@ -456,7 +504,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
           <span><strong>LOL RIFT Program</strong><small>TOURNAMENT HUB</small></span>
         </button>
         <nav className="desktop-nav" aria-label="주요 메뉴">
-          {NAV_ITEMS.map((item) => (
+          {visibleNavItems.map((item) => (
             <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => setActiveTab(item.id)}>
               {item.label}
             </button>
@@ -487,7 +535,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
       <main className="main-content">
         <section className="tournament-bar">
           <div>
-            <span className={`status-badge ${data.tournament.status}`}>{STATUS_LABEL[data.tournament.status]}</span>
+            <span className={`status-badge ${data.tournament.status}`}>{isScrim ? "내전 진행" : STATUS_LABEL[data.tournament.status]}</span>
             <select
               value={selectedTournament}
               onChange={(event) => {
@@ -501,7 +549,7 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
               ))}
             </select>
           </div>
-          {isStaff && <button className="primary-button compact" onClick={() => setShowCreate(true)}>＋ 새 대회</button>}
+          {isStaff && <button className="primary-button compact" onClick={() => isScrim ? setShowCreateScrimMatch(true) : setShowCreate(true)}>{isScrim ? "＋ 내전 경기" : "＋ 새 대회"}</button>}
           {viewer && <div className="join-inline"><input value={joinCode} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="대회 코드" /><button onClick={() => command({ action: "join_tournament", code: joinCode }, "대회 참가가 완료되었습니다.")}>참가</button></div>}
         </section>
 
@@ -521,18 +569,18 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
         {activeTab === "teams" && <TeamsView data={data} />}
         {activeTab === "stats" && <StatsView data={data} teamMap={teamMap} />}
         {activeTab === "draft" && <DraftView data={data} teamMap={teamMap} busy={busy} command={command} />}
-        {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} />}
-        {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} />}
+        {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} focusedMatchId={initialMatchId} />}
+        {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} openCreateScrim={() => setShowCreateScrim(true)} openCreateScrimMatch={() => setShowCreateScrimMatch(true)} />}
       </main>
 
       <nav className="mobile-nav" aria-label="모바일 메뉴">
-        {NAV_ITEMS.slice(0, 4).map((item) => (
+        {visibleNavItems.slice(0, 4).map((item) => (
           <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => setActiveTab(item.id)}>
             <span>{item.id === "home" ? "◆" : item.id === "schedule" ? "▤" : item.id === "standings" ? "≡" : "◇"}</span>
             {item.short}
           </button>
         ))}
-        <button className={["teams", "stats", "draft", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab("draft")}>
+        <button className={["teams", "stats", "draft", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab(isScrim ? "points" : "draft")}>
           <span>•••</span>더보기
         </button>
       </nav>
@@ -547,6 +595,18 @@ export function TournamentApp({ signInPath }: { signInPath: string }) {
             if (ok) setShowCreate(false);
           }}
         />
+      )}
+      {showCreateScrim && isStaff && (
+        <CreateScrimSeasonModal busy={busy} onClose={() => setShowCreateScrim(false)} onCreate={async (input) => {
+          const ok = await command({ action: "create_scrim_season", input }, "내전 시즌을 생성했습니다.");
+          if (ok) setShowCreateScrim(false);
+        }} />
+      )}
+      {showCreateScrimMatch && isStaff && isScrim && (
+        <CreateScrimMatchModal tournamentId={data.tournament.id} accounts={data.accounts} busy={busy} onClose={() => setShowCreateScrimMatch(false)} onCreate={async (input) => {
+          const ok = await command({ action: "create_scrim_match", input }, "내전 경기와 영구 배팅 링크를 생성했습니다.");
+          if (ok) setShowCreateScrimMatch(false);
+        }} />
       )}
       {viewer && (!viewer.profileComplete || showProfile) && (
         <ProfileModal
@@ -613,6 +673,7 @@ function HomeView({
   totalMatches: number;
   setActiveTab: (tab: Tab) => void;
 }) {
+  const isScrim = data.tournament?.competitionKind === "scrim_season";
   const nextMatch = upcoming[0];
   const lastResults = data.matches.filter((match) => match.status === "completed").slice(-3).reverse();
   const teamCount = data.teams.length;
@@ -629,9 +690,9 @@ function HomeView({
       <section className="hero-grid">
         <article className="hero-card">
           <div className="hero-copy">
-            <p className="eyebrow">{teamCount} TEAMS · {data.tournament?.preliminaryFormat === "none" ? "DIRECT BRACKET" : `${data.tournament?.matchesPerPair} MATCHES PER PAIR`}</p>
+            <p className="eyebrow">{isScrim ? "SCRIM SEASON · PERSONAL RECORDS" : `${teamCount} TEAMS · ${data.tournament?.preliminaryFormat === "none" ? "DIRECT BRACKET" : `${data.tournament?.matchesPerPair} MATCHES PER PAIR`}`}</p>
             <h1>{data.tournament?.name}</h1>
-            <p>{teamCount}개 팀이 {preliminaryLabel} {bracketFormat}</p>
+            <p>{isScrim ? "경기마다 확정된 10명이 5대5로 팀을 나누고 개인 전적과 시즌 포인트를 쌓습니다." : `${teamCount}개 팀이 ${preliminaryLabel} ${bracketFormat}`}</p>
             <div className="hero-meta">
               <span>개막 {formatDate(data.tournament!.startAt, false)}</span>
               <span>참가 기본 {data.tournament?.starterPoints.toLocaleString()}P</span>
@@ -661,10 +722,10 @@ function HomeView({
       <section className="dashboard-grid">
         <article className="panel standings-preview">
           <div className="section-heading">
-            <div><p className="eyebrow">LEAGUE TABLE</p><h2>리그 순위</h2></div>
-            <button className="text-button" onClick={() => setActiveTab("standings")}>전체 보기 →</button>
+            <div><p className="eyebrow">{isScrim ? "SEASON DATA" : "LEAGUE TABLE"}</p><h2>{isScrim ? "개인 누적 통계" : "리그 순위"}</h2></div>
+            <button className="text-button" onClick={() => setActiveTab(isScrim ? "stats" : "standings")}>전체 보기 →</button>
           </div>
-          <StandingTable standings={data.standings} compact />
+          {isScrim ? <div className="scrim-home-summary"><strong>{new Set(data.playerStats.map((row) => row.userId).filter(Boolean)).size}명</strong><span>기록 참여자</span><strong>{data.matches.filter((match) => match.status === "completed").length}경기</strong><span>완료된 내전</span></div> : <StandingTable standings={data.standings} compact />}
         </article>
         <article className="panel recent-results">
           <div className="section-heading">
@@ -697,9 +758,10 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick
   const existing = data.bets.find((bet) => bet.matchId === match.id);
   const [teamId, setTeamId] = useState(match.teamAId ?? "");
   const [stake, setStake] = useState(100);
+  const isScrim = data.tournament?.competitionKind === "scrim_season";
   // The lock is intentionally evaluated against wall-clock time on each refreshed render.
   // eslint-disable-next-line react-hooks/purity
-  const openForPrediction = isPredictionOpen(match.scheduledAt, Date.now());
+  const openForPrediction = isScrim ? match.bettingStatus === "open" : isPredictionOpen(match.scheduledAt, Date.now());
 
   if (existing) {
     return (
@@ -709,8 +771,8 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick
       </div>
     );
   }
-  if (!match.scheduleConfirmed) return <div className="prediction-locked">운영자가 경기 일정을 확정하면 예측이 열립니다.</div>;
-  if (!openForPrediction) return <div className="prediction-locked">경기 시작 1시간 전 예측이 마감되었습니다.</div>;
+  if (!isScrim && !match.scheduleConfirmed) return <div className="prediction-locked">운영자가 경기 일정을 확정하면 예측이 열립니다.</div>;
+  if (!openForPrediction) return <div className="prediction-locked">{isScrim ? "운영자가 배팅을 시작하면 이곳에서 참여할 수 있습니다." : "경기 시작 1시간 전 예측이 마감되었습니다."}</div>;
   if (!data.viewer) {
     return <a href={signInPath} className="prediction-signin">로그인하고 승리팀 예측하기 <span>→</span></a>;
   }
@@ -727,6 +789,7 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick
         <label><span>베팅 포인트</span><input type="number" min="10" step="10" value={stake} onChange={(event) => setStake(Number(event.target.value))} /></label>
         <button className="accent-button" disabled={busy || !teamId} onClick={() => command({ action: "create_bet", tournamentId: data.tournament!.id, matchId: match.id, teamId, stake }, "예측을 등록했습니다.")}>예측하기</button>
       </div>
+      {isScrim && <div className="stake-presets">{[100, 300, 500].map((amount) => <button type="button" key={amount} onClick={() => setStake(amount)}>{amount}P</button>)}<button type="button" onClick={() => setStake(data.viewer?.pointsBalance ?? 0)}>전액</button></div>}
       <small>적중 시 베팅 포인트의 2배 지급 · 현금 환전 불가</small>
     </div>
   );
@@ -1166,8 +1229,8 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
       damage: 0,
       gold: 0,
       goldPerMinute: 0,
-      champions: new Map<string, number>(),
-      lanes: new Map<string, number>(),
+      champions: new Map<string, { games: number; wins: number }>(),
+      lanes: new Map<string, { games: number; wins: number }>(),
     };
     current.games += 1;
     current.wins += row.won ? 1 : 0;
@@ -1177,12 +1240,14 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
     current.damage += row.damage;
     current.gold += row.gold;
     current.goldPerMinute += row.goldPerMinute;
-    current.champions.set(row.championName, (current.champions.get(row.championName) ?? 0) + 1);
-    current.lanes.set(row.lane, (current.lanes.get(row.lane) ?? 0) + 1);
+    const champion = current.champions.get(row.championName) ?? { games: 0, wins: 0 };
+    current.champions.set(row.championName, { games: champion.games + 1, wins: champion.wins + (row.won ? 1 : 0) });
+    const lane = current.lanes.get(row.lane) ?? { games: 0, wins: 0 };
+    current.lanes.set(row.lane, { games: lane.games + 1, wins: lane.wins + (row.won ? 1 : 0) });
     map.set(key, current);
     return map;
   }, new Map<string, {
-    key: string; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; damage: number; gold: number; goldPerMinute: number; champions: Map<string, number>; lanes: Map<string, number>;
+    key: string; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; damage: number; gold: number; goldPerMinute: number; champions: Map<string, { games: number; wins: number }>; lanes: Map<string, { games: number; wins: number }>;
   }>()).values()].sort((a, b) => b.games - a.games || b.wins - a.wins || b.damage - a.damage);
   const teamRows = [...data.teams.map((team) => {
     const rows = data.teamStats.filter((row) => row.teamId === team.id);
@@ -1203,22 +1268,24 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
   return <section className="page-section stats-page">
     <PageTitle eyebrow="ANALYTICS" title="경기 통계" description="등록된 결과 이미지를 기준으로 계산한 대회 누적 통계입니다." />
     <div className="stats-summary-grid"><div><span>분석 경기</span><strong>{new Set(data.playerStats.map((row) => row.matchId)).size}</strong></div><div><span>기록 계정</span><strong>{playerRows.length}</strong></div><div><span>총 킬</span><strong>{data.teamStats.reduce((sum, row) => sum + row.kills, 0)}</strong></div><div><span>등록 이미지</span><strong>{data.resultImages.length}</strong></div></div>
-    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 딜량</span><span>평균 골드</span><span>주력 챔피언</span><span>주 라인</span></div>{playerRows.map((row) => {
-      const topChampion = [...row.champions].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
-      const topLane = [...row.lanes].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
-      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games}</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.damage / row.games).toLocaleString()}</span><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{topChampion}</span><span>{positionLabel(topLane, true)}</span></div>;
+    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기(승-패)</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 딜량</span><span>평균 골드</span><span>G/분</span><span>챔피언별 전적</span><span>라인별 전적</span></div>{playerRows.map((row) => {
+      const topChampion = [...row.champions].sort((a, b) => b[1].games - a[1].games)[0];
+      const topLane = [...row.lanes].sort((a, b) => b[1].games - a[1].games)[0];
+      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games} ({row.wins}-{row.games - row.wins})</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.damage / row.games).toLocaleString()}</span><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{Math.round(row.goldPerMinute / row.games)}</span><span>{topChampion ? `${topChampion[0]} ${topChampion[1].wins}승 ${topChampion[1].games - topChampion[1].wins}패` : "-"}</span><span>{topLane ? `${positionLabel(topLane[0], true)} ${topLane[1].wins}승 ${topLane[1].games - topLane[1].wins}패` : "-"}</span></div>;
     })}</div></article>
-    <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as React.CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>
+    {data.tournament?.competitionKind !== "scrim_season" && <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as React.CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>}
   </section>;
 }
 
-function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: SharedProps & { upcoming: Match[] }) {
+function PointsView({ data, teamMap, busy, command, signInPath, upcoming, focusedMatchId }: SharedProps & { upcoming: Match[]; focusedMatchId?: string | null }) {
+  const isScrim = data.tournament?.competitionKind === "scrim_season";
+  const visibleMatches = [...upcoming].sort((a, b) => Number(b.id === focusedMatchId) - Number(a.id === focusedMatchId));
   if (!data.viewer) {
     return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 선택한 대회의 기본 포인트를 받고, 대회별 지갑으로 따로 관리됩니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
   }
   return (
     <section className="page-section">
-      <PageTitle eyebrow="PREDICTION" title="포인트 예측" description="운영자가 일정을 확정한 경기를 시작 1시간 전까지 예측할 수 있습니다." />
+      <PageTitle eyebrow="PREDICTION" title={isScrim ? "내전 배팅" : "포인트 예측"} description={isScrim ? "운영자가 배팅을 연 모든 내전 경기를 한 화면에서 각각 예측할 수 있습니다." : "운영자가 일정을 확정한 경기를 시작 1시간 전까지 예측할 수 있습니다."} />
       <div className="wallet-hero">
         <div><span>TOURNAMENT BALANCE</span><strong>{data.viewer.pointsBalance.toLocaleString()}<small>P</small></strong><p>{data.tournament?.name} 전용 포인트 · 다른 대회와 별도로 관리됩니다.</p></div>
         <div className="wallet-stats"><div><span>참여</span><strong>{data.bets.length}</strong></div><div><span>적중</span><strong>{data.bets.filter((bet) => bet.status === "won").length}</strong></div></div>
@@ -1227,8 +1294,8 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: Shar
         <article className="panel">
           <div className="section-heading"><div><p className="eyebrow">OPEN PICKS</p><h2>예측 가능한 경기</h2></div></div>
           <div className="open-picks">
-            {upcoming.map((match) => <div key={match.id}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
-            {!upcoming.length && <EmptyState title="예측 가능한 경기가 없습니다" detail="운영자가 일정을 확정하고 경기 시작까지 1시간 이상 남으면 예측이 열립니다." />}
+            {visibleMatches.map((match) => <div key={match.id} id={`bet-${match.id}`} className={match.id === focusedMatchId ? "focused-pick" : ""}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><MatchVersus match={match} teamMap={teamMap} /><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
+            {!visibleMatches.length && <EmptyState title="예측 가능한 경기가 없습니다" detail={isScrim ? "운영자가 배팅 시작 버튼을 누르면 이곳에 경기가 표시됩니다." : "운영자가 일정을 확정하고 경기 시작까지 1시간 이상 남으면 예측이 열립니다."} />}
           </div>
         </article>
         <aside className="panel leaderboard-panel">
@@ -1246,24 +1313,33 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming }: Shar
   );
 }
 
-function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & { openCreate: () => void }) {
+function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, openCreateScrimMatch }: SharedProps & { openCreate: () => void; openCreateScrim: () => void; openCreateScrimMatch: () => void }) {
   const upcoming = data.matches
     .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId)
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+  const isScrim = data.tournament?.competitionKind === "scrim_season";
   return (
     <section className="page-section">
-      <PageTitle eyebrow="CONTROL ROOM" title="대회 운영" description="경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다." />
-      <div className="admin-actions"><button className="primary-button" onClick={openCreate}>＋ 새 대회 생성</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button><div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
+      <PageTitle eyebrow="CONTROL ROOM" title={isScrim ? "내전 운영" : "대회 운영"} description={isScrim ? "참가자 10명과 팀 구성을 등록하고 배팅을 직접 시작·종료합니다." : "경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다."} />
+      <div className="admin-actions"><button className="primary-button" onClick={isScrim ? openCreateScrimMatch : openCreate}>{isScrim ? "＋ 내전 경기 생성" : "＋ 새 대회 생성"}</button><button className="secondary-button" onClick={openCreateScrim}>＋ 내전 시즌</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button><div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
       <div className="admin-grid">
         <article className="panel schedule-confirmation-panel">
-          <div className="section-heading"><div><p className="eyebrow">SCHEDULE APPROVAL</p><h2>경기 일정 확정</h2></div><span>{upcoming.filter((match) => match.scheduleConfirmed).length}/{upcoming.length}</span></div>
-          <p className="admin-panel-help">날짜·시간을 변경하면 먼저 일정을 저장해 주세요. 확정된 경기만 시작 1시간 전까지 포인트 예측에 표시됩니다.</p>
+          <div className="section-heading"><div><p className="eyebrow">{isScrim ? "SCRIM BETTING" : "SCHEDULE APPROVAL"}</p><h2>{isScrim ? "내전 경기·배팅 관리" : "경기 일정 확정"}</h2></div><span>{upcoming.length}</span></div>
+          <p className="admin-panel-help">{isScrim ? "일정은 현재 시각으로 생성되며 수정할 수 있습니다. 배팅 시작 후 공유 링크를 카카오톡으로 보내고 경기 직전에 종료하세요." : "날짜·시간을 변경하면 먼저 일정을 저장해 주세요. 확정된 경기만 시작 1시간 전까지 포인트 예측에 표시됩니다."}</p>
           <div className="admin-schedule-list">
             {upcoming.map((match) => {
               const teamA = teamMap.get(match.teamAId!);
               const teamB = teamMap.get(match.teamBId!);
               return (
-                <AdminScheduleRow
+                isScrim ? <ScrimMatchControl
+                  key={`${match.id}:${match.scheduledAt}:${match.bettingStatus}`}
+                  match={match}
+                  teamA={teamA}
+                  teamB={teamB}
+                  tournamentId={data.tournament!.id}
+                  busy={busy}
+                  command={command}
+                /> : <AdminScheduleRow
                   key={`${match.id}:${match.scheduledAt}:${match.scheduleConfirmed}`}
                   match={match}
                   teamA={teamA}
@@ -1281,14 +1357,14 @@ function AdminView({ data, teamMap, busy, command, openCreate }: SharedProps & {
           <div className="audit-list">{data.audit.map((log) => <div key={log.id}><i /><span><strong>{log.actorName}</strong>{AUDIT_LABEL[log.action] ?? log.action}<small>{formatDate(log.createdAt)}</small></span></div>)}</div>
         </article>
       </div>
-      <article className="panel team-logo-panel">
+      {!isScrim && <article className="panel team-logo-panel">
         <div className="section-heading"><div><p className="eyebrow">TEAM IDENTITY</p><h2>팀 로고 관리</h2></div><span>PNG · JPG · WebP · 최대 2MB</span></div>
         <p className="admin-panel-help">이미지가 없으면 팀명의 앞 두 글자가 기본 로고로 표시됩니다. 업로드한 이미지는 대진표·일정·순위·통계·밴픽에 공통 적용됩니다.</p>
         <div className="team-logo-list">
           {data.teams.map((team) => <TeamLogoControl key={team.id} team={team} busy={busy} command={command} />)}
         </div>
-      </article>
-      {data.tournament?.rosterMode === "registered_accounts" && (
+      </article>}
+      {!isScrim && data.tournament?.rosterMode === "registered_accounts" && (
         <article className="panel team-leadership-panel">
           <div className="section-heading"><div><p className="eyebrow">TEAM LEADERSHIP</p><h2>팀장·부팀장 관리</h2></div><span>팀 명단에 등록된 회원만 선택</span></div>
           <p className="admin-panel-help">팀장과 부팀장은 소속 팀 경기의 일정을 입력하고, 결과 이미지와 승패를 등록할 수 있습니다. 일정 확정과 잘못 등록된 결과의 정정은 운영자·관리자만 가능합니다.</p>
@@ -1417,6 +1493,33 @@ function AdminScheduleRow({ match, teamA, teamB, busy, command }: {
   );
 }
 
+function ScrimMatchControl({ match, teamA, teamB, tournamentId, busy, command }: {
+  match: Match;
+  teamA?: Team;
+  teamB?: Team;
+  tournamentId: string;
+  busy: boolean;
+  command: SharedProps["command"];
+}) {
+  const originalScheduledAt = toDateTimeLocal(match.scheduledAt);
+  const [scheduledAt, setScheduledAt] = useState(originalScheduledAt);
+  const permanentPath = `/scrim/${tournamentId}/bet`;
+  const matchPath = `${permanentPath}/${match.id}`;
+  const names = (team?: Team) => team?.players.map((player) => player.nickname).join(" · ") ?? "";
+  return <div className="scrim-match-control">
+    <header><div><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><span>{match.roundLabel} · {formatDate(match.scheduledAt)}</span></div><b className={`betting-state ${match.bettingStatus}`}>{match.bettingStatus === "open" ? "배팅 중" : match.bettingStatus === "closed" ? "배팅 종료" : "대기"}</b></header>
+    <div className="scrim-rosters"><span><b>BLUE</b>{names(teamA)}</span><span><b>RED</b>{names(teamB)}</span></div>
+    <div className="scrim-control-actions">
+      <input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} aria-label="내전 경기 일시" />
+      <button type="button" disabled={busy || scheduledAt === originalScheduledAt} onClick={() => command({ action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() }, "내전 경기 일정을 변경했습니다.")}>일정 저장</button>
+      {match.bettingStatus === "scheduled" && <button type="button" className="primary-button compact" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "open" }, "배팅을 시작했습니다. 공유 링크를 사용할 수 있습니다.")}>배팅 시작</button>}
+      {match.bettingStatus === "open" && <button type="button" className="accent-button" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "closed" }, "배팅을 종료했습니다.")}>배팅 종료</button>}
+      <button type="button" className="secondary-button" onClick={() => void shareOrCopy(matchPath, `${teamA?.name} vs ${teamB?.name} 내전 배팅`).then(window.alert).catch(() => undefined)}>경기 링크 공유</button>
+      <button type="button" className="text-button" onClick={() => void shareOrCopy(permanentPath, "내전 배팅 현황").then(window.alert).catch(() => undefined)}>영구 링크</button>
+    </div>
+  </div>;
+}
+
 function ResultRow({ match, teamMap }: { match: Match; teamMap: Map<string, Team> }) {
   const winner = match.winnerId ? teamMap.get(match.winnerId) : undefined;
   const loser = match.loserId ? teamMap.get(match.loserId) : undefined;
@@ -1455,9 +1558,65 @@ function SingleEliminationPreview({ teams }: { teams: TeamDraft[] }) {
   return <div className="preview-match-grid">{Array.from({ length: slots.length / 2 }, (_, index) => <div key={index}><span>{bracketSize}강 {index + 1}경기</span><strong>{slots[index * 2]} <small>vs</small> {slots[index * 2 + 1]}</strong></div>)}</div>;
 }
 
-type CompetitionFormat = "league_only" | "bracket_only" | "split_only" | "league_then_bracket" | "league_then_split";
-type TournamentCreateInput = { name: string; startAt: string; matchesPerPair: number; starterPoints: number; preliminaryFormat: "none" | "round_robin"; bracketFormat: "single_elimination" | "winner_loser_split"; competitionFormat: CompetitionFormat; advancingTeamCount: number; leagueBestOf: number; bracketBestOf: number; semifinalBestOf: number; finalBestOf: number; tiebreakBestOf: number; teams: TeamDraft[] };
-const FORMAT_OPTIONS: Array<[CompetitionFormat, string, string]> = [
+function CreateScrimSeasonModal({ busy, onClose, onCreate }: {
+  busy: boolean;
+  onClose: () => void;
+  onCreate: (input: { name: string; startAt: string; starterPoints: number }) => void;
+}) {
+  const [name, setName] = useState("2026 1시즌 내전");
+  const [startAt, setStartAt] = useState(() => toDateTimeLocal(new Date().toISOString()));
+  const [starterPoints, setStarterPoints] = useState(1000);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <section className="create-modal scrim-create-modal" role="dialog" aria-modal="true" aria-labelledby="scrim-season-title">
+      <header><div><p className="eyebrow">NEW SCRIM SEASON</p><h2 id="scrim-season-title">내전 시즌 만들기</h2></div><button onClick={onClose} aria-label="닫기">×</button></header>
+      <div className="modal-body"><p className="admin-panel-help">시즌 포인트는 다른 대회와 완전히 분리됩니다. 시즌 코드를 입력한 회원만 경기 참가자와 배팅 화면에 접근할 수 있습니다.</p><div className="form-grid tournament-fields">
+        <label><span>시즌명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label><span>시즌 시작</span><input type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} /></label>
+        <label><span>참가 기본 포인트</span><input type="number" min="0" max="100000" step="100" value={starterPoints} onChange={(event) => setStarterPoints(Number(event.target.value))} /></label>
+      </div></div>
+      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy || !name.trim() || !startAt} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), starterPoints })}>{busy ? "생성 중…" : "시즌 생성 및 코드 발급"}</button></footer>
+    </section>
+  </div>;
+}
+
+function CreateScrimMatchModal({ tournamentId, accounts, busy, onClose, onCreate }: {
+  tournamentId: string;
+  accounts: Dashboard["accounts"];
+  busy: boolean;
+  onClose: () => void;
+  onCreate: (input: { tournamentId: string; scheduledAt: string; blueAccountIds: string[]; redAccountIds: string[] }) => void;
+}) {
+  const eligibleAccounts = accounts;
+  const defaultAccounts = eligibleAccounts.filter((account, index, list) => list.findIndex((item) => item.userId === account.userId) === index);
+  const [scheduledAt, setScheduledAt] = useState(() => toDateTimeLocal(new Date().toISOString()));
+  const [slots, setSlots] = useState<string[]>(Array.from({ length: 10 }, (_, index) => defaultAccounts[index]?.id ?? ""));
+  const accountMap = new Map(eligibleAccounts.map((account) => [account.id, account]));
+  const selectedUsers = new Set(slots.map((id) => accountMap.get(id)?.userId).filter(Boolean));
+  const duplicate = selectedUsers.size !== slots.filter(Boolean).length;
+  function updateSlot(index: number, id: string) {
+    setSlots((current) => current.map((value, slotIndex) => slotIndex === index ? id : value));
+  }
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <section className="create-modal scrim-create-modal" role="dialog" aria-modal="true" aria-labelledby="scrim-match-title">
+      <header><div><p className="eyebrow">NEW SCRIM MATCH</p><h2 id="scrim-match-title">10명 확정 및 팀 구성 등록</h2></div><button onClick={onClose} aria-label="닫기">×</button></header>
+      <div className="modal-body">
+        <div className="form-grid tournament-fields"><label><span>경기 일시</span><input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /><small>현재 시간이 기본값이며 수정할 수 있습니다.</small></label></div>
+        <p className="admin-panel-help">기존 팀 매칭 프로그램의 결과대로 블루 5명과 레드 5명을 선택하세요. 시즌 코드를 입력했고 롤 계정을 등록한 회원만 표시됩니다.</p>
+        <div className="scrim-roster-editor">{["블루팀", "레드팀"].map((side, sideIndex) => <fieldset key={side} className={sideIndex ? "red" : "blue"}><legend>{side}</legend>{Array.from({ length: 5 }, (_, positionIndex) => {
+          const index = sideIndex * 5 + positionIndex;
+          return <label key={index}><span>{POSITIONS_LABEL[positionIndex]}</span><select value={slots[index]} onChange={(event) => updateSlot(index, event.target.value)}><option value="">참가자 선택</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id} disabled={selectedUsers.has(account.userId) && accountMap.get(slots[index])?.userId !== account.userId}>{account.riotGameName}#{account.riotTagline} · {account.displayName}</option>)}</select></label>;
+        })}</fieldset>)}</div>
+        {defaultAccounts.length < 10 && <p className="form-error">시즌 코드를 입력하고 롤 계정을 등록한 회원이 최소 10명 필요합니다. 현재 {defaultAccounts.length}명입니다.</p>}
+      </div>
+      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy || defaultAccounts.length < 10 || slots.some((id) => !id) || duplicate || !scheduledAt} onClick={() => onCreate({ tournamentId, scheduledAt: new Date(scheduledAt).toISOString(), blueAccountIds: slots.slice(0, 5), redAccountIds: slots.slice(5) })}>{busy ? "생성 중…" : "경기·배팅 링크 생성"}</button></footer>
+    </section>
+  </div>;
+}
+
+type CompetitionFormat = "league_only" | "bracket_only" | "split_only" | "league_then_bracket" | "league_then_split" | "scrim_season";
+type StandardCompetitionFormat = Exclude<CompetitionFormat, "scrim_season">;
+type TournamentCreateInput = { name: string; startAt: string; matchesPerPair: number; starterPoints: number; preliminaryFormat: "none" | "round_robin"; bracketFormat: "single_elimination" | "winner_loser_split"; competitionFormat: StandardCompetitionFormat; advancingTeamCount: number; leagueBestOf: number; bracketBestOf: number; semifinalBestOf: number; finalBestOf: number; tiebreakBestOf: number; teams: TeamDraft[] };
+const FORMAT_OPTIONS: Array<[StandardCompetitionFormat, string, string]> = [
   ["league_only", "리그전만", "리그 순위로 대회를 마칩니다."],
   ["bracket_only", "일반 토너먼트만", "직접 배치한 시드로 단일 탈락 대진을 만듭니다."],
   ["split_only", "승·패자 분기형만", "승자조와 패자조를 모든 팀 수에 맞게 생성합니다."],
@@ -1474,7 +1633,7 @@ function CreateTournamentModal({ busy, rosterAccounts, onClose, onCreate }: { bu
   const [startAt, setStartAt] = useState("2026-09-05T10:00");
   const [matchesPerPair, setMatchesPerPair] = useState(2);
   const [starterPoints, setStarterPoints] = useState(1000);
-  const [competitionFormat, setCompetitionFormat] = useState<CompetitionFormat>("league_then_split");
+  const [competitionFormat, setCompetitionFormat] = useState<StandardCompetitionFormat>("league_then_split");
   const [advancingTeamCount, setAdvancingTeamCount] = useState(4);
   const [leagueBestOf, setLeagueBestOf] = useState(1);
   const [bracketBestOf, setBracketBestOf] = useState(3);

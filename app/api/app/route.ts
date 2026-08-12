@@ -2,6 +2,8 @@ import {
   createBet,
   createBracket,
   createTournament,
+  createScrimSeason,
+  createScrimMatch,
   confirmMatchSchedule,
   createTiebreakerMatch,
   getDashboard,
@@ -15,10 +17,13 @@ import {
   setTeamLogo,
   clearTeamLogo,
   setTeamLeaders,
+  setScrimBetting,
   joinTournamentByCode,
   rotateTournamentCode,
   updateUserProfile,
   type CreateTournamentInput,
+  type CreateScrimSeasonInput,
+  type CreateScrimMatchInput,
   type SaveMatchResultInput,
   type TeamLogoInput,
   type UserRole,
@@ -107,6 +112,22 @@ export async function POST(request: Request) {
     if (action === "create_tournament") {
       const created = await createTournament(payload.input as CreateTournamentInput, user);
       return Response.json({ ok: true, ...created });
+    }
+    if (action === "create_scrim_season") {
+      const created = await createScrimSeason(payload.input as CreateScrimSeasonInput, user);
+      return Response.json({ ok: true, ...created });
+    }
+    if (action === "create_scrim_match") {
+      const created = await createScrimMatch(payload.input as CreateScrimMatchInput, user);
+      return Response.json({ ok: true, ...created });
+    }
+    if (action === "set_scrim_betting") {
+      const result = await setScrimBetting(
+        String(payload.matchId ?? ""),
+        payload.status === "closed" ? "closed" : "open",
+        user,
+      );
+      return Response.json({ ok: true, ...result });
     }
     if (action === "join_tournament") {
       const tournamentId = await joinTournamentByCode(String(payload.code ?? ""), user);
