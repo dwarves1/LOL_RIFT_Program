@@ -419,6 +419,43 @@ async function canManageMatch(actor: RequestUser, match: typeof matches.$inferSe
     || isTeamLeader(actor, [match.teamAId, match.teamBId]);
 }
 
+export async function getMatchImageAnalysisContext(matchId: string, actor: RequestUser) {
+  await ensureSchema();
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || !match.teamAId || !match.teamBId) throw new Error("분석할 경기를 찾을 수 없습니다.");
+  if (!(await canManageMatch(actor, match))) throw new Error("이 경기의 결과 이미지를 분석할 권한이 없습니다.");
+
+  const teamRows = await db.select({ id: teams.id, name: teams.name })
+    .from(teams)
+    .where(inArray(teams.id, [match.teamAId, match.teamBId]));
+  const rosterRows = await db.select({
+    teamId: players.teamId,
+    nickname: players.nickname,
+    position: players.position,
+    gameName: riotAccounts.gameName,
+    tagline: riotAccounts.tagline,
+  })
+    .from(players)
+    .leftJoin(riotAccounts, eq(players.riotAccountId, riotAccounts.id))
+    .where(inArray(players.teamId, [match.teamAId, match.teamBId]));
+  const teamMap = new Map(teamRows.map((team) => [team.id, team.name]));
+  return {
+    matchId: match.id,
+    roundLabel: match.roundLabel,
+    teamA: {
+      id: match.teamAId,
+      name: teamMap.get(match.teamAId) ?? "팀 A",
+      roster: rosterRows.filter((player) => player.teamId === match.teamAId),
+    },
+    teamB: {
+      id: match.teamBId,
+      name: teamMap.get(match.teamBId) ?? "팀 B",
+      roster: rosterRows.filter((player) => player.teamId === match.teamBId),
+    },
+  };
+}
+
 export type TeamLogoInput = {
   objectKey: string;
   fileName: string;

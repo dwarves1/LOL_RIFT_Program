@@ -5,6 +5,7 @@ import {
   confirmMatchSchedule,
   createTiebreakerMatch,
   getDashboard,
+  getMatchImageAnalysisContext,
   getRequestUser,
   setMatchWinner,
   setMatchSchedule,
@@ -36,6 +37,7 @@ import {
   type DraftMode,
   type DraftSide,
 } from "../../../lib/draft-service";
+import { analyzeScoreboardWithOpenAI, OPENAI_SCOREBOARD_MODEL } from "../../../lib/openai-scoreboard";
 import { env } from "cloudflare:workers";
 
 export const dynamic = "force-dynamic";
@@ -79,6 +81,27 @@ export async function POST(request: Request) {
     }
     if (!user.profileComplete) {
       return Response.json({ error: "본계정과 실명 프로필을 먼저 설정해 주세요." }, { status: 403 });
+    }
+
+    if (action === "analyze_match_image") {
+      const imageDataUrl = String(payload.imageDataUrl ?? "");
+      const matched = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(imageDataUrl);
+      if (!matched) throw new Error("PNG, JPG 또는 WebP 이미지를 선택해 주세요.");
+      const estimatedBytes = Math.floor(matched[2].length * 0.75);
+      if (estimatedBytes > 10 * 1024 * 1024) throw new Error("이미지는 10MB 이하로 올려 주세요.");
+      const matchContext = await getMatchImageAnalysisContext(String(payload.matchId ?? ""), user);
+      const side1TeamId = String(payload.side1TeamId ?? "");
+      const context = side1TeamId === matchContext.teamB.id
+        ? { ...matchContext, teamA: matchContext.teamB, teamB: matchContext.teamA }
+        : matchContext;
+      const runtimeEnv = env as unknown as { OPENAI_API_KEY?: string; OPENAI_SCOREBOARD_MODEL?: string };
+      const apiKey = runtimeEnv.OPENAI_API_KEY?.trim();
+      if (!apiKey) {
+        return Response.json({ error: "AI 분석 키가 설정되지 않아 OCR로 분석합니다.", aiAvailable: false }, { status: 503 });
+      }
+      const model = runtimeEnv.OPENAI_SCOREBOARD_MODEL?.trim() || OPENAI_SCOREBOARD_MODEL;
+      const analysis = await analyzeScoreboardWithOpenAI({ apiKey, imageDataUrl, context, model });
+      return Response.json({ ok: true, analysis, model });
     }
 
     if (action === "create_tournament") {

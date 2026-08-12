@@ -206,6 +206,11 @@ test("tournament isolation, team leadership, result correction, and draft permis
   const blueVice = actors.get(blueTeam.players.find((player) => player.teamRole === "vice_captain").userId);
   const redVice = actors.get(redTeam.players.find((player) => player.teamRole === "vice_captain").userId);
 
+  const imageAnalysisContext = await tournament.getMatchImageAnalysisContext(match.id, blueVice);
+  assert.equal(imageAnalysisContext.teamA.roster.length, 5);
+  assert.equal(imageAnalysisContext.teamB.roster.length, 5);
+  await assert.rejects(() => tournament.getMatchImageAnalysisContext(match.id, actors.get("outsider")), /분석할 권한/);
+
   await assert.rejects(() => tournament.setMatchBestOf(match.id, 3, actors.get("foreign_operator")), /운영할 권한/);
   let outsiderData = await tournament.getDashboard(created.tournamentId, actors.get("outsider"));
   assert.equal(outsiderData.tournament, null);

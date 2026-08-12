@@ -139,6 +139,9 @@ export function ResultReviewModal({
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState({ value: 0, detail: "" });
   const [analysisError, setAnalysisError] = useState("");
+  const [analysisNotice, setAnalysisNotice] = useState("");
+  const [analysisSource, setAnalysisSource] = useState<"ai" | "ocr" | null>(null);
+  const [analysisModel, setAnalysisModel] = useState("");
 
   useEffect(() => { void loadChampionNames(); }, []);
 
@@ -227,6 +230,9 @@ export function ResultReviewModal({
     }
     setFileName(file.name);
     setAnalysisError("");
+    setAnalysisNotice("");
+    setAnalysisSource(null);
+    setAnalysisModel("");
     const nextDataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -242,19 +248,52 @@ export function ResultReviewModal({
     });
     setDimensions({ width: image.naturalWidth, height: image.naturalHeight });
     setAnalyzing(true);
-    setProgress({ value: 1, detail: "OCR 엔진을 준비하는 중" });
+    setProgress({ value: 3, detail: "AI가 점수판을 분석하는 중" });
     try {
-      const [extracted, championNames] = await Promise.all([
-        extractFixedLolScoreboard(image, (value, detail) => setProgress({ value, detail })),
-        loadChampionNames(),
-      ]);
-      applyExtractedRows(extracted.players, extracted.topOutcome, extracted.topOutcomeConfidence, championNames);
-      setDuration(durationLabel(extracted.durationSeconds));
-      setRawExtraction(extracted.rawText);
+      const championNamesPromise = loadChampionNames();
+      let extracted: ExtractedScoreboardPlayer[] | null = null;
+      let durationSeconds = 0;
+      let topOutcome: "win" | "loss" | "unknown" = "unknown";
+      let topOutcomeConfidence = 0;
+      let rawText = "";
+      try {
+        const response = await fetch("/api/app", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "analyze_match_image", matchId: match.id, side1TeamId, side2TeamId, imageDataUrl: nextDataUrl }),
+        });
+        const payload = await response.json() as { error?: string; model?: string; analysis?: { players?: ExtractedScoreboardPlayer[]; durationSeconds?: number; topOutcome?: "win" | "loss" | "unknown"; topOutcomeConfidence?: number; rawText?: string } };
+        if (!response.ok || !payload.analysis?.players?.length) throw new Error(payload.error ?? "AI 이미지 분석에 실패했습니다.");
+        extracted = payload.analysis.players;
+        durationSeconds = Number(payload.analysis.durationSeconds ?? 0);
+        topOutcome = payload.analysis.topOutcome ?? "unknown";
+        topOutcomeConfidence = Number(payload.analysis.topOutcomeConfidence ?? 0);
+        rawText = payload.analysis.rawText ?? "";
+        setAnalysisSource("ai");
+        setAnalysisModel(payload.model ?? "OpenAI Vision");
+        setProgress({ value: 95, detail: "AI 분석 결과를 검증하는 중" });
+      } catch (aiError) {
+        const reason = aiError instanceof Error ? aiError.message : "AI 이미지 분석에 실패했습니다.";
+        setProgress({ value: 8, detail: "AI 분석을 사용할 수 없어 OCR로 전환하는 중" });
+        const ocr = await extractFixedLolScoreboard(image, (value, detail) => setProgress({ value, detail: `OCR · ${detail}` }));
+        extracted = ocr.players;
+        durationSeconds = ocr.durationSeconds;
+        topOutcome = ocr.topOutcome;
+        topOutcomeConfidence = ocr.topOutcomeConfidence;
+        rawText = ocr.rawText;
+        setAnalysisSource("ocr");
+        setAnalysisNotice(`${reason} 기존 OCR 분석 결과를 표시했습니다.`);
+      }
+      const championNames = await championNamesPromise;
+      applyExtractedRows(extracted, topOutcome, topOutcomeConfidence, championNames);
+      setDuration(durationLabel(durationSeconds));
+      setRawExtraction(rawText);
+      setProgress({ value: 100, detail: "자동 분석 완료" });
     } catch (error) {
       setPlayers(emptyPlayers());
       setDetectedOutcome({ value: "unknown", confidence: 0 });
       setWinnerSide(null);
+      setAnalysisSource(null);
       setAnalysisError(`${error instanceof Error ? error.message : "자동 인식에 실패했습니다."} 아래 표에서 직접 입력할 수 있습니다.`);
     } finally {
       setAnalyzing(false);
@@ -289,8 +328,9 @@ export function ResultReviewModal({
             {/* The local data URL is intentionally previewed without an image optimizer. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             {dataUrl && <img src={dataUrl} alt="업로드한 경기 결과 원본" />}
-            {analyzing && <div className="ocr-progress"><div><span style={{ width: `${progress.value}%` }} /></div><strong>{progress.detail}</strong><small>첫 분석은 한글 OCR 자료를 준비하느라 시간이 걸릴 수 있습니다.</small></div>}
+            {analyzing && <div className="ocr-progress"><div><span style={{ width: `${progress.value}%` }} /></div><strong>{progress.detail}</strong><small>AI를 먼저 사용하고, 이용할 수 없으면 기존 OCR로 자동 전환합니다.</small></div>}
             {analysisError && <p className="form-error">{analysisError}</p>}
+            {analysisNotice && <p className="analysis-notice">{analysisNotice}</p>}
           </div>
           <div className="result-fields-panel">
             <div className="result-meta-fields">
@@ -305,6 +345,7 @@ export function ResultReviewModal({
               <strong>{detectedOutcome.value === "win" ? "승리 · 1팀을 승리팀으로 선택" : detectedOutcome.value === "loss" ? "패배 · 2팀을 승리팀으로 선택" : "판독 불가 · 승리팀을 직접 선택해 주세요"}</strong>
               {detectedOutcome.confidence > 0 && <small>신뢰도 {detectedOutcome.confidence}%</small>}
             </div>
+            {analysisSource && <div className={`analysis-source ${analysisSource}`}><strong>{analysisSource === "ai" ? "AI 기본 분석" : "OCR 대체 분석"}</strong><span>{analysisSource === "ai" ? `${analysisModel} · 사용자 최종 확인 필요` : "AI 호출 실패 시 자동 전환 · 사용자 최종 확인 필요"}</span></div>}
             <div className="winner-review"><span>최종 승리팀 확인</span>{([1, 2] as const).map((side) => <button type="button" key={side} className={winnerSide === side ? "active" : ""} onClick={() => setWinnerSide(side)}><b>{side}팀</b>{side === 1 ? availableTeams.find((team) => team.id === side1TeamId)?.name : availableTeams.find((team) => team.id === side2TeamId)?.name}<small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></button>)}</div>
             <div className="result-team-review-grid">{([1, 2] as const).map((side) => {
               const teamId = side === 1 ? side1TeamId : side2TeamId;
@@ -354,7 +395,7 @@ export function ResultReviewModal({
               gold: player.gold,
               goldPerMinute: player.goldPerMinute,
             })),
-            extraction: { rawText: rawExtraction, confidence: players.map((player) => player.confidence ?? 0), topOutcome: detectedOutcome.value, topOutcomeConfidence: detectedOutcome.confidence },
+            extraction: { source: analysisSource ?? "manual", model: analysisModel || null, rawText: rawExtraction, confidence: players.map((player) => player.confidence ?? 0), topOutcome: detectedOutcome.value, topOutcomeConfidence: detectedOutcome.confidence },
           });
           if (ok) onClose();
         }}>{busy ? "등록 중…" : "검토 완료 및 결과 등록"}</button></footer>
