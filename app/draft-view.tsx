@@ -2,6 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useEffect, useMemo, useState } from "react";
+import { currentUniqueChampions } from "../lib/champion-catalog";
 
 type Command = (payload: Record<string, unknown>, successMessage: string) => Promise<boolean>;
 type DraftMode = "standard" | "fearless" | "hard_fearless";
@@ -74,9 +75,9 @@ export function DraftView({ data, teamMap, busy, command }: {
   const selected = allDrafts.find((draft) => draft.id === selectedId) ?? allDrafts[0];
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/champions", { signal: controller.signal })
+    fetch("/api/champions?catalog=current-no-jade", { cache: "no-store", signal: controller.signal })
       .then((response) => response.json() as Promise<{ champions: Champion[] }>)
-      .then((payload) => setChampions([...new Map(payload.champions.map((champion) => [champion.id, champion])).values()]))
+      .then((payload) => setChampions(currentUniqueChampions(payload.champions)))
       .catch((error: unknown) => { if (!(error instanceof DOMException && error.name === "AbortError")) setChampions([]); });
     return () => controller.abort();
   }, []);
