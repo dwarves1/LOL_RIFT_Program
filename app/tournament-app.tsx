@@ -125,6 +125,15 @@ type Bet = {
   createdAt: string;
 };
 
+type PredictionSummary = {
+  matchId: string;
+  teamACount: number;
+  teamBCount: number;
+  totalCount: number;
+  teamAPercent: number;
+  teamBPercent: number;
+};
+
 type Dashboard = {
   viewer: Viewer | null;
   tournaments: Tournament[];
@@ -144,6 +153,7 @@ type Dashboard = {
   rosterAccounts: Array<{ id: string; userId: string; gameName: string; tagline: string; isPrimary: boolean; displayName: string }>;
   leaderTeamIds: string[];
   bets: Bet[];
+  predictionSummaries: PredictionSummary[];
   ledger: Array<{
     id: string;
     type: string;
@@ -794,7 +804,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
       {groupMatches.length ? (
         <div className="schedule-list">
           {groupMatches.map((match) => (
-            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} leaderTeamIds={data.leaderTeamIds} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} leaderTeamIds={data.leaderTeamIds} predictionSummary={data.predictionSummaries.find((summary) => summary.matchId === match.id)} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
           ))}
         </div>
       ) : (
@@ -804,7 +814,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   );
 }
 
-function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; leaderTeamIds: string[]; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
+function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, predictionSummary, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; leaderTeamIds: string[]; predictionSummary?: PredictionSummary; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
   const canManageMatch = isStaff || Boolean((match.teamAId && leaderTeamIds.includes(match.teamAId)) || (match.teamBId && leaderTeamIds.includes(match.teamBId)));
@@ -816,21 +826,24 @@ function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, busy, command, d
         <small>{match.roundLabel}</small>
         <b>BO{match.bestOf}</b>
       </div>
-      <div className="schedule-teams">
-        <div className={`schedule-team team-a ${teamA && match.winnerId === teamA.id ? "winner" : ""}`}>
-          <TeamMark team={teamA} small />
-          <strong>{teamA?.name ?? "대진 대기"}</strong>
-          {teamA && match.winnerId === teamA.id && <span>WIN</span>}
+      <div className="schedule-matchup">
+        <div className="schedule-teams">
+          <div className={`schedule-team team-a ${teamA && match.winnerId === teamA.id ? "winner" : ""}`}>
+            <TeamMark team={teamA} small />
+            <strong>{teamA?.name ?? "대진 대기"}</strong>
+            {teamA && match.winnerId === teamA.id && <span>WIN</span>}
+          </div>
+          <div className="schedule-score" aria-label={`세트 점수 ${match.seriesScoreA} 대 ${match.seriesScoreB}`}>
+            <small>{match.status === "completed" ? "FINAL" : "SCORE"}</small>
+            <strong>{match.seriesScoreA}<i>:</i>{match.seriesScoreB}</strong>
+          </div>
+          <div className={`schedule-team team-b ${teamB && match.winnerId === teamB.id ? "winner" : ""}`}>
+            <TeamMark team={teamB} small />
+            <strong>{teamB?.name ?? "대진 대기"}</strong>
+            {teamB && match.winnerId === teamB.id && <span>WIN</span>}
+          </div>
         </div>
-        <div className="schedule-score" aria-label={`세트 점수 ${match.seriesScoreA} 대 ${match.seriesScoreB}`}>
-          <small>{match.status === "completed" ? "FINAL" : "SCORE"}</small>
-          <strong>{match.seriesScoreA}<i>:</i>{match.seriesScoreB}</strong>
-        </div>
-        <div className={`schedule-team team-b ${teamB && match.winnerId === teamB.id ? "winner" : ""}`}>
-          <TeamMark team={teamB} small />
-          <strong>{teamB?.name ?? "대진 대기"}</strong>
-          {teamB && match.winnerId === teamB.id && <span>WIN</span>}
-        </div>
+        {teamA && teamB && <PredictionBalance summary={predictionSummary} />}
       </div>
       <div className="match-actions">
         {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
@@ -866,6 +879,25 @@ function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, busy, command, d
         )}
       </div>
     </article>
+  );
+}
+
+function PredictionBalance({ summary }: { summary?: PredictionSummary }) {
+  const teamAPercent = summary?.teamAPercent ?? 50;
+  const teamBPercent = summary?.teamBPercent ?? 50;
+  const totalCount = summary?.totalCount ?? 0;
+  return (
+    <div className="schedule-prediction" aria-label={`승리 예측 왼쪽 ${teamAPercent}%, 오른쪽 ${teamBPercent}%`}>
+      <div className="schedule-prediction-labels">
+        <span><b>{teamAPercent}%</b> 승리 예측</span>
+        <small>{totalCount ? `총 ${totalCount}명 참여` : "아직 예측 없음"}</small>
+        <span>승리 예측 <b>{teamBPercent}%</b></span>
+      </div>
+      <div className="schedule-prediction-bar" aria-hidden="true">
+        <i className="blue" style={{ width: `${teamAPercent}%` }} />
+        <i className="red" style={{ width: `${teamBPercent}%` }} />
+      </div>
+    </div>
   );
 }
 

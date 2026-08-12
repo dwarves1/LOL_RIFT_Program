@@ -1520,6 +1520,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       rosterAccounts,
       leaderTeamIds: [],
       bets: [],
+      predictionSummaries: [],
       ledger: [],
       leaderboard: [],
       audit: [],
@@ -1535,7 +1536,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     requestUser.pointsBalance = 0;
   }
 
-  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows, gameRows, tournamentDraftRows] = await Promise.all([
+  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows, gameRows, tournamentDraftRows, predictionCountRows] = await Promise.all([
     db.select().from(teams).where(eq(teams.tournamentId, selected.id)).orderBy(asc(teams.seed), asc(teams.name)),
     db.select().from(players),
     db.select().from(matches).where(eq(matches.tournamentId, selected.id)).orderBy(asc(matches.phase), asc(matches.sortOrder)),
@@ -1614,6 +1615,13 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       status: matchGames.status,
     }).from(matchGames).innerJoin(matches, eq(matches.id, matchGames.matchId)).where(eq(matches.tournamentId, selected.id)),
     db.select().from(draftSessions).where(eq(draftSessions.tournamentId, selected.id)).orderBy(desc(draftSessions.updatedAt)),
+    db.select({
+      matchId: bets.matchId,
+      teamId: bets.teamId,
+      participantCount: sql<number>`count(*)`,
+    }).from(bets)
+      .where(and(eq(bets.tournamentId, selected.id), ne(bets.status, "refunded")))
+      .groupBy(bets.matchId, bets.teamId),
   ]);
 
   const userBets = requestUser
@@ -1679,6 +1687,20 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       ? { rank: 5, teamId: bracketMatches.find((match) => match.matchNo === "G4")!.loserId! }
       : null,
   ].filter(Boolean);
+  const predictionSummaries = matchRows.map((match) => {
+    const teamACount = Number(predictionCountRows.find((row) => row.matchId === match.id && row.teamId === match.teamAId)?.participantCount ?? 0);
+    const teamBCount = Number(predictionCountRows.find((row) => row.matchId === match.id && row.teamId === match.teamBId)?.participantCount ?? 0);
+    const totalCount = teamACount + teamBCount;
+    const teamAPercent = totalCount ? Math.round(teamACount / totalCount * 100) : 50;
+    return {
+      matchId: match.id,
+      teamACount,
+      teamBCount,
+      totalCount,
+      teamAPercent,
+      teamBPercent: 100 - teamAPercent,
+    };
+  });
 
   return {
     viewer: requestUser,
@@ -1708,6 +1730,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     rosterAccounts,
     leaderTeamIds,
     bets: userBets,
+    predictionSummaries,
     ledger: ledgerRows,
     leaderboard: leaderboardRows,
     audit: auditRows,

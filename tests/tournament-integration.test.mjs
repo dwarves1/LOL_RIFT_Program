@@ -220,6 +220,22 @@ test("tournament isolation, team leadership, result correction, and draft permis
   await tournament.setMatchSchedule(match.id, "2026-09-03T09:00:00.000Z", blueVice);
   await tournament.confirmMatchSchedule(match.id, actors.get("admin"));
   await tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("outsider"));
+  await tournament.createBet(created.tournamentId, match.id, match.teamAId, 500, blueVice);
+  await tournament.createBet(created.tournamentId, match.id, match.teamBId, 900, redVice);
+  data = await dashboard(created.tournamentId);
+  const prediction = data.predictionSummaries.find((summary) => summary.matchId === match.id);
+  assert.deepEqual(prediction, {
+    matchId: match.id,
+    teamACount: 2,
+    teamBCount: 1,
+    totalCount: 3,
+    teamAPercent: 67,
+    teamBPercent: 33,
+  });
+  const emptyPrediction = data.predictionSummaries.find((summary) => summary.matchId === data.matches[1].id);
+  assert.equal(emptyPrediction.totalCount, 0);
+  assert.equal(emptyPrediction.teamAPercent, 50);
+  assert.equal(emptyPrediction.teamBPercent, 50);
 
   const draftMatch = data.matches[1];
   const draftBlueTeam = data.teams.find((team) => team.id === draftMatch.teamAId);
