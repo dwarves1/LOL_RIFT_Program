@@ -324,10 +324,13 @@ export function ResultReviewModal({
         <header><div><p className="eyebrow">SCOREBOARD REVIEW</p><h2 id="result-review-title">{match.roundLabel} 결과 이미지 등록</h2></div><button type="button" onClick={onClose} aria-label="닫기">×</button></header>
         <div className="result-review-body">
           <div className="result-source-panel">
-            <label className="result-upload-box"><input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void analyzeFile(file); }} /><strong>{dataUrl ? "다른 결과 이미지 선택" : "결과 이미지 업로드"}</strong><span>예시와 같은 전체 점수판 · PNG/JPG/WebP · 최대 10MB</span></label>
-            {/* The local data URL is intentionally previewed without an image optimizer. */}
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            {dataUrl && <img src={dataUrl} alt="업로드한 경기 결과 원본" />}
+            <label className="result-upload-box"><input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void analyzeFile(file); }} /><strong>{dataUrl ? "이미지 변경" : "이미지 업로드"}</strong><span>PNG/JPG/WebP · 최대 10MB</span></label>
+            {dataUrl && <a className="result-preview-thumb" href={dataUrl} target="_blank" rel="noreferrer">
+              {/* The local data URL is intentionally previewed without an image optimizer. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={dataUrl} alt="업로드한 경기 결과 원본 미리보기" /><span>원본 보기</span>
+            </a>}
+            <div className="result-source-summary"><strong>{fileName || "전체 점수판 이미지를 선택하세요"}</strong><span>{dataUrl ? `${dimensions.width} × ${dimensions.height} · 분석 결과는 아래에서 직접 확인할 수 있습니다.` : "위쪽 5명은 1팀, 아래쪽 5명은 2팀으로 판독합니다."}</span></div>
             {analyzing && <div className="ocr-progress"><div><span style={{ width: `${progress.value}%` }} /></div><strong>{progress.detail}</strong><small>AI를 먼저 사용하고, 이용할 수 없으면 기존 OCR로 자동 전환합니다.</small></div>}
             {analysisError && <p className="form-error">{analysisError}</p>}
             {analysisNotice && <p className="analysis-notice">{analysisNotice}</p>}
@@ -354,7 +357,9 @@ export function ResultReviewModal({
               const rows = players.map((player, index) => ({ player, index })).filter(({ player }) => player.side === side);
               return <section className={`result-team-review side-${side}`} style={{ "--review-team-color": team?.color ?? (side === 1 ? "#3b82f6" : "#ef4444") } as CSSProperties} key={side}>
                 <header><div><span>{side === 1 ? "BLUE TEAM" : "RED TEAM"}</span><strong>{team?.name ?? `${side}팀`}</strong></div><small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></header>
-                <div className="result-team-players">{rows.map(({ player, index }) => <article className="result-player-card" key={player.rowOrder}>
+                <div className="result-team-players">
+                  <div className="result-player-columns" aria-hidden="true"><span>라인</span><span>등록 계정</span><span>이미지 계정명</span><span>챔피언</span><span>레벨</span><span>K</span><span>D</span><span>A</span><span>피해량</span><span>골드</span><span>GPM</span></div>
+                  {rows.map(({ player, index }) => <article className="result-player-card" key={player.rowOrder}>
                   <div className="result-player-identity">
                     <label><span>라인</span><select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select></label>
                     <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, sourceAccountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}</option>)}</select></label>
@@ -362,7 +367,8 @@ export function ResultReviewModal({
                     <label className={lowConfidence(player, "championName") ? "low-confidence-field" : ""}><span>챔피언</span><input value={player.championName} onChange={(event) => patchPlayerField(index, "championName", event.target.value)} /></label>
                   </div>
                   <div className="result-player-metrics">{EDITABLE_NUMBER_FIELDS.map((field) => <label className={lowConfidence(player, field) ? "low-confidence-field" : ""} key={field}><span>{FIELD_LABELS[field]}</span><input type="number" min="0" value={player[field]} onChange={(event) => patchPlayerField(index, field, Number(event.target.value))} /></label>)}</div>
-                </article>)}</div>
+                  </article>)}
+                </div>
               </section>;
             })}</div>
             {validationIssues.length > 0 && <div className="ocr-validation" role="status"><strong>자동 검증 확인 필요</strong>{validationIssues.map((issue) => <span key={issue}>{issue}</span>)}</div>}
