@@ -27,6 +27,7 @@ import {
   riotIdHistory,
   riotAccounts,
   draftSessions,
+  resultRevisions,
 } from "../db/schema";
 
 export type UserRole = "viewer" | "operator" | "admin";
@@ -631,6 +632,7 @@ export type CreateScrimMatchInput = {
   scheduledAt: string;
   blueAccountIds: string[];
   redAccountIds: string[];
+  historical?: boolean;
 };
 
 export async function createScrimSeason(input: CreateScrimSeasonInput, actor: RequestUser) {
@@ -729,7 +731,7 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
     teamBId: redTeamId,
     scheduledAt: date.toISOString(),
     scheduleConfirmed: true,
-    bettingStatus: "scheduled",
+    bettingStatus: input.historical ? "closed" : "scheduled",
     status: "scheduled",
     sortOrder: sequence,
   });
@@ -754,6 +756,7 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
     scheduledAt: date.toISOString(),
     blueAccountIds: input.blueAccountIds,
     redAccountIds: input.redAccountIds,
+    historical: Boolean(input.historical),
   });
   return { matchId, sharePath: `/scrim/${encodeURIComponent(tournament.id)}/bet/${encodeURIComponent(matchId)}` };
 }
@@ -767,9 +770,19 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   if (nextStatus === "open" && match.bettingStatus === "open") return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
   if (nextStatus === "closed" && match.bettingStatus !== "open") throw new Error("현재 배팅이 진행 중인 경기가 아닙니다.");
   const now = new Date().toISOString();
+  let predictionCountAClosed: number | null = null;
+  let predictionCountBClosed: number | null = null;
+  if (nextStatus === "closed") {
+    const counts = await db.select({ teamId: bets.teamId, count: sql<number>`count(*)` })
+      .from(bets)
+      .where(and(eq(bets.matchId, match.id), ne(bets.status, "refunded")))
+      .groupBy(bets.teamId);
+    predictionCountAClosed = Number(counts.find((row) => row.teamId === match.teamAId)?.count ?? 0);
+    predictionCountBClosed = Number(counts.find((row) => row.teamId === match.teamBId)?.count ?? 0);
+  }
   await db.update(matches).set(nextStatus === "open"
-    ? { bettingStatus: "open", bettingOpenedAt: now, bettingClosedAt: null }
-    : { bettingStatus: "closed", bettingClosedAt: now }
+    ? { bettingStatus: "open", bettingOpenedAt: now, bettingClosedAt: null, predictionCountAClosed: null, predictionCountBClosed: null }
+    : { bettingStatus: "closed", bettingClosedAt: now, predictionCountAClosed, predictionCountBClosed }
   ).where(eq(matches.id, match.id));
   await audit(actor, nextStatus === "open" ? "scrim_betting_opened" : "scrim_betting_closed", "match", match.id, match.tournamentId, {
     bettingStatus: match.bettingStatus,
@@ -1218,7 +1231,7 @@ async function rollbackBets(matchId: string, refundStake: boolean) {
     if (refundStake) {
       await adjustPoints(
         bet.userId,
-        bet.stake,
+        bet.paidStake,
         "bet_refund",
         "대진 변경으로 예측 포인트 환불",
         bet.tournamentId,
@@ -1240,7 +1253,7 @@ async function settleBets(matchId: string, winnerId: string) {
     .where(and(eq(bets.matchId, matchId), eq(bets.status, "pending")));
   for (const bet of pending) {
     if (bet.teamId === winnerId) {
-      const payout = bet.stake * 2;
+      const payout = bet.paidStake * 2 + bet.freeStake;
       await adjustPoints(
         bet.userId,
         payout,
@@ -1390,6 +1403,7 @@ export type SaveMatchResultInput = {
   durationSeconds: number;
   image: {
     objectKey: string;
+    imageHash: string;
     fileName: string;
     contentType: string;
     fileSize: number;
@@ -1442,6 +1456,15 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     .from(matchResultImages)
     .where(and(eq(matchResultImages.matchId, match.id), eq(matchResultImages.setNo, setNo)))
     .limit(1);
+  const [duplicateImage] = input.image.imageHash
+    ? await db.select({ id: matchResultImages.id, matchId: matchResultImages.matchId, setNo: matchResultImages.setNo })
+      .from(matchResultImages)
+      .where(eq(matchResultImages.imageHash, input.image.imageHash))
+      .limit(1)
+    : [];
+  if (duplicateImage && duplicateImage.id !== previousImage?.id) {
+    throw new Error("이미 등록된 결과 이미지입니다. 기존 경기 기록을 확인해 주세요.");
+  }
   if (previousImage && !isStaff(actor)) throw new Error("등록된 세트 결과는 운영자나 관리자만 정정할 수 있습니다.");
   const reviewedAt = new Date().toISOString();
   const imageValues = {
@@ -1453,10 +1476,21 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     height: input.image.height ? statInteger(input.image.height, 10_000) : null,
     durationSeconds: statInteger(input.durationSeconds, 24 * 60 * 60),
     extractionJson: JSON.stringify(input.extraction ?? null),
+    imageHash: input.image.imageHash,
     createdBy: actor.id,
     reviewedAt,
   };
   if (previousImage) {
+    const previousTeamStats = await db.select().from(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo)));
+    const previousPlayerStats = await db.select().from(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo)));
+    await db.insert(resultRevisions).values({
+      id: uid("result_revision"),
+      matchId: match.id,
+      setNo,
+      objectKey: previousImage.objectKey,
+      snapshotJson: JSON.stringify({ image: previousImage, teams: previousTeamStats, players: previousPlayerStats }),
+      createdBy: actor.id,
+    });
     await db.update(matchResultImages).set(imageValues).where(eq(matchResultImages.id, previousImage.id));
   } else {
     await db.insert(matchResultImages).values({
@@ -1636,7 +1670,11 @@ export async function createBet(
   if (![match.teamAId, match.teamBId].includes(teamId)) throw new Error("대진에 포함된 팀을 선택해 주세요.");
   const normalizedStake = Math.floor(stake);
   if (normalizedStake < 10) throw new Error("최소 10P부터 예측할 수 있습니다.");
-  if (normalizedStake > entry.pointsBalance) throw new Error("현재 대회의 보유 포인트가 부족합니다.");
+  const freeStake = match.phase === "scrim" ? Math.min(100, normalizedStake) : 0;
+  const paidStake = normalizedStake - freeStake;
+  if (paidStake > entry.pointsBalance) {
+    throw new Error(match.phase === "scrim" ? "무료 100P를 제외한 추가 배팅 포인트가 부족합니다." : "현재 대회의 보유 포인트가 부족합니다.");
+  }
   const [existing] = await db
     .select()
     .from(bets)
@@ -1653,38 +1691,43 @@ export async function createBet(
       userId: actor.id,
       teamId,
       stake: normalizedStake,
+      freeStake,
+      paidStake,
     });
   } catch {
     throw new Error("이 경기는 이미 예측했습니다.");
   }
 
   const raw = getRawDb();
-  const reserved = await raw.prepare(`
-    UPDATE tournament_entries
-    SET points_balance = points_balance - ?
-    WHERE tournament_id = ? AND user_id = ? AND points_balance >= ?
-  `).bind(normalizedStake, tournamentId, actor.id, normalizedStake).run();
-  if (Number(reserved.meta.changes ?? 0) !== 1) {
-    await db.delete(bets).where(eq(bets.id, betId));
-    throw new Error("현재 대회의 보유 포인트가 부족합니다.");
+  if (paidStake > 0) {
+    const reserved = await raw.prepare(`
+      UPDATE tournament_entries
+      SET points_balance = points_balance - ?
+      WHERE tournament_id = ? AND user_id = ? AND points_balance >= ?
+    `).bind(paidStake, tournamentId, actor.id, paidStake).run();
+    if (Number(reserved.meta.changes ?? 0) !== 1) {
+      await db.delete(bets).where(eq(bets.id, betId));
+      throw new Error("현재 대회의 보유 포인트가 부족합니다.");
+    }
   }
   const balance = await raw.prepare("SELECT points_balance FROM tournament_entries WHERE tournament_id = ? AND user_id = ?")
     .bind(tournamentId, actor.id)
     .first<{ points_balance: number }>();
   try {
+    if (paidStake <= 0) return;
     await db.insert(pointLedger).values({
       id: uid("point"),
       userId: actor.id,
       tournamentId,
       betId,
       type: "bet_stake",
-      amount: -normalizedStake,
+      amount: -paidStake,
       balanceAfter: Number(balance?.points_balance ?? 0),
-      description: "승리팀 예측 참여",
+      description: freeStake ? `내전 예측 참여 · 무료 ${freeStake}P 포함` : "승리팀 예측 참여",
     });
   } catch (error) {
     await raw.prepare("UPDATE tournament_entries SET points_balance = points_balance + ? WHERE tournament_id = ? AND user_id = ?")
-      .bind(normalizedStake, tournamentId, actor.id)
+      .bind(paidStake, tournamentId, actor.id)
       .run();
     await db.delete(bets).where(eq(bets.id, betId));
     throw error;
@@ -1755,6 +1798,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       leaderTeamIds: [],
       bets: [],
       predictionSummaries: [],
+      bettingInsights: { rankings: [], streaks: [], highestProfit: null, boldest: null },
       ledger: [],
       leaderboard: [],
       audit: [],
@@ -1861,6 +1905,20 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
   const userBets = requestUser
     ? await db.select().from(bets).where(and(eq(bets.userId, requestUser.id), eq(bets.tournamentId, selected.id))).orderBy(desc(bets.createdAt))
     : [];
+  const tournamentBetRows = await db.select({
+    id: bets.id,
+    matchId: bets.matchId,
+    userId: bets.userId,
+    displayName: users.displayName,
+    teamId: bets.teamId,
+    stake: bets.stake,
+    freeStake: bets.freeStake,
+    paidStake: bets.paidStake,
+    status: bets.status,
+    payout: bets.payout,
+    settledAt: bets.settledAt,
+    createdAt: bets.createdAt,
+  }).from(bets).innerJoin(users, eq(users.id, bets.userId)).where(eq(bets.tournamentId, selected.id));
   const ledgerRows = requestUser
     ? await db.select().from(pointLedger).where(and(eq(pointLedger.userId, requestUser.id), eq(pointLedger.tournamentId, selected.id))).orderBy(desc(pointLedger.createdAt)).limit(30)
     : [];
@@ -1935,6 +1993,37 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       teamBPercent: 100 - teamAPercent,
     };
   });
+  const bettingPlayerRows = [...new Set(tournamentBetRows.map((bet) => bet.userId))].map((userId) => {
+    const rows = tournamentBetRows.filter((bet) => bet.userId === userId && (bet.status === "won" || bet.status === "lost"))
+      .sort((a, b) => new Date(a.settledAt ?? a.createdAt).getTime() - new Date(b.settledAt ?? b.createdAt).getTime());
+    let currentStreak = 0;
+    let bestStreak = 0;
+    for (const row of rows) {
+      currentStreak = row.status === "won" ? currentStreak + 1 : 0;
+      bestStreak = Math.max(bestStreak, currentStreak);
+    }
+    const wins = rows.filter((row) => row.status === "won").length;
+    return {
+      userId,
+      displayName: rows[0]?.displayName ?? tournamentBetRows.find((bet) => bet.userId === userId)?.displayName ?? userId,
+      bets: rows.length,
+      wins,
+      hitRate: rows.length ? Math.round(wins / rows.length * 1000) / 10 : 0,
+      currentStreak,
+      bestStreak,
+      profit: rows.reduce((sum, row) => sum + (row.status === "won" ? row.payout : 0) - row.paidStake, 0),
+    };
+  });
+  const winningBets = tournamentBetRows.filter((bet) => bet.status === "won");
+  const highestProfitBet = [...winningBets].sort((a, b) => (b.payout - b.paidStake) - (a.payout - a.paidStake))[0] ?? null;
+  const boldestBet = [...winningBets].map((bet) => {
+    const match = matchRows.find((row) => row.id === bet.matchId);
+    const countA = Number(match?.predictionCountAClosed ?? 0);
+    const countB = Number(match?.predictionCountBClosed ?? 0);
+    const total = countA + countB;
+    const chosenCount = bet.teamId === match?.teamAId ? countA : countB;
+    return { ...bet, crowdPercent: total ? Math.round(chosenCount / total * 100) : 50 };
+  }).sort((a, b) => a.crowdPercent - b.crowdPercent || b.stake - a.stake)[0] ?? null;
 
   return {
     viewer: requestUser,
@@ -1965,6 +2054,12 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     leaderTeamIds,
     bets: userBets,
     predictionSummaries,
+    bettingInsights: {
+      rankings: bettingPlayerRows.filter((row) => row.bets >= 5).sort((a, b) => b.hitRate - a.hitRate || b.bets - a.bets).slice(0, 10),
+      streaks: [...bettingPlayerRows].sort((a, b) => b.currentStreak - a.currentStreak || b.bestStreak - a.bestStreak).slice(0, 5),
+      highestProfit: highestProfitBet ? { displayName: highestProfitBet.displayName, amount: highestProfitBet.payout - highestProfitBet.paidStake, matchId: highestProfitBet.matchId } : null,
+      boldest: boldestBet ? { displayName: boldestBet.displayName, crowdPercent: boldestBet.crowdPercent, matchId: boldestBet.matchId } : null,
+    },
     ledger: ledgerRows,
     leaderboard: leaderboardRows,
     audit: auditRows,
@@ -1976,4 +2071,47 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       bracketTotal: bracketMatches.length,
     },
   };
+}
+
+export async function exportTournamentCsv(tournamentId: string, actor: RequestUser) {
+  if (!isStaff(actor) || !(await hasTournamentAccess(actor, tournamentId))) {
+    throw new Error("운영자나 관리자만 CSV 백업을 받을 수 있습니다.");
+  }
+  const raw = getRawDb();
+  const queries: Array<[string, string]> = [
+    ["season", "SELECT id, name, competition_kind, status, start_at, starter_points, created_at FROM tournaments WHERE id = ?"],
+    ["members", "SELECT tm.user_id, u.display_name, tm.role, tm.joined_at FROM tournament_members tm JOIN users u ON u.id = tm.user_id WHERE tm.tournament_id = ?"],
+    ["riot_accounts", "SELECT ra.id, ra.user_id, ra.game_name, ra.tagline, ra.is_primary, ra.updated_at FROM riot_accounts ra JOIN tournament_members tm ON tm.user_id = ra.user_id WHERE tm.tournament_id = ?"],
+    ["teams", "SELECT id, match_id, name, color, seed, created_at FROM teams WHERE tournament_id = ?"],
+    ["matches", "SELECT id, match_no, round_label, scheduled_at, status, winner_id, loser_id, betting_status, betting_opened_at, betting_closed_at, prediction_count_a_closed, prediction_count_b_closed, completed_at FROM matches WHERE tournament_id = ? ORDER BY sort_order"],
+    ["players", "SELECT p.id, p.team_id, p.user_id, p.riot_account_id, p.nickname, p.position FROM players p JOIN teams t ON t.id = p.team_id WHERE t.tournament_id = ?"],
+    ["result_images", "SELECT i.id, i.match_id, i.set_no, i.file_name, i.content_type, i.file_size, i.width, i.height, i.duration_seconds, i.image_hash, i.created_by, i.reviewed_at FROM match_result_images i JOIN matches m ON m.id = i.match_id WHERE m.tournament_id = ?"],
+    ["team_stats", "SELECT s.* FROM match_team_stats s JOIN matches m ON m.id = s.match_id WHERE m.tournament_id = ?"],
+    ["player_stats", "SELECT s.* FROM player_match_stats s JOIN matches m ON m.id = s.match_id WHERE m.tournament_id = ?"],
+    ["bets", "SELECT id, match_id, user_id, team_id, stake, free_stake, paid_stake, status, payout, created_at, settled_at FROM bets WHERE tournament_id = ?"],
+    ["point_ledger", "SELECT id, user_id, bet_id, type, amount, balance_after, description, created_at FROM point_ledger WHERE tournament_id = ?"],
+    ["audit", "SELECT id, actor_id, actor_name, action, entity_type, entity_id, created_at FROM audit_logs WHERE tournament_id = ?"],
+    ["result_revisions", "SELECT r.id, r.match_id, r.set_no, r.object_key, r.created_by, r.created_at FROM result_revisions r JOIN matches m ON m.id = r.match_id WHERE m.tournament_id = ?"],
+  ];
+  const sections: string[] = [];
+  for (const [name, query] of queries) {
+    const result = await raw.prepare(query).bind(tournamentId).all<Record<string, unknown>>();
+    const rows = result.results ?? [];
+    sections.push(`# ${name}`);
+    if (!rows.length) {
+      sections.push("(empty)", "");
+      continue;
+    }
+    const columns = Object.keys(rows[0]);
+    sections.push(columns.map(csvCell).join(","));
+    for (const row of rows) sections.push(columns.map((column) => csvCell(row[column])).join(","));
+    sections.push("");
+  }
+  await audit(actor, "csv_backup_downloaded", "tournament", tournamentId, tournamentId, null, { sections: queries.length });
+  return `\uFEFF${sections.join("\r\n")}`;
+}
+
+function csvCell(value: unknown) {
+  const text = value == null ? "" : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }

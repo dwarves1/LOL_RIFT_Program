@@ -48,6 +48,9 @@ export type RelationshipRecord = {
   wins: number;
   losses: number;
   winRate: number;
+  withoutGames: number;
+  withoutWinRate: number;
+  impact: number;
 };
 
 export type PlayerInsight = {
@@ -68,6 +71,8 @@ export type PlayerInsight = {
   averageGoldPerMinute: number;
   currentStreak: { result: "win" | "loss" | "none"; count: number };
   bestWinStreak: number;
+  bestLossStreak: number;
+  badges: Array<{ kind: "win" | "loss"; count: number; label: string }>;
   champions: Array<{ name: string; games: number; wins: number; losses: number; winRate: number }>;
   lanes: Array<{ name: string; games: number; wins: number; losses: number; winRate: number }>;
   teammates: RelationshipRecord[];
@@ -80,9 +85,12 @@ export type PlayerFunStats = {
   bestWinRate: PlayerInsight | null;
   bestKda: PlayerInsight | null;
   longestStreak: PlayerInsight | null;
+  longestLosingStreak: PlayerInsight | null;
   championExplorer: PlayerInsight | null;
   bestDuo: { playerA: PlayerInsight; playerB: PlayerInsight; games: number; wins: number; winRate: number } | null;
+  comebackDuo: { playerA: PlayerInsight; playerB: PlayerInsight; games: number; wins: number; winRate: number } | null;
   topRivalry: { playerA: PlayerInsight; playerB: PlayerInsight; games: number } | null;
+  laneLeaders: Array<{ lane: string; player: PlayerInsight; games: number; winRate: number }>;
 };
 
 export function opggSearchUrl(account: Pick<InsightAccount, "riotGameName" | "riotTagline">) {
@@ -125,10 +133,14 @@ export function buildPlayerInsights(input: {
     let currentResult: "win" | "loss" | "none" = "none";
     let currentCount = 0;
     let bestWinStreak = 0;
+    let bestLossStreak = 0;
     let runningWins = 0;
+    let runningLosses = 0;
     for (const participation of participations) {
       runningWins = participation.won ? runningWins + 1 : 0;
+      runningLosses = participation.won ? 0 : runningLosses + 1;
       bestWinStreak = Math.max(bestWinStreak, runningWins);
+      bestLossStreak = Math.max(bestLossStreak, runningLosses);
     }
     for (const participation of [...participations].reverse()) {
       const result = participation.won ? "win" : "loss";
@@ -166,10 +178,12 @@ export function buildPlayerInsights(input: {
       averageGoldPerMinute: average(statRows, (row) => row.goldPerMinute),
       currentStreak: { result: currentResult, count: currentCount },
       bestWinStreak,
+      bestLossStreak,
+      badges: streakBadges(bestWinStreak, bestLossStreak),
       champions,
       lanes,
-      teammates: relationshipRows(teammateMap, displayNames),
-      opponents: relationshipRows(opponentMap, displayNames),
+      teammates: relationshipRows(teammateMap, displayNames, participations.length, wins),
+      opponents: relationshipRows(opponentMap, displayNames, participations.length, wins),
       recentMatches: [...participations].reverse().slice(0, 8).map(({ match, won }) => ({ matchId: match.id, roundLabel: match.roundLabel, scheduledAt: match.scheduledAt, won })),
     };
   }).sort((a, b) => b.games - a.games || b.wins - a.wins || a.displayName.localeCompare(b.displayName, "ko"));
@@ -197,7 +211,7 @@ function incrementRelationship(map: Map<string, { games: number; wins: number }>
   map.set(userId, { games: current.games + 1, wins: current.wins + (won ? 1 : 0) });
 }
 
-function relationshipRows(map: Map<string, { games: number; wins: number }>, names: Map<string, string>): RelationshipRecord[] {
+function relationshipRows(map: Map<string, { games: number; wins: number }>, names: Map<string, string>, totalGames: number, totalWins: number): RelationshipRecord[] {
   return [...map].map(([userId, record]) => ({
     userId,
     displayName: names.get(userId) ?? userId,
@@ -205,6 +219,9 @@ function relationshipRows(map: Map<string, { games: number; wins: number }>, nam
     wins: record.wins,
     losses: record.games - record.wins,
     winRate: percent(record.wins, record.games),
+    withoutGames: Math.max(0, totalGames - record.games),
+    withoutWinRate: percent(Math.max(0, totalWins - record.wins), Math.max(0, totalGames - record.games)),
+    impact: Math.round((percent(record.wins, record.games) - percent(Math.max(0, totalWins - record.wins), Math.max(0, totalGames - record.games))) * 10) / 10,
   })).sort((a, b) => b.games - a.games || b.winRate - a.winRate || a.displayName.localeCompare(b.displayName, "ko"));
 }
 
@@ -231,15 +248,32 @@ function buildFunStats(players: PlayerInsight[]): PlayerFunStats {
   const pairRows = [...pairs.values()];
   const duoMinimumGames = Math.min(5, Math.max(1, ...pairRows.map((pair) => pair.games)));
   const bestDuoRaw = pairRows.filter((pair) => pair.games >= duoMinimumGames).sort((a, b) => b.wins / b.games - a.wins / a.games || b.games - a.games)[0] ?? null;
+  const comebackDuoRaw = pairRows.filter((pair) => pair.games >= duoMinimumGames).sort((a, b) => a.wins / a.games - b.wins / b.games || b.games - a.games)[0] ?? null;
+  const laneLeaders = ["TOP", "JGL", "MID", "ADC", "SUP"].flatMap((lane) => {
+    const candidates = players.flatMap((player) => player.lanes.filter((record) => record.name === lane && record.games >= 5).map((record) => ({ lane, player, games: record.games, winRate: record.winRate })));
+    return candidates.sort((a, b) => b.winRate - a.winRate || b.games - a.games).slice(0, 1);
+  });
   return {
     mostGames: [...active].sort((a, b) => b.games - a.games || b.wins - a.wins)[0] ?? null,
     bestWinRate: [...eligibleWinRate].sort((a, b) => b.winRate - a.winRate || b.games - a.games)[0] ?? null,
     bestKda: [...eligibleKda].sort((a, b) => b.kda - a.kda || b.analyzedGames - a.analyzedGames)[0] ?? null,
-    longestStreak: [...active].filter((player) => player.currentStreak.result === "win").sort((a, b) => b.currentStreak.count - a.currentStreak.count)[0] ?? null,
+    longestStreak: [...active].sort((a, b) => b.bestWinStreak - a.bestWinStreak || b.games - a.games)[0] ?? null,
+    longestLosingStreak: [...active].sort((a, b) => b.bestLossStreak - a.bestLossStreak || b.games - a.games)[0] ?? null,
     championExplorer: [...analyzed].sort((a, b) => b.champions.length - a.champions.length || b.analyzedGames - a.analyzedGames)[0] ?? null,
     bestDuo: bestDuoRaw ? { ...bestDuoRaw, winRate: percent(bestDuoRaw.wins, bestDuoRaw.games) } : null,
+    comebackDuo: comebackDuoRaw ? { ...comebackDuoRaw, winRate: percent(comebackDuoRaw.wins, comebackDuoRaw.games) } : null,
     topRivalry: [...rivals.values()].sort((a, b) => b.games - a.games)[0] ?? null,
+    laneLeaders,
   };
+}
+
+function streakBadges(bestWins: number, bestLosses: number) {
+  const rows: Array<{ kind: "win" | "loss"; count: number; label: string }> = [];
+  for (const count of [3, 5, 7]) {
+    if (bestWins >= count) rows.push({ kind: "win", count, label: `🔥 ${count}연승` });
+    if (bestLosses >= count) rows.push({ kind: "loss", count, label: `🌧 ${count}연패` });
+  }
+  return rows;
 }
 
 function average<T>(rows: T[], value: (row: T) => number) {

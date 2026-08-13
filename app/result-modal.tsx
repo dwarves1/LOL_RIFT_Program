@@ -420,10 +420,22 @@ export function ResultDetailModal({
   onClose: () => void;
 }) {
   const teamMap = new Map(teams.map((team) => [team.id, team]));
+  const summarySides = [1, 2].map((side) => {
+    const rows = stats.filter((stat) => stat.side === side);
+    return {
+      side,
+      team: teamMap.get(rows[0]?.teamId ?? ""),
+      won: rows.some((row) => row.won),
+      kills: rows.reduce((sum, row) => sum + row.kills, 0),
+      gold: rows.reduce((sum, row) => sum + row.gold, 0),
+      damage: rows.reduce((sum, row) => sum + row.damage, 0),
+    };
+  });
   return <div className="modal-backdrop result-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
     <section className="result-detail-modal" role="dialog" aria-modal="true" aria-labelledby="result-detail-title">
       <header><div><p className="eyebrow">MATCH DETAIL</p><h2 id="result-detail-title">{match.roundLabel} 상세 결과</h2><span>{durationLabel(durationSeconds ?? 0)}</span></div><button type="button" onClick={onClose} aria-label="닫기">×</button></header>
       <div className="result-detail-body">
+        <section className="scrim-summary-card" aria-label="내전 요약 카드"><header><span>LOL RIFT · SCRIM SUMMARY</span><strong>{match.roundLabel}</strong><time>{durationLabel(durationSeconds ?? 0)}</time></header><div>{summarySides.map((row) => <article key={row.side} className={row.won ? "won" : ""}><span>{row.side === 1 ? "BLUE TEAM" : "RED TEAM"}</span><strong>{row.team?.name ?? `${row.side}팀`}</strong><b>{row.won ? "WIN" : "LOSS"}</b><dl><div><dt>킬</dt><dd>{row.kills}</dd></div><div><dt>골드</dt><dd>{row.gold.toLocaleString()}</dd></div><div><dt>딜량</dt><dd>{row.damage.toLocaleString()}</dd></div></dl></article>)}</div><p>MVP 선정 없이 확정된 팀·선수 기록만 요약합니다.</p></section>
         <a href={imageUrl} target="_blank" rel="noreferrer" className="result-original">
           {/* The authenticated result endpoint is not compatible with a static image optimizer. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}

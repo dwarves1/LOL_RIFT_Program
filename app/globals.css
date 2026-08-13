@@ -371,6 +371,45 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
   .bracket-board { min-width: 1180px; grid-template-columns: repeat(5, 220px); }.page-title h1 { font-size: 31px; }
 }
 
+.operation-metric-grid, .betting-insight-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 14px 0; }
+.operation-metric-grid article, .betting-insight-grid article { min-width: 0; padding: 16px; border: 1px solid var(--line); background: rgba(255,255,255,.02); }
+.operation-metric-grid span, .betting-insight-grid span, .betting-insight-grid small { display: block; color: var(--muted); font-size: 10px; }
+.operation-metric-grid strong, .betting-insight-grid strong { display: block; margin: 8px 0 3px; color: var(--gold-2); font-size: 24px; }
+.operation-metric-grid .live { border-color: rgba(74,222,128,.35); }.operation-metric-grid .warning { border-color: rgba(251,191,36,.35); }
+.operation-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border: 1px solid var(--line); background: rgba(233,185,73,.035); }
+.operation-tools span { color: var(--muted); font-size: 11px; }.operation-tools a { text-decoration: none; }
+.player-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.streak-badge { display: inline-flex !important; align-items: center; width: max-content; padding: 3px 6px; border: 1px solid rgba(74,222,128,.28); border-radius: 999px; background: rgba(74,222,128,.07); color: #86efac !important; font-size: 8px !important; line-height: 1; }
+.streak-badge.loss { border-color: rgba(251,113,133,.28); background: rgba(251,113,133,.07); color: #fda4af !important; }
+.bet-player-rosters .player-profile-link { display: inline-flex; align-items: center; gap: 4px; }
+.bet-player-rosters .streak-badge { padding: 2px 4px; font-size: 7px !important; }
+.lane-leader-panel { margin-bottom: 14px; }.lane-leader-panel > div:last-child { display: grid; grid-template-columns: repeat(5,1fr); gap: 7px; }.lane-leader-panel button { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); background: #0a1422; color: var(--text); text-align: left; cursor: pointer; }.lane-leader-panel button b { color: var(--gold); font-size: 9px; }.lane-leader-panel button span { color: var(--muted); font-size: 9px; }
+.summary-share-button { border: 1px solid rgba(96,165,250,.35); background: rgba(96,165,250,.07); color: #bfdbfe; cursor: pointer; }
+.scrim-summary-card { margin-bottom: 16px; padding: 18px; border: 1px solid rgba(233,185,73,.32); background: radial-gradient(circle at 50% -20%,rgba(233,185,73,.12),transparent 45%),#07111f; }
+.scrim-summary-card > header { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }.scrim-summary-card > header span { grid-column: 1/-1; color: var(--gold); font-size: 9px; letter-spacing: .16em; }.scrim-summary-card > header strong { font-size: 18px; }.scrim-summary-card > header time { color: var(--muted); }
+.scrim-summary-card > div { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }.scrim-summary-card article { padding: 14px; border: 1px solid var(--line); }.scrim-summary-card article.won { border-color: rgba(74,222,128,.4); }.scrim-summary-card article > span { color: var(--muted); font-size: 9px; }.scrim-summary-card article > strong { display: block; margin: 5px 0; }.scrim-summary-card article > b { color: var(--muted); font-size: 10px; }.scrim-summary-card article.won > b { color: #86efac; }.scrim-summary-card dl { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin: 12px 0 0; }.scrim-summary-card dl div { padding-top: 7px; border-top: 1px solid var(--line); }.scrim-summary-card dt { color: var(--muted); font-size: 8px; }.scrim-summary-card dd { margin: 3px 0 0; font-size: 11px; }.scrim-summary-card > p { margin: 12px 0 0; color: var(--muted); font-size: 9px; text-align: center; }
+
+@media (max-width: 800px) {
+  .operation-metric-grid, .betting-insight-grid { grid-template-columns: 1fr 1fr; }
+  .operation-tools { align-items: stretch; flex-direction: column; }
+  .operation-tools a { text-align: center; }
+  .lane-leader-panel > div:last-child { grid-template-columns: 1fr 1fr; }
+  .result-review-body { overflow-y: auto; }
+  .result-source-panel { padding: 12px 14px; }
+  .result-source-panel > img { max-height: 150px; object-fit: contain; }
+  .result-fields-panel { padding: 14px; }
+  .result-review-modal > footer { position: sticky; bottom: 0; z-index: 3; background: #081421; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 480px) {
+  .scrim-summary-card > div { grid-template-columns: 1fr; }
+  .lane-leader-panel > div:last-child { grid-template-columns: 1fr; }
+  .operation-metric-grid article, .betting-insight-grid article { padding: 12px; }
+  .operation-metric-grid strong, .betting-insight-grid strong { font-size: 20px; }
+  .player-record-panel > div:not(.section-heading), .player-record-panel > .player-profile-link { grid-template-columns: minmax(0,1fr) auto; }
+  .player-record-panel > .player-profile-link span { grid-column: 1/-1; }
+}
+
 /* Scrim season */
 .stake-presets { display: flex; gap: 6px; margin-top: 7px; }
 .kakao-browser-help { max-width: 480px; margin: 12px auto 0; color: #fde68a !important; font-size: 12px; line-height: 1.6; }

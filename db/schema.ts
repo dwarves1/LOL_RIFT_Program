@@ -165,6 +165,7 @@ export const matchResultImages = sqliteTable(
     height: integer("height"),
     durationSeconds: integer("duration_seconds"),
     extractionJson: text("extraction_json"),
+    imageHash: text("image_hash"),
     createdBy: text("created_by").notNull(),
     reviewedAt: text("reviewed_at").notNull(),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -172,7 +173,22 @@ export const matchResultImages = sqliteTable(
   (table) => [
     uniqueIndex("idx_match_result_images_match_set").on(table.matchId, table.setNo),
     uniqueIndex("idx_match_result_images_key").on(table.objectKey),
+    uniqueIndex("idx_match_result_images_hash").on(table.imageHash),
   ],
+);
+
+export const resultRevisions = sqliteTable(
+  "result_revisions",
+  {
+    id: text("id").primaryKey(),
+    matchId: text("match_id").notNull(),
+    setNo: integer("set_no").notNull().default(1),
+    objectKey: text("object_key").notNull(),
+    snapshotJson: text("snapshot_json").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_result_revisions_match_set").on(table.matchId, table.setNo, table.createdAt)],
 );
 
 export const matchTeamStats = sqliteTable(
@@ -275,6 +291,8 @@ export const matches = sqliteTable(
       .default("scheduled"),
     bettingOpenedAt: text("betting_opened_at"),
     bettingClosedAt: text("betting_closed_at"),
+    predictionCountAClosed: integer("prediction_count_a_closed"),
+    predictionCountBClosed: integer("prediction_count_b_closed"),
     status: text("status", { enum: ["scheduled", "completed"] })
       .notNull()
       .default("scheduled"),
@@ -392,6 +410,8 @@ export const bets = sqliteTable(
     userId: text("user_id").notNull(),
     teamId: text("team_id").notNull(),
     stake: integer("stake").notNull(),
+    freeStake: integer("free_stake").notNull().default(0),
+    paidStake: integer("paid_stake").notNull().default(0),
     status: text("status", {
       enum: ["pending", "won", "lost", "refunded"],
     })

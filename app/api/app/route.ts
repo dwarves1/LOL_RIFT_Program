@@ -253,6 +253,9 @@ export async function POST(request: Request) {
       if (!matched) throw new Error("PNG, JPG 또는 WebP 이미지를 선택해 주세요.");
       const bytes = Uint8Array.from(atob(matched[2]), (character) => character.charCodeAt(0));
       if (bytes.byteLength > 10 * 1024 * 1024) throw new Error("이미지는 10MB 이하로 올려 주세요.");
+      const imageHash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
       const matchId = String(input.matchId ?? "");
       const extension = matched[1] === "image/png" ? "png" : matched[1] === "image/webp" ? "webp" : "jpg";
       const setNo = Math.max(1, Number(input.setNo ?? 1));
@@ -262,10 +265,11 @@ export async function POST(request: Request) {
         customMetadata: { matchId, uploadedBy: user.id },
       });
       try {
-        const result = await saveMatchResult({
+        await saveMatchResult({
           ...(input as unknown as Omit<SaveMatchResultInput, "image">),
           image: {
             objectKey,
+            imageHash,
             fileName: String(image.fileName ?? `result.${extension}`),
             contentType: matched[1],
             fileSize: bytes.byteLength,
@@ -273,9 +277,7 @@ export async function POST(request: Request) {
             height: Number(image.height ?? 0) || null,
           },
         }, user);
-        if (result.previousObjectKey && result.previousObjectKey !== objectKey) {
-          await env.RESULT_IMAGES.delete(result.previousObjectKey);
-        }
+        // 정정 전 이미지는 결과 수정 이력에서 복구할 수 있도록 보존합니다.
       } catch (error) {
         await env.RESULT_IMAGES.delete(objectKey);
         throw error;

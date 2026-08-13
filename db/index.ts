@@ -38,7 +38,7 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, schedule_confirmed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_matches_tournament_phase_order ON matches(tournament_id, phase, sort_order)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tournament_number ON matches(tournament_id, phase, match_no)`,
-  `CREATE TABLE IF NOT EXISTS match_result_images (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, object_key TEXT NOT NULL, file_name TEXT NOT NULL, content_type TEXT NOT NULL, file_size INTEGER NOT NULL, width INTEGER, height INTEGER, duration_seconds INTEGER, extraction_json TEXT, created_by TEXT NOT NULL, reviewed_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS match_result_images (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, object_key TEXT NOT NULL, file_name TEXT NOT NULL, content_type TEXT NOT NULL, file_size INTEGER NOT NULL, width INTEGER, height INTEGER, duration_seconds INTEGER, extraction_json TEXT, image_hash TEXT, created_by TEXT NOT NULL, reviewed_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_match_result_images_match ON match_result_images(match_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_match_result_images_key ON match_result_images(object_key)`,
   `CREATE TABLE IF NOT EXISTS match_team_stats (match_id TEXT NOT NULL, side INTEGER NOT NULL, team_id TEXT NOT NULL, kills INTEGER NOT NULL, deaths INTEGER NOT NULL, assists INTEGER NOT NULL, gold INTEGER NOT NULL, won INTEGER NOT NULL, PRIMARY KEY(match_id, side))`,
@@ -49,7 +49,7 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_player_match_stats_team ON player_match_stats(team_id, match_id)`,
   `CREATE TABLE IF NOT EXISTS tournament_entries (tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, starter_points_awarded INTEGER NOT NULL, points_balance INTEGER NOT NULL DEFAULT 0, joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tournament_id, user_id))`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user ON tournament_entries(user_id)`,
-  `CREATE TABLE IF NOT EXISTS bets (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, match_id TEXT NOT NULL, user_id TEXT NOT NULL, team_id TEXT NOT NULL, stake INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', payout INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, settled_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS bets (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, match_id TEXT NOT NULL, user_id TEXT NOT NULL, team_id TEXT NOT NULL, stake INTEGER NOT NULL, free_stake INTEGER NOT NULL DEFAULT 0, paid_stake INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', payout INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, settled_at TEXT)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_bets_user_match ON bets(user_id, match_id)`,
   `CREATE INDEX IF NOT EXISTS idx_bets_match_status ON bets(match_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_bets_tournament_user ON bets(tournament_id, user_id)`,
@@ -247,6 +247,27 @@ async function migrateScrimSeasons(raw: D1Database) {
   ]);
 }
 
+async function migrateScrimOperations(raw: D1Database) {
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "prediction_count_a_closed", "INTEGER");
+  await addColumnIfMissing(raw, "matches", matchColumns, "prediction_count_b_closed", "INTEGER");
+
+  const betColumns = (await raw.prepare("PRAGMA table_info(bets)").all<{ name: string }>()).results;
+  const hadPaidStake = betColumns.some((column) => column.name === "paid_stake");
+  await addColumnIfMissing(raw, "bets", betColumns, "free_stake", "INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing(raw, "bets", betColumns, "paid_stake", "INTEGER NOT NULL DEFAULT 0");
+  if (!hadPaidStake) await raw.prepare("UPDATE bets SET paid_stake = stake WHERE paid_stake = 0").run();
+
+  const imageColumns = (await raw.prepare("PRAGMA table_info(match_result_images)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "match_result_images", imageColumns, "image_hash", "TEXT");
+  await raw.batch([
+    raw.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_match_result_images_hash ON match_result_images(image_hash) WHERE image_hash IS NOT NULL"),
+    raw.prepare("CREATE TABLE IF NOT EXISTS result_revisions (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, set_no INTEGER NOT NULL DEFAULT 1, object_key TEXT NOT NULL, snapshot_json TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_result_revisions_match_set ON result_revisions(match_id, set_no, created_at)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_bets_tournament_settled ON bets(tournament_id, settled_at)"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -258,13 +279,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_match_result_images_match_set')
            OR (type = 'index' AND name = 'idx_players_riot_account')
            OR (type = 'index' AND name = 'idx_matches_betting_status')
+           OR (type = 'index' AND name = 'idx_bets_tournament_settled')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 4) return;
+        if (Number(schemaState?.marker_count ?? 0) === 5) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -279,6 +301,7 @@ export function ensureSchema(): Promise<void> {
         await migrateTeamLogos(raw);
         await migrateRegisteredRosters(raw);
         await migrateScrimSeasons(raw);
+        await migrateScrimOperations(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();
