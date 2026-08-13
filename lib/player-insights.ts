@@ -35,9 +35,7 @@ export type InsightStat = {
   kills: number;
   deaths: number;
   assists: number;
-  damage: number;
   gold: number;
-  goldPerMinute: number;
   won?: boolean;
 };
 
@@ -66,9 +64,7 @@ export type PlayerInsight = {
   deaths: number;
   assists: number;
   kda: number;
-  averageDamage: number;
   averageGold: number;
-  averageGoldPerMinute: number;
   currentStreak: { result: "win" | "loss" | "none"; count: number };
   bestWinStreak: number;
   bestLossStreak: number;
@@ -173,9 +169,7 @@ export function buildPlayerInsights(input: {
       deaths,
       assists,
       kda: statRows.length ? (kills + assists) / Math.max(1, deaths) : 0,
-      averageDamage: average(statRows, (row) => row.damage),
       averageGold: average(statRows, (row) => row.gold),
-      averageGoldPerMinute: average(statRows, (row) => row.goldPerMinute),
       currentStreak: { result: currentResult, count: currentCount },
       bestWinStreak,
       bestLossStreak,

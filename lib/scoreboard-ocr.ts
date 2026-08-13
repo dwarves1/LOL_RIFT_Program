@@ -7,9 +7,7 @@ export type OcrPlayerField =
   | "kills"
   | "deaths"
   | "assists"
-  | "damage"
-  | "gold"
-  | "goldPerMinute";
+  | "gold";
 
 export type OcrFieldConfidence = Partial<Record<OcrPlayerField, number>>;
 
@@ -23,9 +21,7 @@ export type ExtractedScoreboardPlayer = {
   kills: number;
   deaths: number;
   assists: number;
-  damage: number;
   gold: number;
-  goldPerMinute: number;
   confidence: number;
   fieldConfidence: OcrFieldConfidence;
 };
@@ -250,18 +246,15 @@ export async function extractFixedLolScoreboard(
     for (let index = 0; index < ROW_CENTERS.length; index += 1) {
       const center = ROW_CENTERS[index];
       onProgress?.(10 + index * 8, `${index + 1}/10 선수 행 분석 중`);
-      const [accountResult, championResult, levelResult, kdaResult, damageResult, goldResult] = await Promise.all([
+      const [accountResult, championResult, levelResult, kdaResult, goldResult] = await Promise.all([
         recognizeBest(nameWorker, image, [184, center - 22, 175, 22]),
         recognizeBest(nameWorker, image, [184, center, 150, 21]),
         recognizeBest(numberWorker, image, [68, center - 18, 36, 36]),
         recognizeBest(numberWorker, image, [708, center - 22, 96, 24]),
-        recognizeBest(numberWorker, image, [806, center - 22, 96, 24]),
         recognizeBest(numberWorker, image, [908, center - 22, 82, 24]),
       ]);
       const kda = parseKda(kdaResult.data.text);
-      const damage = parseInteger(damageResult.data.text);
       const gold = parseInteger(goldResult.data.text);
-      const goldPerMinute = gold && durationSeconds ? Math.round(gold / (durationSeconds / 60)) : 0;
       const fieldConfidence: OcrFieldConfidence = {
         accountName: Math.round(accountResult.data.confidence),
         championName: Math.round(championResult.data.confidence),
@@ -269,11 +262,9 @@ export async function extractFixedLolScoreboard(
         kills: Math.round(kdaResult.data.confidence),
         deaths: Math.round(kdaResult.data.confidence),
         assists: Math.round(kdaResult.data.confidence),
-        damage: Math.round(damageResult.data.confidence),
         gold: Math.round(goldResult.data.confidence),
-        goldPerMinute: Math.round(goldResult.data.confidence),
       };
-      raw.push(accountResult.data.text, championResult.data.text, levelResult.data.text, kdaResult.data.text, damageResult.data.text, goldResult.data.text);
+      raw.push(accountResult.data.text, championResult.data.text, levelResult.data.text, kdaResult.data.text, goldResult.data.text);
       players.push({
         side: index < 5 ? 1 : 2,
         rowOrder: index + 1,
@@ -282,9 +273,7 @@ export async function extractFixedLolScoreboard(
         championLevel: parseInteger(levelResult.data.text),
         lane: LANES[index % 5],
         ...kda,
-        damage,
         gold,
-        goldPerMinute,
         fieldConfidence,
         confidence: Math.round(Object.values(fieldConfidence).reduce((sum, value) => sum + (value ?? 0), 0) / Object.keys(fieldConfidence).length),
       });

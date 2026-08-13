@@ -1770,9 +1770,7 @@ type ResultPlayerInput = {
   kills: number;
   deaths: number;
   assists: number;
-  damage: number;
   gold: number;
-  goldPerMinute: number;
 };
 
 export type SaveMatchResultInput = {
@@ -1820,13 +1818,16 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     !matchTeams.has(input.side2TeamId) ||
     !matchTeams.has(input.winnerTeamId)
   ) {
-    throw new Error("이미지의 1팀·2팀과 실제 대진 팀을 확인해 주세요.");
+    throw new Error("이미지의 블루팀·레드팀과 실제 대진 팀을 확인해 주세요.");
   }
   if (input.teams.length !== 2 || input.players.length !== 10) {
     throw new Error("두 팀과 선수 10명의 결과를 확인해 주세요.");
   }
   if ([1, 2].some((side) => input.players.filter((player) => player.side === side).length !== 5)) {
     throw new Error("각 팀에 선수 5명이 필요합니다.");
+  }
+  if (input.players.some((player) => !/[가-힣]/.test(player.championName.trim()))) {
+    throw new Error("챔피언명은 한국어 정식 명칭으로 입력해 주세요.");
   }
   if (!input.image.objectKey || !input.image.contentType.startsWith("image/")) {
     throw new Error("결과 이미지를 확인해 주세요.");
@@ -1914,9 +1915,10 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     kills: statInteger(player.kills),
     deaths: statInteger(player.deaths),
     assists: statInteger(player.assists),
-    damage: statInteger(player.damage),
+    // Legacy columns remain for backwards-compatible storage, but are no longer collected.
+    damage: 0,
     gold: statInteger(player.gold),
-    goldPerMinute: statInteger(player.goldPerMinute),
+    goldPerMinute: 0,
     won: sideTeam.get(player.side) === input.winnerTeamId,
     updatedAt: reviewedAt,
   })));
@@ -2251,9 +2253,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       kills: playerMatchStats.kills,
       deaths: playerMatchStats.deaths,
       assists: playerMatchStats.assists,
-      damage: playerMatchStats.damage,
       gold: playerMatchStats.gold,
-      goldPerMinute: playerMatchStats.goldPerMinute,
       won: playerMatchStats.won,
     }).from(playerMatchStats)
       .innerJoin(matches, eq(matches.id, playerMatchStats.matchId))

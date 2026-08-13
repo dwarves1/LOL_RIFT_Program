@@ -20,8 +20,8 @@ const matches = [
   { id: "match-2", phase: "scrim", roundLabel: "2차 내전", scheduledAt: "2026-08-11T10:00:00.000Z", completedAt: "2026-08-11T11:00:00.000Z", status: "completed", teamAId: "blue-2", teamBId: "red-2", winnerId: "red-2" },
 ];
 const stats = [
-  { matchId: "match-1", userId: "user-1", championName: "아리", lane: "MID", kills: 5, deaths: 2, assists: 7, damage: 20000, gold: 12000, goldPerMinute: 400, won: true },
-  { matchId: "match-2", userId: "user-1", championName: "아리", lane: "MID", kills: 2, deaths: 5, assists: 3, damage: 14000, gold: 10000, goldPerMinute: 333, won: false },
+  { matchId: "match-1", userId: "user-1", championName: "아리", lane: "MID", kills: 5, deaths: 2, assists: 7, gold: 12000, won: true },
+  { matchId: "match-2", userId: "user-1", championName: "아리", lane: "MID", kills: 2, deaths: 5, assists: 3, gold: 10000, won: false },
 ];
 
 test("player insights combine scrim results, OCR stats, streaks, and relationships", () => {
@@ -35,7 +35,7 @@ test("player insights combine scrim results, OCR stats, streaks, and relationshi
   assert.equal(player.bestLossStreak, 1);
   assert.deepEqual(player.badges, []);
   assert.equal(player.kda, 17 / 7);
-  assert.equal(player.averageDamage, 17000);
+  assert.equal(player.averageGold, 11000);
   assert.deepEqual(player.champions[0], { name: "아리", games: 2, wins: 1, losses: 1, winRate: 50 });
   assert.deepEqual(player.teammates.map((row) => [row.userId, row.games, row.wins]), [["user-2", 1, 1], ["user-3", 1, 0]]);
   assert.deepEqual(player.opponents.map((row) => [row.userId, row.games, row.wins]), [["user-4", 2, 1], ["user-3", 1, 1], ["user-2", 1, 0]]);

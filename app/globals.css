@@ -705,6 +705,54 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .result-review-body { overflow-y: auto; }.result-fields-panel { overflow: visible; }
 }
 
+/* Scoreboard review v2: explicit side mapping, compact fields, and guarded registration. */
+.result-meta-fields { grid-template-columns: 88px 112px minmax(220px,1fr) auto minmax(220px,1fr); }
+.side-swap { min-width: 150px; padding: 4px 10px; font-size: 11px; font-weight: 800; white-space: nowrap; }
+.image-side-detection { display: grid; grid-template-columns: 120px minmax(0,1fr) auto; align-items: center; gap: 8px; margin: 6px 0; padding: 6px 10px; border: 1px solid rgba(96,165,250,.35); background: rgba(96,165,250,.055); }
+.image-side-detection span, .image-side-detection small { color: var(--muted); font-size: 11px; }
+.image-side-detection strong { color: #bfdbfe; font-size: 12px; }
+.analysis-recovery-actions { display: flex; flex-wrap: wrap; gap: 7px; grid-column: 1 / -1; }
+.analysis-recovery-actions button { min-height: 32px; padding: 5px 10px; }
+.result-player-columns, .result-player-card { grid-template-columns: 72px minmax(170px,1.4fr) minmax(145px,1.2fr) minmax(135px,1fr) 58px repeat(3,54px) minmax(88px,.75fr); }
+.detail-stat-head, .detail-stat-row { grid-template-columns: minmax(110px,1.3fr) minmax(120px,1.2fr) 80px 56px 90px; }
+.detail-stat-row span:last-child { text-align: right; }
+.stats-table { min-width: 1000px; }
+.stats-table-head, .stats-table-row { grid-template-columns: minmax(200px,1.4fr) 90px 64px 160px 65px 100px 170px 130px; }
+.player-metric-grid { grid-template-columns: repeat(4,minmax(0,1fr)); }
+.result-confirm-backdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(2,8,18,.82); backdrop-filter: blur(5px); }
+.result-confirm-dialog { width: min(520px,100%); padding: 24px; border: 1px solid rgba(233,185,73,.42); background: #0a1625; box-shadow: 0 24px 90px rgba(0,0,0,.55); }
+.result-confirm-dialog > span { color: var(--gold); font-size: 10px; font-weight: 900; letter-spacing: .14em; }
+.result-confirm-dialog h3 { margin: 8px 0 5px; color: #fff; font-size: 22px; }
+.result-confirm-dialog > p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.result-confirm-dialog dl { display: grid; gap: 0; margin: 18px 0; border: 1px solid var(--line); }
+.result-confirm-dialog dl > div { display: grid; grid-template-columns: 110px minmax(0,1fr); gap: 12px; padding: 9px 11px; border-top: 1px solid var(--line); }
+.result-confirm-dialog dl > div:first-child { border-top: 0; }
+.result-confirm-dialog dt { color: var(--muted); font-size: 11px; }
+.result-confirm-dialog dd { margin: 0; color: #e8eef7; font-size: 12px; font-weight: 700; }
+.result-confirm-dialog > div { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (max-width: 1000px) {
+  .result-player-metrics { grid-template-columns: repeat(5,minmax(58px,1fr)); }
+}
+
+@media (max-width: 800px) {
+  .result-meta-fields { grid-template-columns: 1fr 1fr; }
+  .result-meta-fields label:first-child, .result-meta-fields label:nth-child(2) { grid-column: auto; }
+  .result-meta-fields label:nth-of-type(3), .result-meta-fields label:nth-of-type(4), .result-meta-fields .side-swap { grid-column: 1 / -1; }
+  .side-swap { width: 100%; }
+  .image-side-detection { grid-template-columns: 1fr; gap: 3px; }
+  .player-metric-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 520px) {
+  .result-player-identity { grid-template-columns: 1fr 1fr; }
+  .result-player-metrics { grid-template-columns: repeat(3,minmax(58px,1fr)); }
+  .result-confirm-dialog { padding: 18px; }
+  .result-confirm-dialog dl > div { grid-template-columns: 86px minmax(0,1fr); }
+  .result-confirm-dialog > div { display: grid; grid-template-columns: 1fr; }
+}
+
+
 @media (max-width: 1000px) {
   .result-source-panel { grid-template-columns: auto auto minmax(0,1fr); }
   .result-player-columns { display: none; }

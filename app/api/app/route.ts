@@ -98,11 +98,7 @@ export async function POST(request: Request) {
       if (!matched) throw new Error("PNG, JPG 또는 WebP 이미지를 선택해 주세요.");
       const estimatedBytes = Math.floor(matched[2].length * 0.75);
       if (estimatedBytes > 10 * 1024 * 1024) throw new Error("이미지는 10MB 이하로 올려 주세요.");
-      const matchContext = await getMatchImageAnalysisContext(String(payload.matchId ?? ""), user);
-      const side1TeamId = String(payload.side1TeamId ?? "");
-      const context = side1TeamId === matchContext.teamB.id
-        ? { ...matchContext, teamA: matchContext.teamB, teamB: matchContext.teamA }
-        : matchContext;
+      const context = await getMatchImageAnalysisContext(String(payload.matchId ?? ""), user);
       const runtimeEnv = env as unknown as { OPENAI_API_KEY?: string; OPENAI_SCOREBOARD_MODEL?: string };
       const apiKey = runtimeEnv.OPENAI_API_KEY?.trim();
       if (!apiKey) {
@@ -110,7 +106,13 @@ export async function POST(request: Request) {
       }
       const model = runtimeEnv.OPENAI_SCOREBOARD_MODEL?.trim() || OPENAI_SCOREBOARD_MODEL;
       const analysis = await analyzeScoreboardWithOpenAI({ apiKey, imageDataUrl, context, model });
-      return Response.json({ ok: true, analysis, model });
+      console.info("Scoreboard analysis request completed", {
+        model,
+        providerLatencyMs: analysis.providerLatencyMs,
+        analysisWidth: Number(payload.analysisWidth ?? 0) || null,
+        analysisHeight: Number(payload.analysisHeight ?? 0) || null,
+      });
+      return Response.json({ ok: true, analysis, model, elapsedMs: analysis.providerLatencyMs });
     }
 
     if (action === "create_tournament") {

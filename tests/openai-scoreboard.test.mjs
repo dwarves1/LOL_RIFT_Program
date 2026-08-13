@@ -13,9 +13,7 @@ const confidence = {
   kills: 96,
   deaths: 96,
   assists: 96,
-  damage: 91,
   gold: 93,
-  goldPerMinute: 90,
 };
 
 function analysisPayload() {
@@ -23,6 +21,10 @@ function analysisPayload() {
     durationSeconds: 1687,
     topOutcome: "win",
     topOutcomeConfidence: 98,
+    topTeam: "teamB",
+    topTeamConfidence: 94,
+    topSideColor: "red",
+    topSideColorConfidence: 91,
     players: Array.from({ length: 10 }, (_, index) => ({
       side: index < 5 ? 1 : 2,
       rowOrder: index + 1,
@@ -33,9 +35,7 @@ function analysisPayload() {
       kills: index,
       deaths: 2,
       assists: 5,
-      damage: 10_000 + index,
       gold: 9_000 + index,
-      goldPerMinute: 320 + index,
       confidence: 92,
       fieldConfidence: confidence,
     })),
@@ -52,10 +52,12 @@ test("AI scoreboard normalization enforces ten ordered players", () => {
   assert.equal(normalized.players.length, 10);
   assert.deepEqual(normalized.players.map((player) => player.side), [1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
   assert.deepEqual(normalized.players.map((player) => player.lane), ["TOP", "JGL", "MID", "ADC", "SUP", "TOP", "JGL", "MID", "ADC", "SUP"]);
+  assert.equal(normalized.topTeam, "teamB");
+  assert.equal(normalized.topSideColor, "red");
   assert.throws(() => normalizeOpenAIScoreboard({ ...analysisPayload(), players: [] }), /10명/);
 });
 
-test("AI analysis sends an original-detail image and strict schema", async () => {
+test("AI analysis sends a latency-optimized image request and strict schema", async () => {
   let requestBody;
   const result = await analyzeScoreboardWithOpenAI({
     apiKey: "test-key",
@@ -74,8 +76,9 @@ test("AI analysis sends an original-detail image and strict schema", async () =>
   });
   assert.equal(requestBody.model, "gpt-5.6-terra");
   assert.equal(requestBody.store, false);
-  assert.equal(requestBody.reasoning.effort, "medium");
-  assert.equal(requestBody.input[0].content[1].detail, "original");
+  assert.equal(requestBody.reasoning.effort, "none");
+  assert.equal(requestBody.max_output_tokens, 2500);
+  assert.equal(requestBody.input[0].content[1].detail, "high");
   assert.equal(requestBody.text.format.strict, true);
   assert.equal(result.durationSeconds, 1687);
 });

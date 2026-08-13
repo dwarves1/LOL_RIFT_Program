@@ -398,9 +398,7 @@ test("tournament isolation, team leadership, result correction, and draft permis
     kills: index < 5 ? 3 : 1,
     deaths: index < 5 ? 1 : 3,
     assists: 5,
-    damage: 10000 + index,
     gold: 9000 + index,
-    goldPerMinute: 400,
   }));
   const resultInput = {
     matchId: match.id,

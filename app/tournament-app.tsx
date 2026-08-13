@@ -1281,9 +1281,7 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
       kills: 0,
       deaths: 0,
       assists: 0,
-      damage: 0,
       gold: 0,
-      goldPerMinute: 0,
       champions: new Map<string, { games: number; wins: number }>(),
       lanes: new Map<string, { games: number; wins: number }>(),
     };
@@ -1292,9 +1290,7 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
     current.kills += row.kills;
     current.deaths += row.deaths;
     current.assists += row.assists;
-    current.damage += row.damage;
     current.gold += row.gold;
-    current.goldPerMinute += row.goldPerMinute;
     const champion = current.champions.get(row.championName) ?? { games: 0, wins: 0 };
     current.champions.set(row.championName, { games: champion.games + 1, wins: champion.wins + (row.won ? 1 : 0) });
     const lane = current.lanes.get(row.lane) ?? { games: 0, wins: 0 };
@@ -1302,8 +1298,8 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
     map.set(key, current);
     return map;
   }, new Map<string, {
-    key: string; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; damage: number; gold: number; goldPerMinute: number; champions: Map<string, { games: number; wins: number }>; lanes: Map<string, { games: number; wins: number }>;
-  }>()).values()].sort((a, b) => b.games - a.games || b.wins - a.wins || b.damage - a.damage);
+    key: string; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; gold: number; champions: Map<string, { games: number; wins: number }>; lanes: Map<string, { games: number; wins: number }>;
+  }>()).values()].sort((a, b) => b.games - a.games || b.wins - a.wins || b.gold - a.gold);
   const teamRows = [...data.teams.map((team) => {
     const rows = data.teamStats.filter((row) => row.teamId === team.id);
     return {
@@ -1323,10 +1319,10 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
   return <section className="page-section stats-page">
     <PageTitle eyebrow="ANALYTICS" title="경기 통계" description="등록된 결과 이미지를 기준으로 계산한 대회 누적 통계입니다." />
     <div className="stats-summary-grid"><div><span>분석 경기</span><strong>{new Set(data.playerStats.map((row) => row.matchId)).size}</strong></div><div><span>기록 계정</span><strong>{playerRows.length}</strong></div><div><span>총 킬</span><strong>{data.teamStats.reduce((sum, row) => sum + row.kills, 0)}</strong></div><div><span>등록 이미지</span><strong>{data.resultImages.length}</strong></div></div>
-    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기(승-패)</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 딜량</span><span>평균 골드</span><span>G/분</span><span>챔피언별 전적</span><span>라인별 전적</span></div>{playerRows.map((row) => {
+    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기(승-패)</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 골드</span><span>챔피언별 전적</span><span>라인별 전적</span></div>{playerRows.map((row) => {
       const topChampion = [...row.champions].sort((a, b) => b[1].games - a[1].games)[0];
       const topLane = [...row.lanes].sort((a, b) => b[1].games - a[1].games)[0];
-      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games} ({row.wins}-{row.games - row.wins})</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.damage / row.games).toLocaleString()}</span><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{Math.round(row.goldPerMinute / row.games)}</span><span>{topChampion ? `${topChampion[0]} ${topChampion[1].wins}승 ${topChampion[1].games - topChampion[1].wins}패` : "-"}</span><span>{topLane ? `${positionLabel(topLane[0], true)} ${topLane[1].wins}승 ${topLane[1].games - topLane[1].wins}패` : "-"}</span></div>;
+      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games} ({row.wins}-{row.games - row.wins})</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{topChampion ? `${topChampion[0]} ${topChampion[1].wins}승 ${topChampion[1].games - topChampion[1].wins}패` : "-"}</span><span>{topLane ? `${positionLabel(topLane[0], true)} ${topLane[1].wins}승 ${topLane[1].games - topLane[1].wins}패` : "-"}</span></div>;
     })}</div></article>
     {data.tournament?.competitionKind !== "scrim_season" && <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as React.CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>}
   </section>;
@@ -1382,7 +1378,7 @@ function PlayerDetailView({ player, tournamentId, lastUpdatedAt, onBack, onSelec
     <header className="player-profile-hero"><i>{player.displayName.slice(0, 1)}</i><div><p className="eyebrow">LOL RIFT PLAYER</p><h1>{player.displayName}</h1><span>{player.games}경기 · {player.wins}승 {player.losses}패 · 승률 {player.winRate}%</span><div className="player-badges">{player.badges.map((badge) => <StreakBadge key={`${badge.kind}-${badge.count}`} badge={badge} />)}</div></div><div className="profile-streak"><span>현재 흐름</span><strong className={player.currentStreak.result}>{streakLabel}</strong><small>최고 {player.bestWinStreak}연승 · {player.bestLossStreak}연패</small></div></header>
     <div className="player-data-time"><span>내전 데이터 기준</span><strong>{lastUpdatedAt ? formatDate(lastUpdatedAt) : "아직 확정된 내전 없음"}</strong><small>외부 랭크 정보는 OP.GG에서 확인</small></div>
     <article className="panel player-account-panel"><div className="section-heading"><div><p className="eyebrow">REGISTERED RIOT IDS</p><h2>등록 롤 계정</h2></div></div><div>{player.accounts.map((account, index) => <div key={account.id}><span><strong>{accountRiotId(account)}</strong><small>{index === 0 ? "대표 계정" : "등록 계정"}</small></span><a href={opggSearchUrl(account)} target="_blank" rel="noopener noreferrer">OP.GG 전적 검색 ↗</a></div>)}</div></article>
-    <div className="player-metric-grid"><div><span>내전 승률</span><strong>{player.winRate}%</strong><small>{player.wins}승 {player.losses}패</small></div><div><span>평균 K / D / A</span><strong>{(player.kills / statGames).toFixed(1)} / {(player.deaths / statGames).toFixed(1)} / {(player.assists / statGames).toFixed(1)}</strong><small>분석 {player.analyzedGames}게임</small></div><div><span>KDA</span><strong>{player.kda.toFixed(2)}</strong><small>(킬+어시)/데스</small></div><div><span>평균 딜량</span><strong>{player.averageDamage.toLocaleString()}</strong><small>게임당</small></div><div><span>평균 골드</span><strong>{player.averageGold.toLocaleString()}</strong><small>게임당</small></div><div><span>평균 G/분</span><strong>{player.averageGoldPerMinute.toLocaleString()}</strong><small>게임당</small></div></div>
+    <div className="player-metric-grid"><div><span>내전 승률</span><strong>{player.winRate}%</strong><small>{player.wins}승 {player.losses}패</small></div><div><span>평균 K / D / A</span><strong>{(player.kills / statGames).toFixed(1)} / {(player.deaths / statGames).toFixed(1)} / {(player.assists / statGames).toFixed(1)}</strong><small>분석 {player.analyzedGames}게임</small></div><div><span>KDA</span><strong>{player.kda.toFixed(2)}</strong><small>(킬+어시)/데스</small></div><div><span>평균 골드</span><strong>{player.averageGold.toLocaleString()}</strong><small>게임당</small></div></div>
     <div className="player-record-grid"><RecordPanel title="챔피언별 전적" rows={player.champions.map((row) => ({ label: row.name, value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /><RecordPanel title="라인별 전적" rows={player.lanes.map((row) => ({ label: positionLabel(row.name, true), value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /></div>
     <div className="player-record-grid"><RelationshipPanel title="동료 전적" rows={player.teammates} tournamentId={tournamentId} onSelect={onSelectPlayer} /><RelationshipPanel title="상대 전적" rows={player.opponents} tournamentId={tournamentId} onSelect={onSelectPlayer} /></div>
     <article className="panel recent-player-matches"><div className="section-heading"><div><p className="eyebrow">RECENT SCRIMS</p><h2>최근 내전</h2></div></div>{player.recentMatches.map((match) => <div key={match.matchId}><time>{formatDate(match.scheduledAt)}</time><strong>{match.roundLabel}</strong><b className={match.won ? "win" : "loss"}>{match.won ? "승리" : "패배"}</b></div>)}{!player.recentMatches.length && <p className="player-empty-copy">아직 확정된 내전 기록이 없습니다.</p>}</article>
