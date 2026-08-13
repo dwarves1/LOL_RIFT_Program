@@ -284,6 +284,14 @@ async function migrateBackupsAndSettlements(raw: D1Database) {
   ]);
 }
 
+async function migrateGoogleAuthentication(raw: D1Database) {
+  await raw.batch([
+    raw.prepare("CREATE TABLE IF NOT EXISTS auth_identities (provider TEXT NOT NULL, provider_subject TEXT NOT NULL, user_id TEXT NOT NULL, email TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(provider, provider_subject))"),
+    raw.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_identities_user_provider ON auth_identities(user_id, provider)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_auth_identities_user ON auth_identities(user_id)"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -297,13 +305,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_matches_betting_status')
            OR (type = 'index' AND name = 'idx_bets_tournament_settled')
            OR (type = 'index' AND name = 'idx_tournament_backups_tournament')
+           OR (type = 'index' AND name = 'idx_auth_identities_user_provider')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 6) return;
+        if (Number(schemaState?.marker_count ?? 0) === 7) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -320,6 +329,7 @@ export function ensureSchema(): Promise<void> {
         await migrateScrimSeasons(raw);
         await migrateScrimOperations(raw);
         await migrateBackupsAndSettlements(raw);
+        await migrateGoogleAuthentication(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

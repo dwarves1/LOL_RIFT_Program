@@ -11,6 +11,7 @@ import { ensureSchema, getConfiguredOwnerEmail, getDb, getRawDb } from "../db";
 import { isPredictionOpen, shouldSwapLeagueSides } from "./match-rules";
 import {
   auditLogs,
+  authIdentities,
   bets,
   matchResultImages,
   matchGames,
@@ -31,6 +32,7 @@ import {
   betSettlements,
   tournamentBackups,
 } from "../db/schema";
+import { currentSessionUserId, type GoogleIdentity } from "./google-auth";
 
 export type UserRole = "viewer" | "operator" | "admin";
 
@@ -86,10 +88,79 @@ function isoAfter(start: string, minutes: number) {
   return date.toISOString();
 }
 
+export async function resolveGoogleIdentityToUserId(identity: GoogleIdentity) {
+  await ensureSchema();
+  const db = getDb();
+  const [linkedIdentity] = await db
+    .select()
+    .from(authIdentities)
+    .where(and(eq(authIdentities.provider, identity.provider), eq(authIdentities.providerSubject, identity.subject)))
+    .limit(1);
+  if (linkedIdentity) {
+    await db
+      .update(authIdentities)
+      .set({ email: identity.email, lastSeenAt: new Date().toISOString() })
+      .where(and(eq(authIdentities.provider, identity.provider), eq(authIdentities.providerSubject, identity.subject)));
+    return linkedIdentity.userId;
+  }
+
+  // The single existing ChatGPT-era account is linked once after Google has
+  // verified the same email. Existing wallets, teams, bets, and results keep
+  // their internal user ID unchanged.
+  const [existingByEmail] = await db
+    .select()
+    .from(users)
+    .where(sql`lower(${users.email}) = ${identity.email.toLocaleLowerCase("en-US")}`)
+    .limit(1);
+  const userId = existingByEmail?.id ?? uid("user");
+  if (!existingByEmail) {
+    const role: UserRole = identity.email === getConfiguredOwnerEmail() ? "admin" : "viewer";
+    await db.insert(users).values({
+      id: userId,
+      email: identity.email,
+      displayName: identity.displayName,
+      authDisplayName: identity.displayName,
+      role,
+      pointsBalance: 0,
+    });
+  } else {
+    await db
+      .update(users)
+      .set({ email: identity.email, authDisplayName: identity.displayName, lastSeenAt: new Date().toISOString() })
+      .where(eq(users.id, existingByEmail.id));
+  }
+  await db.insert(authIdentities).values({
+    provider: identity.provider,
+    providerSubject: identity.subject,
+    userId,
+    email: identity.email,
+  });
+  return userId;
+}
+
 export async function getRequestUser(request: Request): Promise<RequestUser | null> {
   await ensureSchema();
   const url = new URL(request.url);
   const isLocalDemo = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  if (!isLocalDemo) {
+    const sessionUserId = await currentSessionUserId(request);
+    if (!sessionUserId) return null;
+    const [existingGoogleUser] = await getDb().select().from(users).where(eq(users.id, sessionUserId)).limit(1);
+    if (!existingGoogleUser) return null;
+    return {
+      id: existingGoogleUser.id,
+      email: existingGoogleUser.email,
+      displayName: existingGoogleUser.displayName,
+      authDisplayName: existingGoogleUser.authDisplayName ?? existingGoogleUser.email.split("@")[0],
+      realName: existingGoogleUser.realName,
+      riotGameName: existingGoogleUser.riotGameName,
+      riotTagline: existingGoogleUser.riotTagline,
+      profileComplete: Boolean(existingGoogleUser.profileCompletedAt),
+      role: existingGoogleUser.role,
+      pointsBalance: existingGoogleUser.pointsBalance,
+      isLocalDemo: false,
+    };
+  }
   const userId = isLocalDemo
     ? "local-demo-admin"
     : request.headers.get("oai-authenticated-user-id");

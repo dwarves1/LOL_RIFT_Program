@@ -77,6 +77,26 @@ export const riotAccounts = sqliteTable(
   ],
 );
 
+// Authentication providers are intentionally separated from the internal user ID.
+// Tournament records, wallets, and bets keep referring to users.id even when a
+// person changes how they sign in.
+export const authIdentities = sqliteTable(
+  "auth_identities",
+  {
+    provider: text("provider").notNull(),
+    providerSubject: text("provider_subject").notNull(),
+    userId: text("user_id").notNull(),
+    email: text("email").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastSeenAt: text("last_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.provider, table.providerSubject] }),
+    uniqueIndex("idx_auth_identities_user_provider").on(table.userId, table.provider),
+    index("idx_auth_identities_user").on(table.userId),
+  ],
+);
+
 export const tournaments = sqliteTable(
   "tournaments",
   {

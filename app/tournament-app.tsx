@@ -478,7 +478,7 @@ export function TournamentApp({
             {(viewer.role === "admin" || viewer.role === "operator") && <><button className="secondary-button" onClick={() => setShowCreate(true)}>＋ 새 대회 생성</button><button className="secondary-button" onClick={() => setShowCreateScrim(true)}>＋ 내전 시즌 생성</button></>}
           </div>
         ) : (
-          <><a className="primary-button" href={signInPath}>로그인 후 대회 코드 입력</a>{isKakaoBrowser && <p className="kakao-browser-help">카카오톡 안에서 로그인이 열리지 않으면 우측 상단 메뉴에서 ‘다른 브라우저로 열기’를 선택해 주세요.</p>}</>
+          <><a className="primary-button" href={signInPath}>Google 로그인 후 대회 코드 입력</a>{isKakaoBrowser && <p className="kakao-browser-help">카카오톡 안에서 로그인이 열리지 않으면 우측 상단 메뉴에서 ‘다른 브라우저로 열기’를 선택해 주세요.</p>}</>
         )}
         {showCreate && (
           <CreateTournamentModal
@@ -568,7 +568,7 @@ export function TournamentApp({
               <span><strong>{viewer.pointsBalance.toLocaleString()}P</strong><small>{ROLE_LABEL[viewer.role]}</small></span>
             </button>
           ) : (
-            <a className="signin-button" href={signInPath}>로그인</a>
+            <a className="signin-button" href={signInPath}>Google 로그인</a>
           )}
         </div>
       </header>
@@ -826,7 +826,7 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick
   if (!isScrim && !match.scheduleConfirmed) return <div className="prediction-locked">운영자가 경기 일정을 확정하면 예측이 열립니다.</div>;
   if (!openForPrediction) return <div className="prediction-locked">{isScrim ? "운영자가 배팅을 시작하면 이곳에서 참여할 수 있습니다." : "경기 시작 1시간 전 예측이 마감되었습니다."}</div>;
   if (!data.viewer) {
-    return <a href={signInPath} className="prediction-signin">로그인하고 승리팀 예측하기 <span>→</span></a>;
+    return <a href={signInPath} className="prediction-signin">Google 로그인 후 승리팀 예측하기 <span>→</span></a>;
   }
   return (
     <div className="prediction-box">
@@ -1410,7 +1410,7 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming, focuse
   const playerInsightMap = useMemo(() => buildPlayerInsights({ accounts: data.accounts, teams: data.teams, matches: data.matches, stats: data.playerStats, reviewedAt: data.resultImages.map((image) => image.reviewedAt) }).playerMap, [data]);
   const visibleMatches = [...upcoming].sort((a, b) => Number(b.id === focusedMatchId) - Number(a.id === focusedMatchId));
   if (!data.viewer) {
-    return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="로그인하고 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>계정 로그인이 필요합니다</h2><p>로그인하면 선택한 대회의 기본 포인트를 받고, 대회별 지갑으로 따로 관리됩니다.</p><a className="primary-button" href={signInPath}>로그인하고 시작하기</a></div></section>;
+    return <section className="page-section"><PageTitle eyebrow="PREDICTION" title="포인트 예측" description="Google 로그인 후 승리팀을 예상해 보세요." /><div className="signin-panel"><div className="account-sign">LR</div><h2>Google 로그인이 필요합니다</h2><p>로그인하면 선택한 대회의 기본 포인트를 받고, 대회별 지갑으로 따로 관리됩니다.</p><a className="primary-button" href={signInPath}>Google 로그인하고 시작하기</a></div></section>;
   }
   return (
     <section className="page-section">

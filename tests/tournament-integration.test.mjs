@@ -197,6 +197,28 @@ test("five competition formats create and progress with the configured BO rules"
   }
 });
 
+test("Google identity links the previous member without changing tournament data IDs", async () => {
+  const linkedId = await tournament.resolveGoogleIdentityToUserId({
+    provider: "google",
+    subject: "google-subject-admin",
+    email: "admin@example.com",
+    displayName: "Google Admin",
+  });
+  assert.equal(linkedId, "admin");
+  const identity = sqlite.prepare("SELECT user_id, email FROM auth_identities WHERE provider = ? AND provider_subject = ?").get("google", "google-subject-admin");
+  assert.equal(identity.user_id, "admin");
+  assert.equal(identity.email, "admin@example.com");
+
+  const repeatLinkedId = await tournament.resolveGoogleIdentityToUserId({
+    provider: "google",
+    subject: "google-subject-admin",
+    email: "admin@example.com",
+    displayName: "Updated Google Admin",
+  });
+  assert.equal(repeatLinkedId, "admin");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_identities WHERE user_id = ?").get("admin").count, 1);
+});
+
 test("scrim season supports ten registered players, free 100P, single picks, and settlement", async () => {
   const created = await tournament.createScrimSeason({
     name: "2026 1시즌 내전",

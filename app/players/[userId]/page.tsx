@@ -1,4 +1,4 @@
-import { chatGPTSignInPath } from "../../chatgpt-auth";
+import { googleSignInPath } from "../../google-auth";
 import { TournamentApp } from "../../tournament-app";
 
 export const dynamic = "force-dynamic";
@@ -13,5 +13,5 @@ export default async function PlayerPage({
   const { userId } = await params;
   const { tournament = "" } = await searchParams;
   const path = `/players/${encodeURIComponent(userId)}${tournament ? `?tournament=${encodeURIComponent(tournament)}` : ""}`;
-  return <TournamentApp signInPath={chatGPTSignInPath(path)} initialTournamentId={tournament} initialPlayerId={userId} initialTab="players" />;
+  return <TournamentApp signInPath={googleSignInPath(path)} initialTournamentId={tournament} initialPlayerId={userId} initialTab="players" />;
 }
