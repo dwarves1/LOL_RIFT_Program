@@ -255,6 +255,10 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   assert.equal(playerData.bets[0].paidStake, 200);
   assert.equal(playerData.bets[0].payout, 500);
   assert.equal(playerData.matches.find((item) => item.id === match.id).bettingStatus, "settled");
+  assert.equal(playerData.matches.find((item) => item.id === match.id).settlementStatus, "completed");
+  const operatorData = await tournament.getDashboard(created.tournamentId, actors.get("admin"));
+  assert.ok(operatorData.backups.some((backup) => backup.kind === "automatic"));
+  assert.equal(operatorData.settlementSummaries.find((row) => row.matchId === match.id).state, "completed");
   const zeroBalancePlayer = await tournament.getDashboard(created.tournamentId, actors.get("player2"));
   assert.equal(zeroBalancePlayer.viewer.pointsBalance, 0);
   assert.equal(zeroBalancePlayer.bets[0].freeStake, 100);
@@ -266,6 +270,36 @@ test("scrim season supports ten registered players, free 100P, single picks, and
     () => tournament.createScrimMatch({ tournamentId: created.tournamentId, scheduledAt: new Date().toISOString(), blueAccountIds: accountIds.slice(10, 15), redAccountIds: accountIds.slice(15, 20) }, actors.get("foreign_operator")),
     /운영할 권한/,
   );
+});
+
+test("automatic backups export a validated snapshot and restore a safe copy", async () => {
+  const created = await tournament.createScrimSeason({
+    name: "Backup QA season",
+    startAt: "2026-08-12T12:00:00.000Z",
+    starterPoints: 500,
+  }, actors.get("admin"));
+  for (let index = 1; index <= 10; index += 1) {
+    await tournament.joinTournamentByCode(created.accessCode, actors.get(`player${index}`));
+  }
+  await tournament.createScrimMatch({
+    tournamentId: created.tournamentId,
+    scheduledAt: "2026-08-12T13:00:00.000Z",
+    blueAccountIds: accountIds.slice(0, 5),
+    redAccountIds: accountIds.slice(5, 10),
+  }, actors.get("admin"));
+
+  const backup = await tournament.createTournamentBackup(created.tournamentId, actors.get("admin"));
+  const { payload } = await tournament.getTournamentBackupPayload(backup.id, actors.get("admin"));
+  assert.equal(payload.tournamentId, created.tournamentId);
+  assert.equal(payload.tables.teams.length, 2);
+  assert.equal(payload.tables.matches.length, 1);
+
+  const restored = await tournament.restoreTournamentBackupAsCopy(backup.id, {}, actors.get("admin"));
+  const restoredData = await tournament.getDashboard(restored.tournamentId, actors.get("admin"));
+  assert.match(restoredData.tournament.name, /복구 사본/);
+  assert.equal(restoredData.teams.length, 2);
+  assert.equal(restoredData.matches.length, 1);
+  assert.ok(restored.accessCode.startsWith("RIFT-"));
 });
 
 test("tournament isolation, team leadership, result correction, and draft permissions", async () => {

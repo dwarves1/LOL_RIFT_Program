@@ -84,6 +84,8 @@ type Match = {
   bettingClosedAt: string | null;
   predictionCountAClosed: number | null;
   predictionCountBClosed: number | null;
+  settlementStatus: "not_required" | "ready" | "processing" | "completed" | "failed" | "reversed";
+  settlementUpdatedAt: string | null;
 };
 
 type DraftSession = {
@@ -171,6 +173,8 @@ type Dashboard = {
     highestProfit: { displayName: string; amount: number; matchId: string } | null;
     boldest: { displayName: string; crowdPercent: number; matchId: string } | null;
   };
+  backups: Array<{ id: string; kind: "automatic" | "manual"; reason: string; byteSize: number; createdBy: string; createdAt: string }>;
+  settlementSummaries: Array<{ matchId: string; state: Match["settlementStatus"]; settlementId: string | null; totalBets: number; wonBets: number; paidOut: number; errorMessage: string | null; updatedAt: string | null }>;
   ledger: Array<{
     id: string;
     type: string;
@@ -807,6 +811,8 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick
   // The lock is intentionally evaluated against wall-clock time on each refreshed render.
   // eslint-disable-next-line react-hooks/purity
   const openForPrediction = isScrim ? match.bettingStatus === "open" : isPredictionOpen(match.scheduledAt, Date.now());
+  const freeStake = isScrim ? Math.min(100, Math.max(0, stake)) : 0;
+  const paidStake = Math.max(0, stake - freeStake);
 
   if (existing) {
     return (
@@ -831,12 +837,14 @@ function PredictionBox({ match, data, teamMap, busy, command, signInPath }: Pick
           </button>
         ))}
       </div>
+      <div className="prediction-stake-guide" role="status"><span>{teamMap.get(teamId)?.name ?? "선택한 팀"}</span><b>무료 {freeStake.toLocaleString()}P · 차감 {paidStake.toLocaleString()}P</b></div>
       <div className="stake-row">
         <label><span>베팅 포인트</span><input type="number" min="10" step="10" value={stake} onChange={(event) => setStake(Number(event.target.value))} /></label>
         <button className="accent-button" disabled={busy || !teamId} onClick={() => command({ action: "create_bet", tournamentId: data.tournament!.id, matchId: match.id, teamId, stake }, "예측을 등록했습니다.")}>예측하기</button>
       </div>
       {isScrim && <div className="stake-presets">{[100, 300, 500].map((amount) => <button type="button" key={amount} onClick={() => setStake(amount)}>{amount}P</button>)}<button type="button" onClick={() => setStake((data.viewer?.pointsBalance ?? 0) + 100)}>전액</button></div>}
       <small>{isScrim ? "경기마다 무료 100P 예측권 제공 · 초과분은 시즌 지갑 사용 · 적중 시 순이익 지급" : "적중 시 베팅 포인트의 2배 지급"} · 현금 환전 불가</small>
+      <button className="accent-button prediction-submit mobile-confirm" disabled={busy || !teamId} onClick={() => { const teamName = teamMap.get(teamId)?.name ?? "선택한 팀"; if (!window.confirm(`${teamName} 승리를 ${stake.toLocaleString()}P로 예측할까요?\n무료 ${freeStake.toLocaleString()}P · 실제 차감 ${paidStake.toLocaleString()}P`)) return; void command({ action: "create_bet", tournamentId: data.tournament!.id, matchId: match.id, teamId, stake }, "예측을 등록했습니다."); }}>예측 확정</button>
     </div>
   );
 }
@@ -1451,11 +1459,25 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
     resultPending: upcoming.filter((match) => match.bettingStatus === "closed").length,
     completed: data.matches.filter((match) => match.status === "completed").length,
   };
+  const settlementIssues = data.settlementSummaries.filter((row) => row.state === "failed" || row.state === "ready" || row.state === "processing");
   return (
     <section className="page-section">
       <PageTitle eyebrow="CONTROL ROOM" title={isScrim ? "내전 운영" : "대회 운영"} description={isScrim ? "참가자 10명과 팀 구성을 등록하고 배팅을 직접 시작·종료합니다." : "경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다."} />
       <div className="admin-actions"><button className="primary-button" onClick={isScrim ? openCreateScrimMatch : openCreate}>{isScrim ? "＋ 내전 경기 생성" : "＋ 새 대회 생성"}</button>{isScrim && <button className="secondary-button" onClick={openHistoricalScrim}>지난 내전 등록</button>}<button className="secondary-button" onClick={openCreateScrim}>＋ 내전 시즌</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button><div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
       {isScrim && <><div className="operation-metric-grid"><article><span>배팅 대기</span><strong>{operations.scheduled}</strong></article><article className="live"><span>배팅 중</span><strong>{operations.open}</strong></article><article className="warning"><span>결과 대기</span><strong>{operations.resultPending}</strong></article><article><span>확정 완료</span><strong>{operations.completed}</strong></article></div><div className="operation-tools"><span>결과와 포인트를 정정하면 기존 정산을 취소하고 다시 계산합니다.</span><a className="secondary-button" href={`/api/admin/backup?tournament=${encodeURIComponent(data.tournament!.id)}`}>CSV 백업 다운로드</a></div></>}
+      <section className="operations-safety-grid">
+        <article className="panel backup-panel">
+          <div className="section-heading"><div><p className="eyebrow">DATA PROTECTION</p><h2>자동 백업 · 복구 파일</h2></div><button className="secondary-button" disabled={busy} onClick={() => command({ action: "create_tournament_backup", tournamentId: data.tournament!.id }, "백업 파일을 만들었습니다.")}>지금 백업</button></div>
+          <p className="admin-panel-help">배팅 시작·마감과 결과 수정·정산 전에는 자동 스냅샷이 생성됩니다. 자동 백업은 최신 30개까지 보관되며, 다운로드한 JSON은 복구 검토용 원본입니다.</p>
+          <div className="backup-list">{data.backups.map((backup) => <div key={backup.id}><span className={backup.kind}>{backup.kind === "automatic" ? "자동" : "수동"}</span><strong>{backup.reason}</strong><small>{formatDate(backup.createdAt)} · {(backup.byteSize / 1024).toFixed(1)}KB</small><a href={`/api/admin/backup?backup=${encodeURIComponent(backup.id)}`}>JSON</a></div>)}{!data.backups.length && <p>아직 생성된 백업이 없습니다.</p>}</div>
+        </article>
+        {data.backups[0] && <article className="panel recovery-panel"><div className="section-heading"><div><p className="eyebrow">SAFE RECOVERY</p><h2>최신 백업으로 복구 사본 만들기</h2></div></div><p className="admin-panel-help">원본 시즌은 변경하지 않습니다. 결과 이미지까지 복사한 별도 시즌을 생성해 확인한 뒤, 대회 코드로 운영진만 접근할 수 있습니다.</p><button className="secondary-button" disabled={busy} onClick={() => { if (!window.confirm(`최신 백업(${formatDate(data.backups[0].createdAt)})으로 복구 사본을 만들까요?\n원본 시즌 데이터는 변경되지 않습니다.`)) return; void command({ action: "restore_tournament_backup", backupId: data.backups[0].id }, "복구 사본을 만들었습니다. 새 대회 코드를 확인해 주세요."); }}>최신 백업 복구 사본 생성</button></article>}
+        <article className="panel settlement-panel">
+          <div className="section-heading"><div><p className="eyebrow">SETTLEMENT SAFETY</p><h2>배팅 정산 점검</h2></div><span>{settlementIssues.length}건</span></div>
+          <p className="admin-panel-help">정산은 시도 이력과 지급 내역을 남깁니다. 오류·대기 상태만 재점검할 수 있으며, 이미 완료된 정산은 중복 지급하지 않습니다.</p>
+          <div className="settlement-list">{data.settlementSummaries.filter((row) => row.totalBets || row.state !== "not_required").map((row) => { const match = data.matches.find((item) => item.id === row.matchId); const actionable = row.state === "failed" || row.state === "ready" || row.state === "processing"; return <div key={row.matchId}><span className={`settlement-state ${row.state}`}>{row.state === "completed" ? "정산 완료" : row.state === "failed" ? "오류" : row.state === "reversed" ? "정정됨" : "점검 필요"}</span><strong>{match?.roundLabel ?? "경기"}</strong><small>{row.totalBets}명 · 적중 {row.wonBets}명 · 지급 {row.paidOut.toLocaleString()}P{row.errorMessage ? ` · ${row.errorMessage}` : ""}</small>{actionable && match?.winnerId && <button className="text-button" disabled={busy} onClick={() => command({ action: "reconcile_bet_settlement", matchId: row.matchId }, "배팅 정산을 점검했습니다.")}>재점검</button>}</div>; })}{!data.settlementSummaries.some((row) => row.totalBets || row.state !== "not_required") && <p>정산 대상 경기가 없습니다.</p>}</div>
+        </article>
+      </section>
       <div className="admin-grid">
         <article className="panel schedule-confirmation-panel">
           <div className="section-heading"><div><p className="eyebrow">{isScrim ? "SCRIM BETTING" : "SCHEDULE APPROVAL"}</p><h2>{isScrim ? "내전 경기·배팅 관리" : "경기 일정 확정"}</h2></div><span>{upcoming.length}</span></div>

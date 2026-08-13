@@ -21,6 +21,10 @@ import {
   joinTournamentByCode,
   rotateTournamentCode,
   updateUserProfile,
+  createTournamentBackup,
+  reconcileBetSettlement,
+  getTournamentBackupPayload,
+  restoreTournamentBackupAsCopy,
   type CreateTournamentInput,
   type CreateScrimSeasonInput,
   type CreateScrimMatchInput,
@@ -128,6 +132,35 @@ export async function POST(request: Request) {
         user,
       );
       return Response.json({ ok: true, ...result });
+    }
+    if (action === "create_tournament_backup") {
+      const result = await createTournamentBackup(String(payload.tournamentId ?? ""), user, "manual", "운영자 수동 백업");
+      return Response.json({ ok: true, backupId: result.id });
+    }
+    if (action === "reconcile_bet_settlement") {
+      await reconcileBetSettlement(String(payload.matchId ?? ""), user);
+      return Response.json({ ok: true });
+    }
+    if (action === "restore_tournament_backup") {
+      const backupId = String(payload.backupId ?? "");
+      const { payload: backupPayload } = await getTournamentBackupPayload(backupId, user);
+      const imageRows = [...(backupPayload.tables.match_result_images ?? []), ...(backupPayload.tables.result_revisions ?? [])];
+      const objectKeyMap: Record<string, string> = {};
+      for (const row of imageRows) {
+        const sourceKey = String(row.object_key ?? "");
+        if (!sourceKey || objectKeyMap[sourceKey]) continue;
+        const object = await env.RESULT_IMAGES.get(sourceKey);
+        if (!object) throw new Error("복구에 필요한 결과 이미지를 찾을 수 없습니다.");
+        const extension = sourceKey.split(".").at(-1)?.replace(/[^a-z0-9]/gi, "") || "png";
+        const targetKey = `restored-results/${backupId}/${crypto.randomUUID()}.${extension}`;
+        await env.RESULT_IMAGES.put(targetKey, object.body, {
+          httpMetadata: { contentType: object.httpMetadata?.contentType ?? "image/png" },
+          customMetadata: { restoredFrom: sourceKey, backupId, restoredBy: user.id },
+        });
+        objectKeyMap[sourceKey] = targetKey;
+      }
+      const restored = await restoreTournamentBackupAsCopy(backupId, objectKeyMap, user);
+      return Response.json({ ok: true, ...restored });
     }
     if (action === "join_tournament") {
       const tournamentId = await joinTournamentByCode(String(payload.code ?? ""), user);

@@ -371,6 +371,26 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
   .bracket-board { min-width: 1180px; grid-template-columns: repeat(5, 220px); }.page-title h1 { font-size: 31px; }
 }
 
+@media (max-width: 800px) {
+  .operations-safety-grid { grid-template-columns: 1fr; }
+  .backup-list > div, .settlement-list > div { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .backup-list small, .settlement-list small { grid-column: 2 / -1; }
+  .prediction-box { margin-top: 4px; }
+  .prediction-options { gap: 9px; }
+  .prediction-options button { min-height: 50px; font-size: 11px; }
+  .prediction-stake-guide { margin-top: 11px; padding: 10px; font-size: 10px; }
+  .prediction-stake-guide b { font-size: 10px; text-align: right; }
+  .stake-row > .accent-button:not(.prediction-submit) { display: none; }
+  .mobile-confirm { display: flex; width: 100%; min-height: 48px; margin-top: 10px; font-size: 13px; }
+  .stake-row { grid-template-columns: 1fr; }
+  .stake-row label { min-height: 46px; }
+  .stake-row input { width: 120px; font-size: 16px; }
+  .stake-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .stake-presets button { min-height: 34px; }
+  .points-layout { gap: 12px; }
+  .open-picks > div { padding: 15px 13px; }
+}
+
 .operation-metric-grid, .betting-insight-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 14px 0; }
 .operation-metric-grid article, .betting-insight-grid article { min-width: 0; padding: 16px; border: 1px solid var(--line); background: rgba(255,255,255,.02); }
 .operation-metric-grid span, .betting-insight-grid span, .betting-insight-grid small { display: block; color: var(--muted); font-size: 10px; }
@@ -378,6 +398,11 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
 .operation-metric-grid .live { border-color: rgba(74,222,128,.35); }.operation-metric-grid .warning { border-color: rgba(251,191,36,.35); }
 .operation-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border: 1px solid var(--line); background: rgba(233,185,73,.035); }
 .operation-tools span { color: var(--muted); font-size: 11px; }.operation-tools a { text-decoration: none; }
+.operations-safety-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+.backup-panel .section-heading, .settlement-panel .section-heading { margin-bottom: 10px; }.backup-panel .secondary-button { padding: 8px 11px; font-size: 10px; }
+.backup-list, .settlement-list { display: grid; gap: 6px; }.backup-list > div, .settlement-list > div { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 9px 0; border-top: 1px solid var(--line); }.backup-list > div:first-child, .settlement-list > div:first-child { border-top: 0; }
+.backup-list span, .settlement-state { padding: 3px 6px; border-radius: 3px; background: rgba(148,163,184,.12); color: #bac6d6; font-size: 8px; font-weight: 800; white-space: nowrap; }.backup-list span.automatic { background: rgba(74,222,128,.1); color: #86efac; }.backup-list strong, .settlement-list strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }.backup-list small, .settlement-list small { grid-column: 2; color: var(--muted); font-size: 8px; }.backup-list a { color: var(--gold); font-size: 9px; font-weight: 800; }.settlement-state.completed { background: rgba(74,222,128,.1); color: #86efac; }.settlement-state.failed { background: rgba(251,113,133,.12); color: #fda4af; }.settlement-state.ready, .settlement-state.processing { background: rgba(251,191,36,.12); color: #fde68a; }.settlement-list .text-button { grid-column: 3; grid-row: 1 / span 2; }
+.prediction-stake-guide { display: flex; justify-content: space-between; gap: 8px; margin-top: 9px; padding: 8px 10px; border: 1px solid rgba(86,168,255,.24); background: rgba(86,168,255,.055); color: #b9d8fb; font-size: 9px; }.prediction-stake-guide b { color: #e8f2ff; font-size: 9px; }.mobile-confirm { display: none; }
 .player-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
 .streak-badge { display: inline-flex !important; align-items: center; width: max-content; padding: 3px 6px; border: 1px solid rgba(74,222,128,.28); border-radius: 999px; background: rgba(74,222,128,.07); color: #86efac !important; font-size: 8px !important; line-height: 1; }
 .streak-badge.loss { border-color: rgba(251,113,133,.28); background: rgba(251,113,133,.07); color: #fda4af !important; }

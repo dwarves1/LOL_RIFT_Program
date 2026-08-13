@@ -268,6 +268,22 @@ async function migrateScrimOperations(raw: D1Database) {
   ]);
 }
 
+async function migrateBackupsAndSettlements(raw: D1Database) {
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "settlement_status", "TEXT NOT NULL DEFAULT 'not_required'");
+  await addColumnIfMissing(raw, "matches", matchColumns, "settlement_updated_at", "TEXT");
+
+  const ledgerColumns = (await raw.prepare("PRAGMA table_info(point_ledger)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "point_ledger", ledgerColumns, "settlement_id", "TEXT");
+  await raw.batch([
+    raw.prepare("CREATE TABLE IF NOT EXISTS bet_settlements (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, tournament_id TEXT NOT NULL, winner_team_id TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, total_bets INTEGER NOT NULL DEFAULT 0, won_bets INTEGER NOT NULL DEFAULT 0, paid_out INTEGER NOT NULL DEFAULT 0, detail_json TEXT, error_message TEXT, started_by TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_bet_settlements_match ON bet_settlements(match_id, started_at)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_bet_settlements_tournament ON bet_settlements(tournament_id, started_at)"),
+    raw.prepare("CREATE TABLE IF NOT EXISTS tournament_backups (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, kind TEXT NOT NULL, reason TEXT NOT NULL, payload_json TEXT NOT NULL, byte_size INTEGER NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_tournament_backups_tournament ON tournament_backups(tournament_id, created_at)"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -280,13 +296,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_players_riot_account')
            OR (type = 'index' AND name = 'idx_matches_betting_status')
            OR (type = 'index' AND name = 'idx_bets_tournament_settled')
+           OR (type = 'index' AND name = 'idx_tournament_backups_tournament')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 5) return;
+        if (Number(schemaState?.marker_count ?? 0) === 6) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -302,6 +319,7 @@ export function ensureSchema(): Promise<void> {
         await migrateRegisteredRosters(raw);
         await migrateScrimSeasons(raw);
         await migrateScrimOperations(raw);
+        await migrateBackupsAndSettlements(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

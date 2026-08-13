@@ -28,6 +28,8 @@ import {
   riotAccounts,
   draftSessions,
   resultRevisions,
+  betSettlements,
+  tournamentBackups,
 } from "../db/schema";
 
 export type UserRole = "viewer" | "operator" | "admin";
@@ -301,6 +303,7 @@ async function adjustPoints(
   description: string,
   tournamentId: string,
   betId: string | null,
+  settlementId: string | null = null,
 ) {
   const db = getDb();
   const [entry] = await db
@@ -319,6 +322,7 @@ async function adjustPoints(
     userId,
     tournamentId,
     betId,
+    settlementId,
     type,
     amount,
     balanceAfter: nextBalance,
@@ -621,6 +625,223 @@ export async function createTournament(input: CreateTournamentInput, actor: Requ
   return createTournamentInternal(input, actor);
 }
 
+type BackupTableName =
+  | "tournaments" | "tournament_members" | "tournament_entries" | "teams" | "players"
+  | "matches" | "match_games" | "match_result_images" | "match_team_stats"
+  | "player_match_stats" | "result_revisions" | "draft_sessions" | "bets"
+  | "point_ledger" | "bet_settlements";
+
+type BackupPayload = {
+  version: 1;
+  createdAt: string;
+  tournamentId: string;
+  tables: Record<BackupTableName, Array<Record<string, unknown>>>;
+};
+
+const BACKUP_QUERIES: Record<BackupTableName, string> = {
+  tournaments: "SELECT * FROM tournaments WHERE id = ?",
+  tournament_members: "SELECT * FROM tournament_members WHERE tournament_id = ?",
+  tournament_entries: "SELECT * FROM tournament_entries WHERE tournament_id = ?",
+  teams: "SELECT * FROM teams WHERE tournament_id = ?",
+  players: "SELECT p.* FROM players p JOIN teams t ON t.id = p.team_id WHERE t.tournament_id = ?",
+  matches: "SELECT * FROM matches WHERE tournament_id = ?",
+  match_games: "SELECT g.* FROM match_games g JOIN matches m ON m.id = g.match_id WHERE m.tournament_id = ?",
+  match_result_images: "SELECT i.* FROM match_result_images i JOIN matches m ON m.id = i.match_id WHERE m.tournament_id = ?",
+  match_team_stats: "SELECT s.* FROM match_team_stats s JOIN matches m ON m.id = s.match_id WHERE m.tournament_id = ?",
+  player_match_stats: "SELECT s.* FROM player_match_stats s JOIN matches m ON m.id = s.match_id WHERE m.tournament_id = ?",
+  result_revisions: "SELECT r.* FROM result_revisions r JOIN matches m ON m.id = r.match_id WHERE m.tournament_id = ?",
+  draft_sessions: "SELECT * FROM draft_sessions WHERE tournament_id = ?",
+  bets: "SELECT * FROM bets WHERE tournament_id = ?",
+  point_ledger: "SELECT * FROM point_ledger WHERE tournament_id = ?",
+  bet_settlements: "SELECT * FROM bet_settlements WHERE tournament_id = ?",
+};
+
+async function makeBackupPayload(tournamentId: string): Promise<BackupPayload> {
+  const raw = getRawDb();
+  const tables = {} as BackupPayload["tables"];
+  for (const table of Object.keys(BACKUP_QUERIES) as BackupTableName[]) {
+    const result = await raw.prepare(BACKUP_QUERIES[table]).bind(tournamentId).all<Record<string, unknown>>();
+    tables[table] = result.results ?? [];
+  }
+  if (!tables.tournaments.length) throw new Error("백업할 시즌을 찾을 수 없습니다.");
+  return { version: 1, createdAt: new Date().toISOString(), tournamentId, tables };
+}
+
+async function trimAutomaticBackups(tournamentId: string) {
+  const raw = getRawDb();
+  await raw.prepare(`
+    DELETE FROM tournament_backups
+    WHERE id IN (
+      SELECT id FROM tournament_backups
+      WHERE tournament_id = ? AND kind = 'automatic'
+      ORDER BY created_at DESC
+      LIMIT -1 OFFSET 30
+    )
+  `).bind(tournamentId).run();
+}
+
+export async function createTournamentBackup(
+  tournamentId: string,
+  actor: RequestUser,
+  kind: "automatic" | "manual" = "manual",
+  reason = "운영자 수동 백업",
+) {
+  if (!isStaff(actor) || !(await hasTournamentAccess(actor, tournamentId))) {
+    throw new Error("운영자나 관리자만 백업을 만들 수 있습니다.");
+  }
+  return persistTournamentBackup(tournamentId, actor, kind, reason);
+}
+
+async function persistTournamentBackup(
+  tournamentId: string,
+  actor: Actor,
+  kind: "automatic" | "manual",
+  reason: string,
+) {
+  const payload = await makeBackupPayload(tournamentId);
+  const payloadJson = JSON.stringify(payload);
+  const id = uid("backup");
+  await getDb().insert(tournamentBackups).values({
+    id,
+    tournamentId,
+    kind,
+    reason,
+    payloadJson,
+    byteSize: new TextEncoder().encode(payloadJson).byteLength,
+    createdBy: actor.id,
+  });
+  if (kind === "automatic") await trimAutomaticBackups(tournamentId);
+  await audit(actor, kind === "automatic" ? "automatic_backup_created" : "manual_backup_created", "backup", id, tournamentId, null, { reason, byteSize: new TextEncoder().encode(payloadJson).byteLength });
+  return { id, createdAt: payload.createdAt };
+}
+
+async function createAutomaticBackup(tournamentId: string, actor: RequestUser, reason: string) {
+  return persistTournamentBackup(tournamentId, actor, "automatic", reason);
+}
+
+export async function getTournamentBackupPayload(backupId: string, actor: RequestUser) {
+  const [backup] = await getDb().select().from(tournamentBackups).where(eq(tournamentBackups.id, backupId)).limit(1);
+  if (!backup || !isStaff(actor) || !(await hasTournamentAccess(actor, backup.tournamentId))) {
+    throw new Error("백업 파일을 확인할 권한이 없습니다.");
+  }
+  let payload: BackupPayload;
+  try {
+    payload = JSON.parse(backup.payloadJson) as BackupPayload;
+  } catch {
+    throw new Error("백업 파일 형식이 올바르지 않습니다.");
+  }
+  if (payload.version !== 1 || payload.tournamentId !== backup.tournamentId) throw new Error("백업 파일 검증에 실패했습니다.");
+  return { backup, payload };
+}
+
+function snapshotRows(payload: BackupPayload, table: BackupTableName) {
+  return payload.tables[table] ?? [];
+}
+
+function snapshotIdMap(rows: Array<Record<string, unknown>>, prefix: string) {
+  return new Map(rows.map((row) => [String(row.id), uid(prefix)]));
+}
+
+function remapSnapshotSource(value: unknown, teamIds: Map<string, string>) {
+  const source = typeof value === "string" ? value : null;
+  if (!source?.startsWith("seed:")) return source;
+  return `seed:${teamIds.get(source.slice(5)) ?? source.slice(5)}`;
+}
+
+async function insertSnapshotRows(table: string, rows: Array<Record<string, unknown>>) {
+  const raw = getRawDb();
+  const allowed = new Set<BackupTableName>([
+    "tournaments", "tournament_members", "tournament_entries", "teams", "players", "matches", "match_games",
+    "match_result_images", "match_team_stats", "player_match_stats", "result_revisions", "draft_sessions", "bets",
+    "point_ledger", "bet_settlements",
+  ]);
+  if (!allowed.has(table as BackupTableName)) throw new Error("지원하지 않는 복구 데이터입니다.");
+  for (const row of rows) {
+    const columns = Object.keys(row).filter((column) => /^[a-z_]+$/.test(column));
+    if (!columns.length) continue;
+    const statement = `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`;
+    await raw.prepare(statement).bind(...columns.map((column) => row[column] ?? null)).run();
+  }
+}
+
+export async function restoreTournamentBackupAsCopy(
+  backupId: string,
+  imageObjectKeys: Record<string, string>,
+  actor: RequestUser,
+) {
+  const { backup, payload } = await getTournamentBackupPayload(backupId, actor);
+  const original = snapshotRows(payload, "tournaments")[0];
+  if (!original) throw new Error("복구할 시즌 정보가 없습니다.");
+  const tournamentId = uid("restored");
+  const accessCode = issueAccessCode();
+  const restoredAt = new Date().toISOString();
+  const teamRows = snapshotRows(payload, "teams");
+  const matchRows = snapshotRows(payload, "matches");
+  const playerRows = snapshotRows(payload, "players");
+  const gameRows = snapshotRows(payload, "match_games");
+  const imageRows = snapshotRows(payload, "match_result_images");
+  const teamStatRows = snapshotRows(payload, "match_team_stats");
+  const playerStatRows = snapshotRows(payload, "player_match_stats");
+  const revisionRows = snapshotRows(payload, "result_revisions");
+  const draftRows = snapshotRows(payload, "draft_sessions");
+  const betRows = snapshotRows(payload, "bets");
+  const ledgerRows = snapshotRows(payload, "point_ledger");
+  const settlementRows = snapshotRows(payload, "bet_settlements");
+  const teamIds = snapshotIdMap(teamRows, "restore_team");
+  const matchIds = snapshotIdMap(matchRows, "restore_match");
+  const playerIds = snapshotIdMap(playerRows, "restore_player");
+  const gameIds = snapshotIdMap(gameRows, "restore_game");
+  const imageIds = snapshotIdMap(imageRows, "restore_image");
+  const revisionIds = snapshotIdMap(revisionRows, "restore_revision");
+  const draftIds = snapshotIdMap(draftRows, "restore_draft");
+  const betIds = snapshotIdMap(betRows, "restore_bet");
+  const ledgerIds = snapshotIdMap(ledgerRows, "restore_ledger");
+  const settlementIds = snapshotIdMap(settlementRows, "restore_settlement");
+  const mapTeam = (value: unknown) => value == null ? null : (teamIds.get(String(value)) ?? null);
+  const mapMatch = (value: unknown) => value == null ? null : (matchIds.get(String(value)) ?? null);
+
+  await insertSnapshotRows("tournaments", [{
+    ...original,
+    id: tournamentId,
+    name: `${String(original.name)} · 복구 사본`,
+    access_code_hash: await hashAccessCode(accessCode),
+    access_code_hint: accessCode.slice(-4),
+    access_code_updated_at: restoredAt,
+    created_by: actor.id,
+    created_at: restoredAt,
+  }]);
+  await insertSnapshotRows("tournament_members", snapshotRows(payload, "tournament_members").map((row) => ({ ...row, tournament_id: tournamentId })));
+  const raw = getRawDb();
+  await raw.prepare("INSERT OR IGNORE INTO tournament_members (tournament_id, user_id, role) VALUES (?, ?, 'owner')").bind(tournamentId, actor.id).run();
+  await raw.prepare("UPDATE tournament_members SET role = 'owner', team_id = NULL WHERE tournament_id = ? AND user_id = ?").bind(tournamentId, actor.id).run();
+  await insertSnapshotRows("tournament_entries", snapshotRows(payload, "tournament_entries").map((row) => ({ ...row, tournament_id: tournamentId })));
+  await insertSnapshotRows("teams", teamRows.map((row) => ({
+    ...row, id: teamIds.get(String(row.id)), tournament_id: tournamentId, match_id: mapMatch(row.match_id),
+  })));
+  await insertSnapshotRows("matches", matchRows.map((row) => ({
+    ...row,
+    id: matchIds.get(String(row.id)),
+    tournament_id: tournamentId,
+    team_a_id: mapTeam(row.team_a_id), team_b_id: mapTeam(row.team_b_id),
+    winner_id: mapTeam(row.winner_id), loser_id: mapTeam(row.loser_id),
+    source_a: remapSnapshotSource(row.source_a, teamIds), source_b: remapSnapshotSource(row.source_b, teamIds),
+    betting_status: row.status === "completed" ? row.betting_status : "closed",
+    schedule_confirmed: row.status === "completed" ? row.schedule_confirmed : 0,
+  })));
+  await insertSnapshotRows("players", playerRows.map((row) => ({ ...row, id: playerIds.get(String(row.id)), team_id: mapTeam(row.team_id) })));
+  await insertSnapshotRows("match_games", gameRows.map((row) => ({ ...row, id: gameIds.get(String(row.id)), match_id: mapMatch(row.match_id), blue_team_id: mapTeam(row.blue_team_id), red_team_id: mapTeam(row.red_team_id), winner_team_id: mapTeam(row.winner_team_id) })));
+  await insertSnapshotRows("match_result_images", imageRows.map((row) => ({ ...row, id: imageIds.get(String(row.id)), match_id: mapMatch(row.match_id), object_key: imageObjectKeys[String(row.object_key)] ?? String(row.object_key), image_hash: null })));
+  await insertSnapshotRows("match_team_stats", teamStatRows.map((row) => ({ ...row, match_id: mapMatch(row.match_id), team_id: mapTeam(row.team_id) })));
+  await insertSnapshotRows("player_match_stats", playerStatRows.map((row) => ({ ...row, id: uid("restore_player_stat"), match_id: mapMatch(row.match_id), team_id: mapTeam(row.team_id) })));
+  await insertSnapshotRows("result_revisions", revisionRows.map((row) => ({ ...row, id: revisionIds.get(String(row.id)), match_id: mapMatch(row.match_id), object_key: imageObjectKeys[String(row.object_key)] ?? String(row.object_key) })));
+  await insertSnapshotRows("draft_sessions", draftRows.map((row) => ({ ...row, id: draftIds.get(String(row.id)), tournament_id: tournamentId, match_id: mapMatch(row.match_id), blue_team_id: mapTeam(row.blue_team_id), red_team_id: mapTeam(row.red_team_id) })));
+  await insertSnapshotRows("bets", betRows.map((row) => ({ ...row, id: betIds.get(String(row.id)), tournament_id: tournamentId, match_id: mapMatch(row.match_id), team_id: mapTeam(row.team_id) })));
+  await insertSnapshotRows("bet_settlements", settlementRows.map((row) => ({ ...row, id: settlementIds.get(String(row.id)), tournament_id: tournamentId, match_id: mapMatch(row.match_id), winner_team_id: mapTeam(row.winner_team_id) ?? String(row.winner_team_id) })));
+  await insertSnapshotRows("point_ledger", ledgerRows.map((row) => ({ ...row, id: ledgerIds.get(String(row.id)), tournament_id: tournamentId, bet_id: row.bet_id == null ? null : (betIds.get(String(row.bet_id)) ?? null), settlement_id: row.settlement_id == null ? null : (settlementIds.get(String(row.settlement_id)) ?? null) })));
+  await audit(actor, "backup_restored_as_copy", "tournament", tournamentId, tournamentId, null, { sourceBackupId: backup.id, sourceTournamentId: backup.tournamentId });
+  return { tournamentId, accessCode };
+}
+
 export type CreateScrimSeasonInput = {
   name: string;
   startAt: string;
@@ -769,6 +990,7 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) throw new Error("진행 전인 내전 경기만 배팅 상태를 변경할 수 있습니다.");
   if (nextStatus === "open" && match.bettingStatus === "open") return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
   if (nextStatus === "closed" && match.bettingStatus !== "open") throw new Error("현재 배팅이 진행 중인 경기가 아닙니다.");
+  await createAutomaticBackup(match.tournamentId, actor, nextStatus === "open" ? "배팅 시작 전 자동 백업" : "배팅 마감 전 자동 백업");
   const now = new Date().toISOString();
   let predictionCountAClosed: number | null = null;
   let predictionCountBClosed: number | null = null;
@@ -781,8 +1003,8 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
     predictionCountBClosed = Number(counts.find((row) => row.teamId === match.teamBId)?.count ?? 0);
   }
   await db.update(matches).set(nextStatus === "open"
-    ? { bettingStatus: "open", bettingOpenedAt: now, bettingClosedAt: null, predictionCountAClosed: null, predictionCountBClosed: null }
-    : { bettingStatus: "closed", bettingClosedAt: now, predictionCountAClosed, predictionCountBClosed }
+    ? { bettingStatus: "open", bettingOpenedAt: now, bettingClosedAt: null, predictionCountAClosed: null, predictionCountBClosed: null, settlementStatus: "not_required" as const, settlementUpdatedAt: now }
+    : { bettingStatus: "closed", bettingClosedAt: now, predictionCountAClosed, predictionCountBClosed, settlementStatus: "ready" as const, settlementUpdatedAt: now }
   ).where(eq(matches.id, match.id));
   await audit(actor, nextStatus === "open" ? "scrim_betting_opened" : "scrim_betting_closed", "match", match.id, match.tournamentId, {
     bettingStatus: match.bettingStatus,
@@ -1211,8 +1433,9 @@ function resolveSource(
   return kind === "winner" ? (result?.winnerId ?? null) : (result?.loserId ?? null);
 }
 
-async function rollbackBets(matchId: string, refundStake: boolean) {
+async function rollbackBets(matchId: string, refundStake: boolean, actor?: Actor) {
   const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   const activeBets = await db
     .select()
     .from(bets)
@@ -1243,17 +1466,64 @@ async function rollbackBets(matchId: string, refundStake: boolean) {
       .set({ status: refundStake ? "refunded" : "pending", payout: 0, settledAt: null })
       .where(eq(bets.id, bet.id));
   }
+  if (match && actor && activeBets.length) {
+    await db.insert(betSettlements).values({
+      id: uid("settlement"),
+      matchId,
+      tournamentId: match.tournamentId,
+      winnerTeamId: match.winnerId ?? "corrected",
+      kind: "reversal",
+      status: "reversed",
+      totalBets: activeBets.length,
+      wonBets: activeBets.filter((bet) => bet.status === "won").length,
+      paidOut: activeBets.filter((bet) => bet.status === "won").reduce((sum, bet) => sum + bet.payout, 0),
+      detailJson: JSON.stringify({ refundStake }),
+      startedBy: actor.id,
+      completedAt: new Date().toISOString(),
+    });
+    await db.update(matches).set({ settlementStatus: "reversed", settlementUpdatedAt: new Date().toISOString() }).where(eq(matches.id, matchId));
+  }
 }
 
-async function settleBets(matchId: string, winnerId: string) {
+async function settleBets(matchId: string, winnerId: string, actor: Actor) {
   const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match) throw new Error("정산할 경기를 찾을 수 없습니다.");
   const pending = await db
     .select()
     .from(bets)
     .where(and(eq(bets.matchId, matchId), eq(bets.status, "pending")));
+  const settlementId = uid("settlement");
+  const settledAt = new Date().toISOString();
+  await db.insert(betSettlements).values({
+    id: settlementId,
+    matchId,
+    tournamentId: match.tournamentId,
+    winnerTeamId: winnerId,
+    kind: "settlement",
+    status: "processing",
+    totalBets: pending.length,
+    startedBy: actor.id,
+  });
+  await db.update(matches).set({ settlementStatus: "processing", settlementUpdatedAt: settledAt }).where(eq(matches.id, matchId));
+  let wonBets = 0;
+  let paidOut = 0;
+  try {
   for (const bet of pending) {
     if (bet.teamId === winnerId) {
       const payout = bet.paidStake * 2 + bet.freeStake;
+      const priorPayoutRows = await db.select({ amount: pointLedger.amount, type: pointLedger.type })
+        .from(pointLedger)
+        .where(eq(pointLedger.betId, bet.id));
+      const alreadyPaid = priorPayoutRows
+        .filter((row) => row.type === "bet_win" || row.type === "settlement_reversed")
+        .reduce((sum, row) => sum + row.amount, 0);
+      if (alreadyPaid >= payout) {
+        await db.update(bets).set({ status: "won", payout, settledAt }).where(and(eq(bets.id, bet.id), eq(bets.status, "pending")));
+        wonBets += 1;
+        paidOut += payout;
+        continue;
+      }
       await adjustPoints(
         bet.userId,
         payout,
@@ -1261,18 +1531,50 @@ async function settleBets(matchId: string, winnerId: string) {
         "승리팀 예측 적중",
         bet.tournamentId,
         bet.id,
+        settlementId,
       );
       await db
         .update(bets)
-        .set({ status: "won", payout, settledAt: new Date().toISOString() })
-        .where(eq(bets.id, bet.id));
+        .set({ status: "won", payout, settledAt })
+        .where(and(eq(bets.id, bet.id), eq(bets.status, "pending")));
+      wonBets += 1;
+      paidOut += payout;
     } else {
       await db
         .update(bets)
-        .set({ status: "lost", payout: 0, settledAt: new Date().toISOString() })
-        .where(eq(bets.id, bet.id));
+        .set({ status: "lost", payout: 0, settledAt })
+        .where(and(eq(bets.id, bet.id), eq(bets.status, "pending")));
     }
   }
+    await db.update(betSettlements).set({
+      status: "completed",
+      wonBets,
+      paidOut,
+      completedAt: new Date().toISOString(),
+      detailJson: JSON.stringify({ pendingBetIds: pending.map((bet) => bet.id) }),
+    }).where(eq(betSettlements.id, settlementId));
+    await db.update(matches).set({ settlementStatus: "completed", settlementUpdatedAt: new Date().toISOString() }).where(eq(matches.id, matchId));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 정산 오류";
+    await db.update(betSettlements).set({ status: "failed", errorMessage: message, completedAt: new Date().toISOString() }).where(eq(betSettlements.id, settlementId));
+    await db.update(matches).set({ settlementStatus: "failed", settlementUpdatedAt: new Date().toISOString() }).where(eq(matches.id, matchId));
+    throw error;
+  }
+}
+
+export async function reconcileBetSettlement(matchId: string, actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || !match.winnerId) throw new Error("결과가 확정된 경기만 정산을 점검할 수 있습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  const [pending] = await db.select({ count: sql<number>`count(*)` }).from(bets).where(and(eq(bets.matchId, match.id), eq(bets.status, "pending")));
+  if (Number(pending?.count ?? 0) > 0) {
+    await createAutomaticBackup(match.tournamentId, actor, "정산 재시도 전 자동 백업");
+    await settleBets(match.id, match.winnerId, actor);
+  } else {
+    await db.update(matches).set({ settlementStatus: "completed", settlementUpdatedAt: new Date().toISOString() }).where(eq(matches.id, match.id));
+  }
+  await audit(actor, "bet_settlement_reconciled", "match", match.id, match.tournamentId, { pendingBets: Number(pending?.count ?? 0) }, { settlementStatus: "completed" });
 }
 
 async function propagateBracket(tournamentId: string) {
@@ -1315,6 +1617,7 @@ export async function setMatchWinner(
   winnerId: string,
   actor: RequestUser,
   fromDetailedResult = false,
+  skipAutomaticBackup = false,
 ) {
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
@@ -1330,8 +1633,10 @@ export async function setMatchWinner(
   }
   if (match.winnerId === winnerId) return;
 
+  if (!skipAutomaticBackup) await createAutomaticBackup(match.tournamentId, actor, "경기 결과 확정 전 자동 백업");
+
   const loserId = match.teamAId === winnerId ? match.teamBId : match.teamAId;
-  if (match.status === "completed") await rollbackBets(match.id, false);
+  if (match.status === "completed") await rollbackBets(match.id, false, actor);
   const scoreA = match.teamAId === winnerId ? 1 : 0;
   const scoreB = match.teamBId === winnerId ? 1 : 0;
   if (match.bestOf === 1) {
@@ -1350,12 +1655,17 @@ export async function setMatchWinner(
       status: "completed",
       winnerId,
       loserId,
-      ...(match.phase === "scrim" ? { bettingStatus: "settled" as const } : {}),
+      ...(match.phase === "scrim" ? { bettingStatus: "closed" as const } : {}),
+      settlementStatus: "ready",
+      settlementUpdatedAt: new Date().toISOString(),
       ...(match.bestOf === 1 ? { seriesScoreA: scoreA, seriesScoreB: scoreB } : {}),
       completedAt: new Date().toISOString(),
     })
     .where(eq(matches.id, match.id));
-  await settleBets(match.id, winnerId);
+  await settleBets(match.id, winnerId, actor);
+  if (match.phase === "scrim") {
+    await db.update(matches).set({ bettingStatus: "settled" }).where(eq(matches.id, match.id));
+  }
   if (match.phase === "bracket") await propagateBracket(match.tournamentId);
   if (match.matchNo === "F") {
     await db.update(tournaments).set({ status: "completed" }).where(eq(tournaments.id, match.tournamentId));
@@ -1466,6 +1776,9 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     throw new Error("이미 등록된 결과 이미지입니다. 기존 경기 기록을 확인해 주세요.");
   }
   if (previousImage && !isStaff(actor)) throw new Error("등록된 세트 결과는 운영자나 관리자만 정정할 수 있습니다.");
+  if (previousImage || match.status === "completed") {
+    await createAutomaticBackup(match.tournamentId, actor, "경기 결과 수정 전 자동 백업");
+  }
   const reviewedAt = new Date().toISOString();
   const imageValues = {
     objectKey: input.image.objectKey,
@@ -1553,9 +1866,9 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const winsNeeded = Math.ceil(match.bestOf / 2);
   await db.update(matches).set({ seriesScoreA: scoreA, seriesScoreB: scoreB }).where(eq(matches.id, match.id));
   if (scoreA >= winsNeeded || scoreB >= winsNeeded) {
-    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor, true);
+    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor, true, true);
   } else if (match.status === "completed") {
-    await rollbackBets(match.id, false);
+    await rollbackBets(match.id, false, actor);
     await db.update(matches).set({
       status: "scheduled",
       winnerId: null,
@@ -1799,6 +2112,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       bets: [],
       predictionSummaries: [],
       bettingInsights: { rankings: [], streaks: [], highestProfit: null, boldest: null },
+      backups: [],
+      settlementSummaries: [],
       ledger: [],
       leaderboard: [],
       audit: [],
@@ -1945,6 +2260,30 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
         .orderBy(asc(users.displayName)))
         .map((user) => ({ ...user, pointsBalance: user.pointsBalance ?? 0 }))
     : [];
+  const [backupRows, settlementRows] = requestUser && isStaff(requestUser)
+    ? await Promise.all([
+      db.select({
+        id: tournamentBackups.id,
+        kind: tournamentBackups.kind,
+        reason: tournamentBackups.reason,
+        byteSize: tournamentBackups.byteSize,
+        createdBy: tournamentBackups.createdBy,
+        createdAt: tournamentBackups.createdAt,
+      }).from(tournamentBackups).where(eq(tournamentBackups.tournamentId, selected.id)).orderBy(desc(tournamentBackups.createdAt)).limit(12),
+      db.select({
+        id: betSettlements.id,
+        matchId: betSettlements.matchId,
+        kind: betSettlements.kind,
+        status: betSettlements.status,
+        totalBets: betSettlements.totalBets,
+        wonBets: betSettlements.wonBets,
+        paidOut: betSettlements.paidOut,
+        errorMessage: betSettlements.errorMessage,
+        startedAt: betSettlements.startedAt,
+        completedAt: betSettlements.completedAt,
+      }).from(betSettlements).where(eq(betSettlements.tournamentId, selected.id)).orderBy(desc(betSettlements.startedAt)).limit(80),
+    ])
+    : [[], []];
 
   const leagueMatches = matchRows.filter((match) => match.phase === "league");
   const bracketMatches = matchRows.filter((match) => match.phase === "bracket");
@@ -2024,6 +2363,19 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     const chosenCount = bet.teamId === match?.teamAId ? countA : countB;
     return { ...bet, crowdPercent: total ? Math.round(chosenCount / total * 100) : 50 };
   }).sort((a, b) => a.crowdPercent - b.crowdPercent || b.stake - a.stake)[0] ?? null;
+  const settlementSummaries = matchRows.map((match) => {
+    const latest = settlementRows.find((row) => row.matchId === match.id && row.kind === "settlement") ?? null;
+    return {
+      matchId: match.id,
+      state: match.settlementStatus,
+      settlementId: latest?.id ?? null,
+      totalBets: latest?.totalBets ?? 0,
+      wonBets: latest?.wonBets ?? 0,
+      paidOut: latest?.paidOut ?? 0,
+      errorMessage: latest?.errorMessage ?? null,
+      updatedAt: latest?.completedAt ?? latest?.startedAt ?? match.settlementUpdatedAt ?? null,
+    };
+  });
 
   return {
     viewer: requestUser,
@@ -2060,6 +2412,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       highestProfit: highestProfitBet ? { displayName: highestProfitBet.displayName, amount: highestProfitBet.payout - highestProfitBet.paidStake, matchId: highestProfitBet.matchId } : null,
       boldest: boldestBet ? { displayName: boldestBet.displayName, crowdPercent: boldestBet.crowdPercent, matchId: boldestBet.matchId } : null,
     },
+    backups: backupRows,
+    settlementSummaries,
     ledger: ledgerRows,
     leaderboard: leaderboardRows,
     audit: auditRows,

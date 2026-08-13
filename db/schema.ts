@@ -293,6 +293,10 @@ export const matches = sqliteTable(
     bettingClosedAt: text("betting_closed_at"),
     predictionCountAClosed: integer("prediction_count_a_closed"),
     predictionCountBClosed: integer("prediction_count_b_closed"),
+    settlementStatus: text("settlement_status", {
+      enum: ["not_required", "ready", "processing", "completed", "failed", "reversed"],
+    }).notNull().default("not_required"),
+    settlementUpdatedAt: text("settlement_updated_at"),
     status: text("status", { enum: ["scheduled", "completed"] })
       .notNull()
       .default("scheduled"),
@@ -435,6 +439,7 @@ export const pointLedger = sqliteTable(
     userId: text("user_id").notNull(),
     tournamentId: text("tournament_id"),
     betId: text("bet_id"),
+    settlementId: text("settlement_id"),
     type: text("type").notNull(),
     amount: integer("amount").notNull(),
     balanceAfter: integer("balance_after").notNull(),
@@ -444,6 +449,47 @@ export const pointLedger = sqliteTable(
   (table) => [
     index("idx_ledger_user_created").on(table.userId, table.createdAt),
     index("idx_ledger_tournament_user_created").on(table.tournamentId, table.userId, table.createdAt),
+  ],
+);
+
+export const betSettlements = sqliteTable(
+  "bet_settlements",
+  {
+    id: text("id").primaryKey(),
+    matchId: text("match_id").notNull(),
+    tournamentId: text("tournament_id").notNull(),
+    winnerTeamId: text("winner_team_id").notNull(),
+    kind: text("kind", { enum: ["settlement", "reversal", "reconciliation"] }).notNull(),
+    status: text("status", { enum: ["processing", "completed", "failed", "reversed"] }).notNull(),
+    totalBets: integer("total_bets").notNull().default(0),
+    wonBets: integer("won_bets").notNull().default(0),
+    paidOut: integer("paid_out").notNull().default(0),
+    detailJson: text("detail_json"),
+    errorMessage: text("error_message"),
+    startedBy: text("started_by").notNull(),
+    startedAt: text("started_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("idx_bet_settlements_match").on(table.matchId, table.startedAt),
+    index("idx_bet_settlements_tournament").on(table.tournamentId, table.startedAt),
+  ],
+);
+
+export const tournamentBackups = sqliteTable(
+  "tournament_backups",
+  {
+    id: text("id").primaryKey(),
+    tournamentId: text("tournament_id").notNull(),
+    kind: text("kind", { enum: ["automatic", "manual"] }).notNull(),
+    reason: text("reason").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_tournament_backups_tournament").on(table.tournamentId, table.createdAt),
   ],
 );
 
