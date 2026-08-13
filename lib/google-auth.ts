@@ -118,6 +118,15 @@ function cookie(name: string, value: string, maxAge: number, path: string, secur
   return `${name}=${value}; Path=${path}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
 }
 
+// Response.redirect() returns an immutable Headers object in Cloudflare
+// Workers. OAuth redirects need Set-Cookie, so construct the response with
+// mutable headers from the outset.
+export function redirectWithCookies(url: URL | string, cookies: string[] = []) {
+  const headers = new Headers({ location: String(url), "cache-control": "no-store" });
+  for (const value of cookies) headers.append("set-cookie", value);
+  return new Response(null, { status: 302, headers });
+}
+
 function safeReturnTo(value: string | null) {
   if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";
   try {
@@ -177,10 +186,9 @@ export async function startGoogleLogin(request: Request) {
     code_challenge_method: "S256",
     prompt: "select_account",
   }).toString();
-  const response = Response.redirect(authorizationUrl, 302);
-  response.headers.append("set-cookie", cookie(GOOGLE_STATE_COOKIE, await signPayload(state, config.sessionSecret), 600, "/api/auth/google"));
-  response.headers.set("cache-control", "no-store");
-  return response;
+  return redirectWithCookies(authorizationUrl, [
+    cookie(GOOGLE_STATE_COOKIE, await signPayload(state, config.sessionSecret), 600, "/api/auth/google"),
+  ]);
 }
 
 export async function completeGoogleLogin(request: Request): Promise<{ identity: GoogleIdentity; returnTo: string; sessionCookie: string; clearStateCookie: string }> {
@@ -243,8 +251,8 @@ export async function currentSessionUserId(request: Request) {
 }
 
 export function signOutResponse(request: Request) {
-  const response = Response.redirect(new URL(safeReturnTo(new URL(request.url).searchParams.get("return_to")), request.url), 302);
-  response.headers.append("set-cookie", cookie(APP_SESSION_COOKIE, "", 0, "/"));
-  response.headers.set("cache-control", "no-store");
-  return response;
+  return redirectWithCookies(
+    new URL(safeReturnTo(new URL(request.url).searchParams.get("return_to")), request.url),
+    [cookie(APP_SESSION_COOKIE, "", 0, "/")],
+  );
 }
