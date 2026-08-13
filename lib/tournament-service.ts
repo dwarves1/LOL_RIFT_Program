@@ -988,6 +988,9 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
   if (accounts.length !== 10 || new Set(accounts.map((account) => account.userId)).size !== 10) {
     throw new Error("한 회원은 한 경기에서 하나의 롤 계정으로만 참가할 수 있습니다.");
   }
+  if (accounts.some((account) => !account.isPrimary)) {
+    throw new Error("내전 참가자는 각 회원의 본계정만 선택할 수 있습니다.");
+  }
   const memberRows = await db.select({ userId: tournamentMembers.userId }).from(tournamentMembers).where(and(
     eq(tournamentMembers.tournamentId, tournament.id),
     inArray(tournamentMembers.userId, accounts.map((account) => account.userId)),
@@ -1051,6 +1054,89 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
     historical: Boolean(input.historical),
   });
   return { matchId, sharePath: `/scrim/${encodeURIComponent(tournament.id)}/bet/${encodeURIComponent(matchId)}` };
+}
+
+function testPlayerDefinition(scope: "league" | "scrim", index: number) {
+  const number = String(index).padStart(2, "0");
+  const koreanScope = scope === "scrim" ? "내전" : "리그";
+  const id = `test_${scope}_${number}`;
+  const gameName = `${koreanScope}테스트${number}`;
+  const tagline = `${scope === "scrim" ? "SCR" : "LEA"}${number}`;
+  return {
+    id,
+    accountId: `riot_${id}`,
+    email: `${scope}-test-${number}@lolrift.invalid`,
+    displayName: `${gameName}#${tagline}(테스트 선수)`,
+    realName: `${koreanScope} 테스트 ${number}`,
+    gameName,
+    tagline,
+  };
+}
+
+export async function seedTestPlayers(actor: RequestUser) {
+  if (actor.role !== "admin" && !actor.isLocalDemo) throw new Error("관리자만 테스트 선수를 생성할 수 있습니다.");
+  const db = getDb();
+  const allTournaments = await db.select().from(tournaments).orderBy(desc(tournaments.startAt));
+  const targetByScope = {
+    league: allTournaments.find((item) => item.competitionKind === "tournament") ?? null,
+    scrim: allTournaments.find((item) => item.competitionKind === "scrim_season") ?? null,
+  };
+  const now = new Date().toISOString();
+  const statements = [];
+
+  for (const scope of ["league", "scrim"] as const) {
+    const target = targetByScope[scope];
+    for (let index = 1; index <= 20; index += 1) {
+      const player = testPlayerDefinition(scope, index);
+      statements.push(
+        db.insert(users).values({
+          id: player.id,
+          email: player.email,
+          displayName: player.displayName,
+          authDisplayName: "테스트 선수",
+          realName: player.realName,
+          riotGameName: player.gameName,
+          riotTagline: player.tagline,
+          riotGameNameNormalized: normalizeIdentityPart(player.gameName),
+          riotTaglineNormalized: normalizeIdentityPart(player.tagline),
+          profileCompletedAt: now,
+          profileUpdatedAt: now,
+          role: "viewer",
+          pointsBalance: 0,
+        }).onConflictDoNothing(),
+        db.insert(riotAccounts).values({
+          id: player.accountId,
+          userId: player.id,
+          gameName: player.gameName,
+          tagline: player.tagline,
+          gameNameNormalized: normalizeIdentityPart(player.gameName),
+          taglineNormalized: normalizeIdentityPart(player.tagline),
+          isPrimary: true,
+          createdAt: now,
+          updatedAt: now,
+        }).onConflictDoNothing(),
+      );
+      if (target) {
+        statements.push(db.insert(tournamentMembers).values({
+          tournamentId: target.id,
+          userId: player.id,
+          role: "viewer",
+        }).onConflictDoNothing());
+      }
+    }
+  }
+
+  if (statements.length) await db.batch(statements as never);
+  await audit(actor, "test_players_seeded", "test_players", "league_scrim_20_each", null, null, {
+    leagueTournamentId: targetByScope.league?.id ?? null,
+    scrimTournamentId: targetByScope.scrim?.id ?? null,
+    leaguePlayers: 20,
+    scrimPlayers: 20,
+  });
+  return {
+    leagueTournamentName: targetByScope.league?.name ?? null,
+    scrimTournamentName: targetByScope.scrim?.name ?? null,
+  };
 }
 
 export async function setScrimBetting(matchId: string, nextStatus: "open" | "closed", actor: RequestUser) {
@@ -1865,31 +1951,14 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     createdBy: actor.id,
     reviewedAt,
   };
-  if (previousImage) {
-    const previousTeamStats = await db.select().from(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo)));
-    const previousPlayerStats = await db.select().from(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo)));
-    await db.insert(resultRevisions).values({
-      id: uid("result_revision"),
-      matchId: match.id,
-      setNo,
-      objectKey: previousImage.objectKey,
-      snapshotJson: JSON.stringify({ image: previousImage, teams: previousTeamStats, players: previousPlayerStats }),
-      createdBy: actor.id,
-    });
-    await db.update(matchResultImages).set(imageValues).where(eq(matchResultImages.id, previousImage.id));
-  } else {
-    await db.insert(matchResultImages).values({
-      id: uid("result_image"),
-      matchId: match.id,
-      setNo,
-      ...imageValues,
-    });
-  }
-
-  await db.delete(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo)));
-  await db.delete(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo)));
+  const previousTeamStats = previousImage
+    ? await db.select().from(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo)))
+    : [];
+  const previousPlayerStats = previousImage
+    ? await db.select().from(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo)))
+    : [];
   const sideTeam = new Map<number, string>([[1, input.side1TeamId], [2, input.side2TeamId]]);
-  await db.insert(matchTeamStats).values(input.teams.map((team) => ({
+  const teamStatValues = input.teams.map((team) => ({
     matchId: match.id,
     setNo,
     side: team.side,
@@ -1899,8 +1968,8 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     assists: statInteger(team.assists),
     gold: statInteger(team.gold),
     won: sideTeam.get(team.side) === input.winnerTeamId,
-  })));
-  await db.insert(playerMatchStats).values(input.players.map((player, index) => ({
+  }));
+  const playerStatValues = input.players.map((player, index) => ({
     id: uid("player_stat"),
     matchId: match.id,
     setNo,
@@ -1921,7 +1990,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     goldPerMinute: 0,
     won: sideTeam.get(player.side) === input.winnerTeamId,
     updatedAt: reviewedAt,
-  })));
+  }));
 
   const [existingGame] = await db.select().from(matchGames).where(and(eq(matchGames.matchId, match.id), eq(matchGames.setNo, setNo))).limit(1);
   const gameValues = {
@@ -1931,8 +2000,44 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     status: "completed" as const,
     completedAt: reviewedAt,
   };
-  if (existingGame) await db.update(matchGames).set(gameValues).where(eq(matchGames.id, existingGame.id));
-  else await db.insert(matchGames).values({ id: uid("game"), matchId: match.id, setNo, ...gameValues });
+  const detailStatements = [
+    ...(previousImage ? [
+      db.insert(resultRevisions).values({
+        id: uid("result_revision"),
+        matchId: match.id,
+        setNo,
+        objectKey: previousImage.objectKey,
+        snapshotJson: JSON.stringify({ image: previousImage, teams: previousTeamStats, players: previousPlayerStats }),
+        createdBy: actor.id,
+      }),
+      db.update(matchResultImages).set(imageValues).where(eq(matchResultImages.id, previousImage.id)),
+    ] : [db.insert(matchResultImages).values({
+      id: uid("result_image"),
+      matchId: match.id,
+      setNo,
+      ...imageValues,
+    })]),
+    db.delete(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo))),
+    db.delete(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo))),
+    ...teamStatValues.map((values) => db.insert(matchTeamStats).values(values)),
+    // Keep every player in its own statement. D1 allows at most 100 bound values
+    // per statement, so a single 10-player insert would fail and leave partial data.
+    ...playerStatValues.map((values) => db.insert(playerMatchStats).values(values)),
+    existingGame
+      ? db.update(matchGames).set(gameValues).where(eq(matchGames.id, existingGame.id))
+      : db.insert(matchGames).values({ id: uid("game"), matchId: match.id, setNo, ...gameValues }),
+  ];
+  await db.batch(detailStatements as never);
+
+  const [savedImage, savedTeams, savedPlayers, savedGame] = await Promise.all([
+    db.select({ id: matchResultImages.id }).from(matchResultImages).where(and(eq(matchResultImages.matchId, match.id), eq(matchResultImages.setNo, setNo))).limit(1),
+    db.select({ side: matchTeamStats.side }).from(matchTeamStats).where(and(eq(matchTeamStats.matchId, match.id), eq(matchTeamStats.setNo, setNo))),
+    db.select({ id: playerMatchStats.id }).from(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo))),
+    db.select({ id: matchGames.id }).from(matchGames).where(and(eq(matchGames.matchId, match.id), eq(matchGames.setNo, setNo))).limit(1),
+  ]);
+  if (savedImage.length !== 1 || savedTeams.length !== 2 || savedPlayers.length !== 10 || savedGame.length !== 1) {
+    throw new Error("결과 저장 검증에 실패했습니다. 다시 등록해 주세요.");
+  }
   const games = await db.select().from(matchGames).where(eq(matchGames.matchId, match.id));
   const scoreA = games.filter((game) => game.status === "completed" && game.winnerTeamId === match.teamAId).length;
   const scoreB = games.filter((game) => game.status === "completed" && game.winnerTeamId === match.teamBId).length;
@@ -1972,6 +2077,10 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
   if (match.scheduleConfirmed && !isStaff(actor)) throw new Error("확정된 일정은 운영자나 관리자만 변경할 수 있습니다.");
   const nextScheduledAt = date.toISOString();
   if (match.scheduledAt === nextScheduledAt) return;
+
+  if (match.scheduleConfirmed && match.phase !== "scrim") {
+    await unconfirmMatchSchedule(match.id, actor);
+  }
 
   await db
     .update(matches)
@@ -2030,6 +2139,81 @@ export async function confirmMatchSchedule(matchId: string, actor: RequestUser) 
   });
 }
 
+export async function unconfirmMatchSchedule(matchId: string, actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  if (match.phase === "scrim") throw new Error("내전 경기는 배팅 관리 메뉴에서 상태를 변경해 주세요.");
+  if (match.status !== "scheduled" || match.winnerId || match.settlementStatus === "completed") {
+    throw new Error("결과 또는 정산이 완료된 경기는 일정 확정을 취소할 수 없습니다.");
+  }
+  if (!match.scheduleConfirmed) return { refundedBets: 0, refundedPoints: 0, cancelledFreePoints: 0 };
+
+  const activeBets = await db.select().from(bets).where(and(eq(bets.matchId, match.id), ne(bets.status, "refunded")));
+  if (activeBets.some((bet) => bet.status !== "pending")) {
+    throw new Error("정산이 시작된 예측이 있어 일정을 미확정으로 돌릴 수 없습니다.");
+  }
+  const entries = activeBets.length
+    ? await db.select().from(tournamentEntries).where(and(
+      eq(tournamentEntries.tournamentId, match.tournamentId),
+      inArray(tournamentEntries.userId, activeBets.map((bet) => bet.userId)),
+    ))
+    : [];
+  const entryMap = new Map(entries.map((entry) => [entry.userId, entry]));
+  const refundedPoints = activeBets.reduce((sum, bet) => sum + bet.paidStake, 0);
+  const cancelledFreePoints = activeBets.reduce((sum, bet) => sum + bet.freeStake, 0);
+  const changedAt = new Date().toISOString();
+  const statements = [];
+
+  for (const bet of activeBets) {
+    const entry = entryMap.get(bet.userId);
+    if (!entry) throw new Error("예측 참가자의 대회 포인트 지갑을 찾을 수 없습니다.");
+    if (bet.paidStake > 0) {
+      const nextBalance = entry.pointsBalance + bet.paidStake;
+      statements.push(
+        db.update(tournamentEntries).set({ pointsBalance: nextBalance }).where(and(
+          eq(tournamentEntries.tournamentId, match.tournamentId),
+          eq(tournamentEntries.userId, bet.userId),
+        )),
+        db.insert(pointLedger).values({
+          id: uid("point"),
+          userId: bet.userId,
+          tournamentId: match.tournamentId,
+          betId: bet.id,
+          type: "bet_refund",
+          amount: bet.paidStake,
+          balanceAfter: nextBalance,
+          description: "경기 일정 확정 취소로 예측 포인트 반환",
+        }),
+      );
+    }
+    statements.push(db.update(bets).set({ status: "refunded", payout: 0, settledAt: changedAt }).where(eq(bets.id, bet.id)));
+  }
+  statements.push(
+    db.update(matches).set({
+      scheduleConfirmed: false,
+      predictionCountAClosed: null,
+      predictionCountBClosed: null,
+      settlementStatus: "not_required",
+      settlementUpdatedAt: changedAt,
+    }).where(eq(matches.id, match.id)),
+    db.insert(auditLogs).values({
+      id: uid("audit"),
+      tournamentId: match.tournamentId,
+      actorId: actor.id,
+      actorName: actor.displayName,
+      action: "match_schedule_unconfirmed",
+      entityType: "match",
+      entityId: match.id,
+      beforeJson: JSON.stringify({ scheduleConfirmed: true, activeBets: activeBets.length }),
+      afterJson: JSON.stringify({ scheduleConfirmed: false, refundedBets: activeBets.length, refundedPoints, cancelledFreePoints }),
+    }),
+  );
+  await db.batch(statements as never);
+  return { refundedBets: activeBets.length, refundedPoints, cancelledFreePoints };
+}
+
 export async function createBet(
   tournamentId: string,
   matchId: string,
@@ -2066,20 +2250,33 @@ export async function createBet(
     .from(bets)
     .where(and(eq(bets.userId, actor.id), eq(bets.matchId, matchId)))
     .limit(1);
-  if (existing) throw new Error("이 경기는 이미 예측했습니다.");
+  if (existing && existing.status !== "refunded") throw new Error("이 경기는 이미 예측했습니다.");
 
-  const betId = uid("bet");
+  const betId = existing?.id ?? uid("bet");
   try {
-    await db.insert(bets).values({
-      id: betId,
-      tournamentId,
-      matchId,
-      userId: actor.id,
-      teamId,
-      stake: normalizedStake,
-      freeStake,
-      paidStake,
-    });
+    if (existing) {
+      await db.update(bets).set({
+        teamId,
+        stake: normalizedStake,
+        freeStake,
+        paidStake,
+        status: "pending",
+        payout: 0,
+        settledAt: null,
+        createdAt: new Date().toISOString(),
+      }).where(eq(bets.id, existing.id));
+    } else {
+      await db.insert(bets).values({
+        id: betId,
+        tournamentId,
+        matchId,
+        userId: actor.id,
+        teamId,
+        stake: normalizedStake,
+        freeStake,
+        paidStake,
+      });
+    }
   } catch {
     throw new Error("이 경기는 이미 예측했습니다.");
   }
@@ -2092,7 +2289,17 @@ export async function createBet(
       WHERE tournament_id = ? AND user_id = ? AND points_balance >= ?
     `).bind(paidStake, tournamentId, actor.id, paidStake).run();
     if (Number(reserved.meta.changes ?? 0) !== 1) {
-      await db.delete(bets).where(eq(bets.id, betId));
+      if (existing) await db.update(bets).set({
+        teamId: existing.teamId,
+        stake: existing.stake,
+        freeStake: existing.freeStake,
+        paidStake: existing.paidStake,
+        status: "refunded",
+        payout: existing.payout,
+        settledAt: existing.settledAt,
+        createdAt: existing.createdAt,
+      }).where(eq(bets.id, betId));
+      else await db.delete(bets).where(eq(bets.id, betId));
       throw new Error("현재 대회의 보유 포인트가 부족합니다.");
     }
   }
@@ -2115,7 +2322,17 @@ export async function createBet(
     await raw.prepare("UPDATE tournament_entries SET points_balance = points_balance + ? WHERE tournament_id = ? AND user_id = ?")
       .bind(paidStake, tournamentId, actor.id)
       .run();
-    await db.delete(bets).where(eq(bets.id, betId));
+    if (existing) await db.update(bets).set({
+      teamId: existing.teamId,
+      stake: existing.stake,
+      freeStake: existing.freeStake,
+      paidStake: existing.paidStake,
+      status: "refunded",
+      payout: existing.payout,
+      settledAt: existing.settledAt,
+      createdAt: existing.createdAt,
+    }).where(eq(bets.id, betId));
+    else await db.delete(bets).where(eq(bets.id, betId));
     throw error;
   }
 }
@@ -2184,6 +2401,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       leaderTeamIds: [],
       bets: [],
       predictionSummaries: [],
+      refundSummaries: [],
       bettingInsights: { rankings: [], streaks: [], highestProfit: null, boldest: null },
       backups: [],
       settlementSummaries: [],
@@ -2264,6 +2482,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       displayName: users.displayName,
       riotGameName: riotAccounts.gameName,
       riotTagline: riotAccounts.tagline,
+      isPrimary: riotAccounts.isPrimary,
     }).from(tournamentMembers)
       .innerJoin(users, eq(users.id, tournamentMembers.userId))
       .innerJoin(riotAccounts, eq(riotAccounts.userId, users.id))
@@ -2330,6 +2549,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
         )
         .orderBy(asc(users.displayName)))
         .map((user) => ({ ...user, pointsBalance: user.pointsBalance ?? 0 }))
+        .filter((user) => !user.id.startsWith("test_"))
     : [];
   const [backupRows, settlementRows] = requestUser && isStaff(requestUser)
     ? await Promise.all([
@@ -2403,6 +2623,15 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       teamBPercent: 100 - teamAPercent,
     };
   });
+  const refundSummaries = matchRows.map((match) => {
+    const rows = tournamentBetRows.filter((bet) => bet.matchId === match.id && bet.status !== "refunded");
+    return {
+      matchId: match.id,
+      betCount: rows.length,
+      paidPoints: rows.reduce((sum, bet) => sum + bet.paidStake, 0),
+      freePoints: rows.reduce((sum, bet) => sum + bet.freeStake, 0),
+    };
+  });
   const bettingPlayerRows = [...new Set(tournamentBetRows.map((bet) => bet.userId))].map((userId) => {
     const rows = tournamentBetRows.filter((bet) => bet.userId === userId && (bet.status === "won" || bet.status === "lost"))
       .sort((a, b) => new Date(a.settledAt ?? a.createdAt).getTime() - new Date(b.settledAt ?? b.createdAt).getTime());
@@ -2471,12 +2700,20 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       displayName: account.displayName,
       riotGameName: account.riotGameName,
       riotTagline: account.riotTagline,
+      isPrimary: account.isPrimary,
+      isTest: account.userId.startsWith("test_"),
+      testScope: account.userId.startsWith("test_scrim_") ? "scrim" : account.userId.startsWith("test_league_") ? "league" : null,
     })),
     myRiotAccounts,
-    rosterAccounts,
+    rosterAccounts: rosterAccounts.map((account) => ({
+      ...account,
+      isTest: account.userId.startsWith("test_"),
+      testScope: account.userId.startsWith("test_scrim_") ? "scrim" as const : account.userId.startsWith("test_league_") ? "league" as const : null,
+    })),
     leaderTeamIds,
     bets: userBets,
     predictionSummaries,
+    refundSummaries,
     bettingInsights: {
       rankings: bettingPlayerRows.filter((row) => row.bets >= 5).sort((a, b) => b.hitRate - a.hitRate || b.bets - a.bets).slice(0, 10),
       streaks: [...bettingPlayerRows].sort((a, b) => b.currentStreak - a.currentStreak || b.bestStreak - a.bestStreak).slice(0, 5),

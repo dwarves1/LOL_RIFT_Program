@@ -145,6 +145,7 @@ export function ResultReviewModal({
   accounts,
   initialSetNo = 1,
   busy,
+  onOperationChange,
   onClose,
   onSubmit,
 }: {
@@ -153,6 +154,7 @@ export function ResultReviewModal({
   accounts: ResultAccount[];
   initialSetNo?: number;
   busy: boolean;
+  onOperationChange?: (label: string | null) => void;
   onClose: () => void;
   onSubmit: (input: Record<string, unknown>) => Promise<boolean>;
 }) {
@@ -307,6 +309,7 @@ export function ResultReviewModal({
     const image = await loadImage(nextDataUrl);
     setDimensions({ width: image.naturalWidth, height: image.naturalHeight });
     setAnalyzing(true);
+    onOperationChange?.(source === "ai" ? "AI가 경기 결과 이미지를 분석하고 있습니다" : "경기 결과 이미지를 OCR로 분석하고 있습니다");
     setAnalysisNeedsChoice(false);
     setAnalysisError("");
     setAnalysisNotice("");
@@ -381,6 +384,7 @@ export function ResultReviewModal({
     } finally {
       if (source !== "ai" || !analysisElapsedMs) setAnalysisElapsedMs(Math.round(performance.now() - startedAt));
       setAnalyzing(false);
+      onOperationChange?.(null);
     }
   }
 

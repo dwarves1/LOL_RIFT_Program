@@ -5,6 +5,8 @@ import {
   createScrimSeason,
   createScrimMatch,
   confirmMatchSchedule,
+  unconfirmMatchSchedule,
+  seedTestPlayers,
   createTiebreakerMatch,
   getDashboard,
   getMatchImageAnalysisContext,
@@ -191,6 +193,14 @@ export async function POST(request: Request) {
     if (action === "confirm_match_schedule") {
       await confirmMatchSchedule(String(payload.matchId), user);
       return Response.json({ ok: true });
+    }
+    if (action === "unconfirm_match_schedule") {
+      const result = await unconfirmMatchSchedule(String(payload.matchId), user);
+      return Response.json({ ok: true, ...result });
+    }
+    if (action === "seed_test_players") {
+      const result = await seedTestPlayers(user);
+      return Response.json({ ok: true, ...result });
     }
     if (action === "set_match_best_of") {
       await setMatchBestOf(String(payload.matchId), Number(payload.bestOf), user);

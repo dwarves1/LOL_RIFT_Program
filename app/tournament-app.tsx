@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { isPredictionOpen } from "../lib/match-rules";
 import { ProfileModal } from "./profile-modal";
 import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
@@ -147,6 +147,13 @@ type PredictionSummary = {
   teamBPercent: number;
 };
 
+type RefundSummary = {
+  matchId: string;
+  betCount: number;
+  paidPoints: number;
+  freePoints: number;
+};
+
 type Dashboard = {
   viewer: Viewer | null;
   tournaments: Tournament[];
@@ -161,12 +168,13 @@ type Dashboard = {
   resultImages: Array<{ id: string; matchId: string; setNo: number; fileName: string; width: number | null; height: number | null; durationSeconds: number | null; reviewedAt: string; imageUrl: string }>;
   teamStats: Array<{ matchId: string; setNo: number; side: number; teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
   playerStats: ResultPlayerStat[];
-  accounts: Array<{ id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null }>;
+  accounts: Array<{ id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null; isPrimary: boolean; isTest: boolean; testScope: "league" | "scrim" | null }>;
   myRiotAccounts: Array<{ id: string; gameName: string; tagline: string; isPrimary: boolean }>;
-  rosterAccounts: Array<{ id: string; userId: string; gameName: string; tagline: string; isPrimary: boolean; displayName: string }>;
+  rosterAccounts: Array<{ id: string; userId: string; gameName: string; tagline: string; isPrimary: boolean; displayName: string; isTest?: boolean; testScope?: "league" | "scrim" | null }>;
   leaderTeamIds: string[];
   bets: Bet[];
   predictionSummaries: PredictionSummary[];
+  refundSummaries: RefundSummary[];
   bettingInsights: {
     rankings: Array<{ userId: string; displayName: string; bets: number; wins: number; hitRate: number; currentStreak: number; bestStreak: number; profit: number }>;
     streaks: Array<{ userId: string; displayName: string; bets: number; wins: number; hitRate: number; currentStreak: number; bestStreak: number; profit: number }>;
@@ -243,6 +251,8 @@ const AUDIT_LABEL: Record<string, string> = {
   match_result_changed: "경기 결과를 변경했습니다",
   match_schedule_changed: "경기 일정을 변경했습니다",
   match_schedule_confirmed: "경기 일정을 확정했습니다",
+  match_schedule_unconfirmed: "일정 확정을 취소하고 예측 포인트를 반환했습니다",
+  test_players_seeded: "내전·리그 테스트 선수를 준비했습니다",
   user_role_changed: "사용자 권한을 변경했습니다",
   profile_completed: "공개 프로필을 등록했습니다",
   profile_updated: "공개 프로필을 변경했습니다",
@@ -257,6 +267,37 @@ const AUDIT_LABEL: Record<string, string> = {
   scrim_betting_opened: "내전 배팅을 시작했습니다",
   scrim_betting_closed: "내전 배팅을 종료했습니다",
 };
+
+const OPERATION_LABELS: Record<string, string> = {
+  create_tournament: "새 대회를 만들고 있습니다",
+  create_scrim_season: "내전 시즌을 만들고 있습니다",
+  create_scrim_match: "내전 경기와 팀 구성을 저장하고 있습니다",
+  save_match_result: "경기 결과와 이미지를 저장하고 있습니다",
+  set_match_schedule: "경기 일정을 저장하고 있습니다",
+  confirm_match_schedule: "경기 일정을 확정하고 있습니다",
+  unconfirm_match_schedule: "예측 포인트를 반환하고 일정을 미확정으로 변경하고 있습니다",
+  seed_test_players: "내전·리그 테스트 선수 40명을 준비하고 있습니다",
+  create_bet: "승리팀 예측을 저장하고 있습니다",
+  set_winner: "승리팀과 경기 결과를 반영하고 있습니다",
+  upload_team_logo: "팀 로고를 저장하고 있습니다",
+  create_tournament_backup: "대회 백업을 만들고 있습니다",
+  restore_tournament_backup: "백업 복구 사본을 만들고 있습니다",
+  set_role: "회원 권한을 변경하고 있습니다",
+};
+
+function OperationOverlay({ label }: { label: string }) {
+  return <div className="operation-overlay" role="alert" aria-live="assertive" aria-busy="true"><div><span className="operation-spinner" /><strong>{label}</strong><p>완료될 때까지 다른 작업을 할 수 없습니다. 잠시만 기다려 주세요.</p></div></div>;
+}
+
+function viewUrl(tournamentId: string, tab: Tab, playerId: string | null, matchId: string | null) {
+  const query = new URLSearchParams();
+  if (tournamentId) query.set("tournament", tournamentId);
+  if (tab !== "home") query.set("tab", tab);
+  if (playerId) query.set("player", playerId);
+  if (matchId) query.set("match", matchId);
+  const value = query.toString();
+  return value ? `/?${value}` : "/";
+}
 
 function formatDate(value: string, withTime = true) {
   return new Intl.DateTimeFormat("ko-KR", {
@@ -344,7 +385,8 @@ export function TournamentApp({
   const [selectedTournament, setSelectedTournament] = useState<string>(initialTournamentId);
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<{ label: string } | null>(null);
+  const busy = Boolean(operation);
   const [message, setMessage] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -360,6 +402,13 @@ export function TournamentApp({
   const [joinCode, setJoinCode] = useState("");
   const activeLoad = useRef<AbortController | null>(null);
   const autoOpenedDetail = useRef(false);
+  const historyReady = useRef(false);
+  const restoringHistory = useRef(false);
+  const selectedTournamentRef = useRef(selectedTournament);
+  const dataRef = useRef<Dashboard | null>(null);
+
+  useEffect(() => { selectedTournamentRef.current = selectedTournament; }, [selectedTournament]);
+  useEffect(() => { dataRef.current = data; }, [data]);
 
   const load = useCallback(async (tournamentId?: string) => {
     activeLoad.current?.abort();
@@ -409,10 +458,68 @@ export function TournamentApp({
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (!document.hidden && !activeLoad.current) void load(selectedTournament || undefined);
+      if (!document.hidden && !activeLoad.current && !operation) void load(selectedTournament || undefined);
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [load, selectedTournament]);
+  }, [load, operation, selectedTournament]);
+
+  useEffect(() => {
+    if (!operation) return;
+    const warnBeforeLeave = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const blockKeys = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", warnBeforeLeave);
+    window.addEventListener("keydown", blockKeys, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeLeave);
+      window.removeEventListener("keydown", blockKeys, true);
+    };
+  }, [operation]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (operation) {
+        window.history.forward();
+        return;
+      }
+      const query = new URLSearchParams(window.location.search);
+      const nextTournament = query.get("tournament") ?? "";
+      const candidateTab = query.get("tab") as Tab | null;
+      const nextTab = candidateTab && ([...NAV_ITEMS.map((item) => item.id), "admin"] as Tab[]).includes(candidateTab) ? candidateTab : "home";
+      const nextPlayer = query.get("player");
+      const nextMatch = query.get("match");
+      restoringHistory.current = true;
+      setActiveTab(nextTab);
+      setSelectedPlayerId(nextPlayer);
+      setDetailMatch(nextMatch ? dataRef.current?.matches.find((match) => match.id === nextMatch) ?? null : null);
+      if (nextTournament && nextTournament !== selectedTournamentRef.current) {
+        setSelectedTournament(nextTournament);
+        void load(nextTournament);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [load, operation]);
+
+  useEffect(() => {
+    if (!data?.tournament) return;
+    const nextUrl = viewUrl(selectedTournament, activeTab, selectedPlayerId, detailMatch?.id ?? null);
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    if (!historyReady.current) {
+      window.history.replaceState({ lolRiftView: true }, "", nextUrl);
+      historyReady.current = true;
+      return;
+    }
+    if (restoringHistory.current) {
+      restoringHistory.current = false;
+      return;
+    }
+    if (currentUrl !== nextUrl) window.history.pushState({ lolRiftView: true }, "", nextUrl);
+  }, [activeTab, data?.tournament, detailMatch?.id, selectedPlayerId, selectedTournament]);
 
   useEffect(() => {
     if (!pendingReviewMatchId || !data) return;
@@ -437,7 +544,9 @@ export function TournamentApp({
   }, [data, initialMatchId, initialTab]);
 
   async function command(payload: Record<string, unknown>, successMessage: string) {
-    setBusy(true);
+    if (operation) return false;
+    const action = String(payload.action ?? "");
+    setOperation({ label: OPERATION_LABELS[action] ?? "요청을 처리하고 있습니다" });
     setMessage(null);
     try {
       const response = await fetch("/api/app", {
@@ -448,7 +557,6 @@ export function TournamentApp({
       const result = (await response.json()) as { ok?: boolean; error?: string; tournamentId?: string; accessCode?: string; draftId?: string; matchId?: string; sharePath?: string };
       if (!response.ok) throw new Error(result.error ?? "요청을 처리하지 못했습니다.");
       setMessage(result.accessCode ? `${successMessage} 대회 코드: ${result.accessCode}` : successMessage);
-      const action = String(payload.action ?? "");
       const input = payload.input as { historical?: boolean } | undefined;
       if (action === "create_scrim_match" && input?.historical && result.matchId) setPendingReviewMatchId(result.matchId);
       await load(result.tournamentId ?? selectedTournament);
@@ -457,7 +565,7 @@ export function TournamentApp({
       setMessage(error instanceof Error ? error.message : "잠시 후 다시 시도해 주세요.");
       return false;
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -466,7 +574,8 @@ export function TournamentApp({
   if (!data || !data.tournament) {
     const viewer = data?.viewer;
     return (
-      <main className="first-tournament-screen">
+      <>
+      <main className="first-tournament-screen" inert={busy ? true : undefined} aria-busy={busy}>
         <div className="brand-mark">LR</div>
         <p className="eyebrow">LOL RIFT PROGRAM</p>
         <h1>첫 대회를 만들어 주세요</h1>
@@ -508,6 +617,8 @@ export function TournamentApp({
           />
         )}
       </main>
+      {operation && <OperationOverlay label={operation.label} />}
+      </>
     );
   }
 
@@ -545,7 +656,7 @@ export function TournamentApp({
   };
 
   return (
-    <div className="app-shell">
+    <><div className="app-shell" inert={busy ? true : undefined} aria-busy={busy}>
       <header className="topbar">
         <button className="brand" onClick={() => setActiveTab("home")} aria-label="대회 홈으로 이동">
           <span className="brand-mark">LR</span>
@@ -617,7 +728,10 @@ export function TournamentApp({
         {activeTab === "teams" && <TeamsView data={data} />}
         {activeTab === "stats" && <StatsView data={data} teamMap={teamMap} />}
         {activeTab === "draft" && <DraftView data={data} teamMap={teamMap} busy={busy} command={command} />}
-        {activeTab === "players" && <PlayerSearchView data={data} selectedPlayerId={selectedPlayerId} onSelectPlayer={setSelectedPlayerId} />}
+        {activeTab === "players" && <PlayerSearchView data={data} selectedPlayerId={selectedPlayerId} onSelectPlayer={(userId) => {
+          if (!userId && new URLSearchParams(window.location.search).get("player")) window.history.back();
+          else setSelectedPlayerId(userId);
+        }} />}
         {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} focusedMatchId={initialMatchId} openPlayer={(userId) => { setSelectedPlayerId(userId); setActiveTab("players"); }} />}
         {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} openCreateScrim={() => setShowCreateScrim(true)} openCreateScrimMatch={() => { setHistoricalScrim(false); setShowCreateScrimMatch(true); }} openHistoricalScrim={() => { setHistoricalScrim(true); setShowCreateScrimMatch(true); }} />}
       </main>
@@ -674,6 +788,7 @@ export function TournamentApp({
           accounts={data.accounts}
           initialSetNo={Math.min(reviewMatch.bestOf, Math.max(1, ...data.games.filter((game) => game.matchId === reviewMatch.id && game.status === "completed").map((game) => game.setNo + 1)))}
           busy={busy}
+          onOperationChange={(label) => setOperation(label ? { label } : null)}
           onClose={() => setReviewMatch(null)}
           onSubmit={(input) => command({ action: "save_match_result", input }, "경기 결과와 통계를 등록했습니다.")}
         />
@@ -686,10 +801,14 @@ export function TournamentApp({
           imageUrl={resultImage.imageUrl}
           durationSeconds={resultImage.durationSeconds}
           stats={data.playerStats.filter((stat) => stat.matchId === detailMatch.id && stat.setNo === resultImage.setNo)}
-          onClose={() => setDetailMatch(null)}
+          onClose={() => {
+            const currentMatch = new URLSearchParams(window.location.search).get("match");
+            if (currentMatch === detailMatch.id) window.history.back();
+            else setDetailMatch(null);
+          }}
         /> : null;
       })()}
-    </div>
+    </div>{operation && <OperationOverlay label={operation.label} />}</>
   );
 }
 
@@ -782,7 +901,7 @@ function HomeView({
           </div>
           <div className="result-list">
             {lastResults.map((match) => (
-              <ResultRow key={match.id} match={match} teamMap={teamMap} />
+              <ResultRow key={match.id} match={match} games={data.games} teamMap={teamMap} />
             ))}
           </div>
         </article>
@@ -1459,7 +1578,7 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
   return (
     <section className="page-section">
       <PageTitle eyebrow="CONTROL ROOM" title={isScrim ? "내전 운영" : "대회 운영"} description={isScrim ? "참가자 10명과 팀 구성을 등록하고 배팅을 직접 시작·종료합니다." : "경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다."} />
-      <div className="admin-actions"><button className="primary-button" onClick={isScrim ? openCreateScrimMatch : openCreate}>{isScrim ? "＋ 내전 경기 생성" : "＋ 새 대회 생성"}</button>{isScrim && <button className="secondary-button" onClick={openHistoricalScrim}>지난 내전 등록</button>}<button className="secondary-button" onClick={openCreateScrim}>＋ 내전 시즌</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button><div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
+      <div className="admin-actions"><button className="primary-button" onClick={isScrim ? openCreateScrimMatch : openCreate}>{isScrim ? "＋ 내전 경기 생성" : "＋ 새 대회 생성"}</button>{isScrim && <button className="secondary-button" onClick={openHistoricalScrim}>지난 내전 등록</button>}<button className="secondary-button" onClick={openCreateScrim}>＋ 내전 시즌</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button>{data.viewer?.role === "admin" && <button className="secondary-button test-player-seed-button" disabled={busy} onClick={() => { if (!window.confirm("내전 테스트 선수 20명과 리그 테스트 선수 20명을 준비할까요?\n실제 Google 로그인 계정과는 분리되어 저장됩니다.")) return; void command({ action: "seed_test_players" }, "내전·리그 테스트 선수 20명씩을 준비했습니다."); }}>TEST 선수 40명 준비</button>}<div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
       {isScrim && <><div className="operation-metric-grid"><article><span>배팅 대기</span><strong>{operations.scheduled}</strong></article><article className="live"><span>배팅 중</span><strong>{operations.open}</strong></article><article className="warning"><span>결과 대기</span><strong>{operations.resultPending}</strong></article><article><span>확정 완료</span><strong>{operations.completed}</strong></article></div><div className="operation-tools"><span>결과와 포인트를 정정하면 기존 정산을 취소하고 다시 계산합니다.</span><a className="secondary-button" href={`/api/admin/backup?tournament=${encodeURIComponent(data.tournament!.id)}`}>CSV 백업 다운로드</a></div></>}
       <section className="operations-safety-grid">
         <article className="panel backup-panel">
@@ -1498,6 +1617,7 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
                   teamB={teamB}
                   busy={busy}
                   command={command}
+                  refundSummary={data.refundSummaries.find((summary) => summary.matchId === match.id)}
                 />
               );
             })}
@@ -1597,12 +1717,13 @@ function TeamLogoControl({ team, busy, command }: { team: Team; busy: boolean; c
   </div>;
 }
 
-function AdminScheduleRow({ match, teamA, teamB, busy, command }: {
+function AdminScheduleRow({ match, teamA, teamB, busy, command, refundSummary }: {
   match: Match;
   teamA?: Team;
   teamB?: Team;
   busy: boolean;
   command: SharedProps["command"];
+  refundSummary?: RefundSummary;
 }) {
   const originalScheduledAt = toDateTimeLocal(match.scheduledAt);
   const [scheduledAt, setScheduledAt] = useState(originalScheduledAt);
@@ -1641,6 +1762,21 @@ function AdminScheduleRow({ match, teamA, teamB, busy, command }: {
       >
         {match.scheduleConfirmed ? "확정 완료" : scheduleChanged ? "저장 필요" : "일정 확정"}
       </button>
+      {match.scheduleConfirmed && <button
+        type="button"
+        className="danger-button schedule-unconfirm-button"
+        disabled={busy}
+        onClick={() => {
+          const betCount = refundSummary?.betCount ?? 0;
+          const paidPoints = refundSummary?.paidPoints ?? 0;
+          const freePoints = refundSummary?.freePoints ?? 0;
+          const detail = betCount
+            ? `\n예측 ${betCount}건 · 차감 포인트 ${paidPoints.toLocaleString()}P 반환 · 무료 예측 ${freePoints.toLocaleString()}P 취소`
+            : "\n현재 등록된 예측은 없습니다.";
+          if (!window.confirm(`이 경기의 일정 확정을 취소할까요?${detail}\n경기는 다시 일정 미확정 상태가 됩니다.`)) return;
+          void command({ action: "unconfirm_match_schedule", matchId: match.id }, `일정 확정을 취소하고 ${paidPoints.toLocaleString()}P를 반환했습니다.`);
+        }}
+      >확정 취소</button>}
     </div>
   );
 }
@@ -1686,10 +1822,22 @@ function ScrimMatchControl({ match, teamA, teamB, tournamentId, busy, command }:
   </div>;
 }
 
-function ResultRow({ match, teamMap }: { match: Match; teamMap: Map<string, Team> }) {
-  const winner = match.winnerId ? teamMap.get(match.winnerId) : undefined;
-  const loser = match.loserId ? teamMap.get(match.loserId) : undefined;
-  return <div className="result-row"><span>{match.phase === "league" ? "리그" : match.matchNo}</span><TeamMark team={winner} small /><strong>{winner?.name}</strong><b>WIN</b><small>vs</small><span>{loser?.name}</span></div>;
+function ResultRow({ match, games, teamMap }: { match: Match; games: Dashboard["games"]; teamMap: Map<string, Team> }) {
+  const latestGame = games
+    .filter((game) => game.matchId === match.id && game.status === "completed")
+    .sort((a, b) => b.setNo - a.setNo)[0];
+  const blueTeamId = latestGame?.blueTeamId ?? match.teamAId;
+  const redTeamId = latestGame?.redTeamId ?? match.teamBId;
+  const blueTeam = blueTeamId ? teamMap.get(blueTeamId) : undefined;
+  const redTeam = redTeamId ? teamMap.get(redTeamId) : undefined;
+  const scoreFor = (teamId: string | null) => teamId === match.teamAId ? match.seriesScoreA : teamId === match.teamBId ? match.seriesScoreB : 0;
+  const winnerId = latestGame?.winnerTeamId ?? match.winnerId;
+  return <div className="result-row">
+    <span className="result-kind">{latestGame ? `${latestGame.setNo}세트` : match.phase === "league" ? "리그" : match.matchNo}</span>
+    <div className={`result-side blue ${winnerId === blueTeamId ? "winner" : ""}`}><TeamMark team={blueTeam} small /><strong>{blueTeam?.name ?? "블루팀"}</strong>{winnerId === blueTeamId && <b>WIN</b>}</div>
+    <div className="result-series-score" aria-label={`최종 점수 ${scoreFor(blueTeamId)} 대 ${scoreFor(redTeamId)}`}><small>FINAL</small><strong>{scoreFor(blueTeamId)}<i>:</i>{scoreFor(redTeamId)}</strong></div>
+    <div className={`result-side red ${winnerId === redTeamId ? "winner" : ""}`}>{winnerId === redTeamId && <b>WIN</b>}<strong>{redTeam?.name ?? "레드팀"}</strong><TeamMark team={redTeam} small /></div>
+  </div>;
 }
 
 function PageTitle({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
@@ -1745,6 +1893,60 @@ function CreateScrimSeasonModal({ busy, onClose, onCreate }: {
   </div>;
 }
 
+function scrimAccountLabel(account: Dashboard["accounts"][number]) {
+  return `${account.riotGameName ?? "미등록"}#${account.riotTagline ?? "-"} · ${account.displayName}`;
+}
+
+function ScrimAccountPicker({ value, accounts, unavailableUserIds, onChange }: {
+  value: string;
+  accounts: Dashboard["accounts"];
+  unavailableUserIds: Set<string>;
+  onChange: (id: string) => void;
+}) {
+  const selected = accounts.find((account) => account.id === value);
+  const [query, setQuery] = useState(() => selected ? scrimAccountLabel(selected) : "");
+  const [open, setOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState(0);
+  const listboxId = useId();
+  const normalized = query.trim().toLocaleLowerCase("ko");
+  const options = accounts.filter((account) => {
+    if (unavailableUserIds.has(account.userId)) return false;
+    if (!normalized || selected?.id === account.id) return true;
+    return [account.displayName, account.riotGameName ?? "", account.riotTagline ?? "", `${account.riotGameName ?? ""}#${account.riotTagline ?? ""}`]
+      .some((field) => field.toLocaleLowerCase("ko").includes(normalized));
+  }).slice(0, 12);
+  function choose(account: Dashboard["accounts"][number]) {
+    onChange(account.id);
+    setQuery(scrimAccountLabel(account));
+    setOpen(false);
+  }
+  return <div className="scrim-account-picker">
+    <input
+      role="combobox"
+      aria-expanded={open}
+      aria-controls={listboxId}
+      aria-autocomplete="list"
+      value={query}
+      placeholder="본계정 또는 이름 검색"
+      autoComplete="off"
+      onFocus={() => setOpen(true)}
+      onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+      onChange={(event) => { setQuery(event.target.value); setOpen(true); setHighlighted(0); if (value) onChange(""); }}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowDown") { event.preventDefault(); setOpen(true); setHighlighted((current) => Math.min(Math.max(0, options.length - 1), current + 1)); }
+        if (event.key === "ArrowUp") { event.preventDefault(); setHighlighted((current) => Math.max(0, current - 1)); }
+        if (event.key === "Enter" && open && options[highlighted]) { event.preventDefault(); choose(options[highlighted]); }
+        if (event.key === "Escape") setOpen(false);
+      }}
+    />
+    {selected && <span className="primary-account-chip">본계정{selected.isTest ? " · TEST" : ""}</span>}
+    {open && <div id={listboxId} className="scrim-account-options" role="listbox">
+      {options.map((account, index) => <button type="button" role="option" aria-selected={account.id === value} className={index === highlighted ? "highlighted" : ""} key={account.id} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(account)}><span><strong>{account.riotGameName}#{account.riotTagline}</strong><small>{account.displayName}</small></span><b>{account.isTest ? "TEST" : "본계정"}</b></button>)}
+      {!options.length && <p>검색 결과가 없습니다.</p>}
+    </div>}
+  </div>;
+}
+
 function CreateScrimMatchModal({ tournamentId, accounts, historical, busy, onClose, onCreate }: {
   tournamentId: string;
   accounts: Dashboard["accounts"];
@@ -1753,7 +1955,7 @@ function CreateScrimMatchModal({ tournamentId, accounts, historical, busy, onClo
   onClose: () => void;
   onCreate: (input: { tournamentId: string; scheduledAt: string; blueAccountIds: string[]; redAccountIds: string[]; historical: boolean }) => void;
 }) {
-  const eligibleAccounts = accounts;
+  const eligibleAccounts = accounts.filter((account) => account.isPrimary);
   const defaultAccounts = eligibleAccounts.filter((account, index, list) => list.findIndex((item) => item.userId === account.userId) === index);
   const [scheduledAt, setScheduledAt] = useState(() => toDateTimeLocal(new Date().toISOString()));
   const [slots, setSlots] = useState<string[]>(Array.from({ length: 10 }, (_, index) => defaultAccounts[index]?.id ?? ""));
@@ -1771,7 +1973,9 @@ function CreateScrimMatchModal({ tournamentId, accounts, historical, busy, onClo
         <p className="admin-panel-help">{historical ? "이미 끝난 경기의 시각과 블루·레드 참가자를 지정하세요. 생성 직후 결과 이미지 분석 화면이 자동으로 열립니다." : "기존 팀 매칭 프로그램의 결과대로 블루 5명과 레드 5명을 선택하세요."} 시즌 코드를 입력했고 롤 계정을 등록한 회원만 표시됩니다.</p>
         <div className="scrim-roster-editor">{["블루팀", "레드팀"].map((side, sideIndex) => <fieldset key={side} className={sideIndex ? "red" : "blue"}><legend>{side}</legend>{Array.from({ length: 5 }, (_, positionIndex) => {
           const index = sideIndex * 5 + positionIndex;
-          return <label key={index}><span>{POSITIONS_LABEL[positionIndex]}</span><select value={slots[index]} onChange={(event) => updateSlot(index, event.target.value)}><option value="">참가자 선택</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id} disabled={selectedUsers.has(account.userId) && accountMap.get(slots[index])?.userId !== account.userId}>{account.riotGameName}#{account.riotTagline} · {account.displayName}</option>)}</select></label>;
+          const currentUserId = accountMap.get(slots[index])?.userId;
+          const unavailableUserIds = new Set([...selectedUsers].filter((userId): userId is string => Boolean(userId) && userId !== currentUserId));
+          return <label key={index}><span>{POSITIONS_LABEL[positionIndex]}</span><ScrimAccountPicker value={slots[index]} accounts={eligibleAccounts} unavailableUserIds={unavailableUserIds} onChange={(id) => updateSlot(index, id)} /></label>;
         })}</fieldset>)}</div>
         {defaultAccounts.length < 10 && <p className="form-error">시즌 코드를 입력하고 롤 계정을 등록한 회원이 최소 10명 필요합니다. 현재 {defaultAccounts.length}명입니다.</p>}
       </div>
@@ -1814,6 +2018,7 @@ function CreateTournamentModal({ busy, rosterAccounts, onClose, onCreate }: { bu
   const preliminaryFormat = hasLeague ? "round_robin" as const : "none" as const;
   const bracketFormat = split ? "winner_loser_split" as const : "single_elimination" as const;
   const leagueMatchCount = (teamDrafts.length * (teamDrafts.length - 1) / 2) * matchesPerPair;
+  const eligibleRosterAccounts = rosterAccounts.filter((account) => account.isPrimary && account.testScope !== "scrim");
 
   function updateTeamCount(value: number) {
     const count = Math.min(16, Math.max(2, Math.floor(value)));
@@ -1844,10 +2049,10 @@ function CreateTournamentModal({ busy, rosterAccounts, onClose, onCreate }: { bu
         <div className="format-section"><div className="team-entry-heading"><h3>대회 진행 방식</h3><span>5가지 조합 중 선택</span></div><div className="format-choice-grid five-options">{FORMAT_OPTIONS.map(([id, title, detail]) => <button type="button" key={id} className={competitionFormat === id ? "selected" : ""} onClick={() => setCompetitionFormat(id)}><strong>{title}</strong><span>{detail}</span></button>)}</div></div>
         <div className="format-section"><div className="team-entry-heading"><h3>경기별 세트 기본값</h3><span>경기 시작 전 개별 변경 가능</span></div><div className="form-grid bo-grid">{hasLeague && <BestOfSelect label="리그 경기" value={leagueBestOf} onChange={setLeagueBestOf} />}{hasLeague && <BestOfSelect label="순위 결정전" value={tiebreakBestOf} onChange={setTiebreakBestOf} />}{hasBracket && <BestOfSelect label="본선 초반" value={bracketBestOf} onChange={setBracketBestOf} />}{hasBracket && <BestOfSelect label="준결승·조 결승" value={semifinalBestOf} onChange={setSemifinalBestOf} />}{hasBracket && <BestOfSelect label="최종 결승" value={finalBestOf} onChange={setFinalBestOf} />}</div></div>
         <div className="team-entry-heading"><h3>팀 및 선수 등록</h3><span>각 팀 5명 · TOP / JGL / MID / AD CARRY / SUP</span></div>
-        <div className="team-entry-grid">{teamDrafts.map((team, teamIndex) => <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>시드 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <div className="registered-player-field" key={memberIndex}><label><span>{POSITIONS_LABEL[memberIndex]}</span><select value={member.riotAccountId} onChange={(event) => { const members = team.members.map((item, index) => index === memberIndex ? { ...item, riotAccountId: event.target.value } : item); updateTeam(teamIndex, { members }); }}><option value="">등록 롤 ID 선택</option>{rosterAccounts.map((account) => <option key={account.id} value={account.id}>{account.gameName}#{account.tagline} · {account.displayName}</option>)}</select></label><select aria-label={`${POSITIONS_LABEL[memberIndex]} 팀 역할`} value={member.teamRole} onChange={(event) => { const role = event.target.value as TeamRole; const members = team.members.map((item, index) => ({ ...item, teamRole: index === memberIndex ? role : role === "captain" && item.teamRole === "captain" ? "member" : role === "vice_captain" && item.teamRole === "vice_captain" ? "member" : item.teamRole })); updateTeam(teamIndex, { members }); }}><option value="member">팀원</option><option value="captain">팀장</option><option value="vice_captain">부팀장</option></select></div>)}</fieldset>)}</div>
+        <div className="team-entry-grid">{teamDrafts.map((team, teamIndex) => <fieldset key={teamIndex}><legend><span style={{ background: TEAM_DRAFT_COLORS[teamIndex] }}>{teamIndex + 1}</span>시드 {teamIndex + 1}<span className="draft-order-buttons"><button type="button" onClick={() => moveTeam(teamIndex, -1)} disabled={teamIndex === 0}>↑</button><button type="button" onClick={() => moveTeam(teamIndex, 1)} disabled={teamIndex === teamDrafts.length - 1}>↓</button></span></legend><label><span>팀명</span><input value={team.name} onChange={(event) => updateTeam(teamIndex, { name: event.target.value })} /></label>{team.members.map((member, memberIndex) => <div className="registered-player-field" key={memberIndex}><label><span>{POSITIONS_LABEL[memberIndex]}</span><select value={member.riotAccountId} onChange={(event) => { const members = team.members.map((item, index) => index === memberIndex ? { ...item, riotAccountId: event.target.value } : item); updateTeam(teamIndex, { members }); }}><option value="">등록 롤 ID 선택</option>{eligibleRosterAccounts.map((account) => <option key={account.id} value={account.id}>{account.gameName}#{account.tagline} · {account.displayName}{account.isTest ? " · TEST" : ""}</option>)}</select></label><select aria-label={`${POSITIONS_LABEL[memberIndex]} 팀 역할`} value={member.teamRole} onChange={(event) => { const role = event.target.value as TeamRole; const members = team.members.map((item, index) => ({ ...item, teamRole: index === memberIndex ? role : role === "captain" && item.teamRole === "captain" ? "member" : role === "vice_captain" && item.teamRole === "vice_captain" ? "member" : item.teamRole })); updateTeam(teamIndex, { members }); }}><option value="member">팀원</option><option value="captain">팀장</option><option value="vice_captain">부팀장</option></select></div>)}</fieldset>)}</div>
         {hasBracket && <div className="initial-bracket-preview"><div className="team-entry-heading"><h3>최초 대진 미리보기</h3><span>{split ? "승자조 패배 팀은 패자조로 이동" : "상위 시드 자동 부전승"}</span></div><SingleEliminationPreview teams={teamDrafts.slice(0, competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length)} /></div>}
       </div>
-      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy || rosterAccounts.length < teamDrafts.length * 5 || teamDrafts.some((team) => team.members.some((member) => !member.riotAccountId) || team.members.filter((member) => member.teamRole === "captain").length !== 1)} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, competitionFormat, advancingTeamCount: hasBracket ? (competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length) : 0, leagueBestOf, bracketBestOf, semifinalBestOf, finalBestOf, tiebreakBestOf, teams: teamDrafts })}>{busy ? "생성 중…" : "대회 생성 및 코드 발급"}</button></footer>
+      <footer><button className="secondary-button" onClick={onClose}>취소</button><button className="primary-button" disabled={busy || eligibleRosterAccounts.length < teamDrafts.length * 5 || teamDrafts.some((team) => team.members.some((member) => !member.riotAccountId) || team.members.filter((member) => member.teamRole === "captain").length !== 1)} onClick={() => onCreate({ name, startAt: new Date(startAt).toISOString(), matchesPerPair, starterPoints, preliminaryFormat, bracketFormat, competitionFormat, advancingTeamCount: hasBracket ? (competitionFormat.startsWith("league_then") ? advancingTeamCount : teamDrafts.length) : 0, leagueBestOf, bracketBestOf, semifinalBestOf, finalBestOf, tiebreakBestOf, teams: teamDrafts })}>{busy ? "생성 중…" : "대회 생성 및 코드 발급"}</button></footer>
     </section>
   </div>;
 }

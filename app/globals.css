@@ -705,6 +705,121 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .result-review-body { overflow-y: auto; }.result-fields-panel { overflow: visible; }
 }
 
+/* Unified blocking progress state */
+.operation-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 10, 20, .84);
+  backdrop-filter: blur(7px);
+  cursor: wait;
+}
+.operation-overlay > div {
+  display: grid;
+  justify-items: center;
+  width: min(420px, 100%);
+  padding: 32px 26px;
+  border: 1px solid rgba(233, 185, 73, .36);
+  border-radius: 18px;
+  background: linear-gradient(145deg, #122137, #081321);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, .5);
+  text-align: center;
+}
+.operation-overlay strong { margin-top: 18px; color: #f7d77c; font-size: 18px; line-height: 1.45; }
+.operation-overlay p { margin: 8px 0 0; color: #aebbd0; font-size: 13px; line-height: 1.65; }
+.operation-spinner { width: 46px; height: 46px; border: 3px solid rgba(148, 163, 184, .2); border-top-color: var(--gold); border-radius: 50%; animation: operation-spin .75s linear infinite; }
+@keyframes operation-spin { to { transform: rotate(360deg); } }
+
+/* Recent results always preserve blue on the left and red on the right. */
+.result-row {
+  grid-template-columns: 52px minmax(0, 1fr) 68px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 78px;
+  padding: 10px 0;
+  font-size: 13px;
+}
+.result-kind { color: var(--gold) !important; font-size: 11px; font-weight: 900; white-space: nowrap; }
+.result-side { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-width: 0; color: #9ba9bb; }
+.result-side.red { grid-template-columns: auto minmax(0, 1fr) 38px; text-align: right; }
+.result-side strong { overflow: hidden; color: #dbe5f2; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.result-side b { padding: 3px 5px; border: 1px solid rgba(74, 222, 128, .32); color: #86efac; font-size: 9px; }
+.result-side.winner strong { color: white; }
+.result-series-score { display: grid; place-items: center; align-content: center; min-height: 54px; border-inline: 1px solid var(--line); }
+.result-series-score small { color: #7f8ca0; font-size: 9px; font-weight: 900; letter-spacing: .12em; }
+.result-series-score strong { margin-top: 5px; color: #f5f7fb; font-size: 22px; font-variant-numeric: tabular-nums; line-height: 1; }
+.result-series-score i { margin: 0 6px; color: var(--gold); font-style: normal; }
+
+/* Searchable primary-account roster picker */
+.scrim-account-picker { position: relative; min-width: 0; }
+.scrim-account-picker > input { width: 100%; padding-right: 84px; }
+.primary-account-chip { position: absolute; top: 50%; right: 8px; z-index: 1; transform: translateY(-50%); padding: 3px 6px; border: 1px solid rgba(74, 222, 128, .3); border-radius: 999px; color: #86efac; font-size: 9px; font-weight: 900; pointer-events: none; }
+.scrim-account-options { position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 80; max-height: 260px; overflow-y: auto; border: 1px solid #34455e; border-radius: 10px; background: #091522; box-shadow: 0 18px 50px rgba(0, 0, 0, .5); }
+.scrim-account-options button { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 52px; padding: 8px 11px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: white; text-align: left; cursor: pointer; }
+.scrim-account-options button:hover, .scrim-account-options button.highlighted { background: rgba(96, 165, 250, .13); }
+.scrim-account-options button span { min-width: 0; }
+.scrim-account-options strong, .scrim-account-options small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scrim-account-options strong { font-size: 12px; }.scrim-account-options small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.scrim-account-options b { color: var(--gold-2); font-size: 9px; }
+.scrim-account-options p { margin: 0; padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+
+.admin-schedule-row { grid-template-columns: minmax(270px, 320px) minmax(220px, 1fr) 62px 104px 88px; }
+.schedule-unconfirm-button { min-height: 40px; padding: 8px 10px; border: 1px solid rgba(251, 113, 133, .35); border-radius: 6px; background: rgba(251, 113, 133, .08); color: #fda4af; font-size: 12px; font-weight: 800; cursor: pointer; }
+.schedule-score strong { display: flex; align-items: baseline; justify-content: center; gap: 3px; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.schedule-score i { margin: 0 3px; }
+
+/* Compact mobile tournament controls without hiding the join action. */
+.join-inline button { min-width: 62px; padding: 7px 14px; border-radius: 10px; font-weight: 900; }
+.tournament-bar > .primary-button.compact { min-height: 40px; padding: 8px 14px; border-radius: 10px; white-space: nowrap; }
+
+@media (max-width: 1180px) {
+  .admin-schedule-row { grid-template-columns: minmax(250px, 1fr) minmax(190px, 1fr) 62px 104px 88px; }
+}
+
+@media (max-width: 800px) {
+  .admin-schedule-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .admin-schedule-editor, .admin-schedule-row > span { grid-column: 1 / -1; }
+  .schedule-team, .schedule-team.team-b { align-content: center; min-width: 0; }
+  .schedule-score { min-height: 88px; }
+  .schedule-score small { font-size: 9px; letter-spacing: .08em; }
+  .schedule-score strong { font-size: 24px; }
+}
+
+@media (max-width: 640px) {
+  .tournament-bar { flex-wrap: wrap; gap: 9px; }
+  .tournament-bar > div:first-child { flex: 1 1 calc(100% - 122px); min-width: 0; }
+  .tournament-bar > .primary-button.compact { flex: 0 0 auto; }
+  .join-inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; flex: 1 1 100%; gap: 7px; margin-left: 0; }
+  .join-inline input { width: 100%; min-height: 42px; border-radius: 10px; }
+  .join-inline button { min-height: 42px; border-radius: 12px; }
+  .result-row { grid-template-columns: 1fr 58px 1fr; gap: 7px; padding: 12px 0; }
+  .result-kind { grid-column: 1 / -1; }
+  .result-side, .result-side.red { grid-template-columns: 1fr; justify-items: center; gap: 5px; text-align: center; }
+  .result-side.red b { grid-row: 3; }
+  .result-side .team-mark.small { width: 42px; height: 42px; }
+  .result-side strong { width: 100%; font-size: 12px; }
+  .result-series-score { min-height: 78px; }
+  .result-series-score strong { font-size: 20px; }
+  .scrim-roster-editor { overflow: visible; }
+}
+
+@media (max-width: 480px) {
+  .join-tournament-box { grid-template-columns: 1fr; }
+  .join-tournament-box .primary-button, .join-tournament-box .secondary-button { grid-column: 1; width: 100%; min-height: 44px; border-radius: 12px; }
+  .tournament-bar > div:first-child { flex-basis: 100%; }
+  .tournament-bar > .primary-button.compact { flex: 1 1 auto; }
+  .schedule-teams { grid-template-columns: minmax(0, 1fr) 54px minmax(0, 1fr); gap: 7px; }
+  .schedule-team .team-mark.small { width: 42px; height: 42px; }
+  .schedule-team strong { font-size: 13px; }
+  .schedule-score { min-height: 80px; }
+  .schedule-score strong { font-size: 21px; }
+  .schedule-prediction-labels b { font-size: 11px; }
+  .schedule-prediction-labels small { max-width: 72px; overflow: hidden; text-overflow: ellipsis; }
+  .operation-overlay > div { padding: 26px 18px; border-radius: 14px; }
+}
+
 /* Scoreboard review v2: explicit side mapping, compact fields, and guarded registration. */
 .result-meta-fields { grid-template-columns: 88px 112px minmax(220px,1fr) auto minmax(220px,1fr); }
 .side-swap { min-width: 150px; padding: 4px 10px; font-size: 11px; font-weight: 800; white-space: nowrap; }

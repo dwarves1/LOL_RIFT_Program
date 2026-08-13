@@ -245,6 +245,18 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   assert.equal(data.teams.find((team) => team.id === match.teamBId).players.length, 5);
   assert.match(matchCreated.sharePath, new RegExp(`/scrim/${created.tournamentId}/bet/`));
 
+  sqlite.prepare("INSERT INTO riot_accounts (id, user_id, game_name, tagline, game_name_normalized, tagline_normalized, is_primary) VALUES (?, ?, ?, ?, ?, ?, 0)")
+    .run("riot_player1_secondary", "player1", "player1부계", "KR2", "player1부계", "kr2");
+  await assert.rejects(
+    () => tournament.createScrimMatch({
+      tournamentId: created.tournamentId,
+      scheduledAt: "2026-08-12T14:00:00.000Z",
+      blueAccountIds: ["riot_player1_secondary", ...accountIds.slice(1, 5)],
+      redAccountIds: accountIds.slice(5, 10),
+    }, actors.get("admin")),
+    /본계정만/,
+  );
+
   await assert.rejects(
     () => tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("player1")),
     /배팅이 열려 있는 내전 경기가 아닙니다/,
@@ -354,6 +366,16 @@ test("tournament isolation, team leadership, result correction, and draft permis
   await tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("outsider"));
   await tournament.createBet(created.tournamentId, match.id, match.teamAId, 500, blueVice);
   await tournament.createBet(created.tournamentId, match.id, match.teamBId, 900, redVice);
+  const refund = await tournament.unconfirmMatchSchedule(match.id, actors.get("admin"));
+  assert.deepEqual(refund, { refundedBets: 3, refundedPoints: 1500, cancelledFreePoints: 0 });
+  data = await dashboard(created.tournamentId);
+  assert.equal(data.matches.find((item) => item.id === match.id).scheduleConfirmed, false);
+  assert.equal(sqlite.prepare("SELECT points_balance FROM tournament_entries WHERE tournament_id = ? AND user_id = ?").get(created.tournamentId, "outsider").points_balance, 1000);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM bets WHERE match_id = ? AND status = 'refunded'").get(match.id).count, 3);
+  await tournament.confirmMatchSchedule(match.id, actors.get("admin"));
+  await tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("outsider"));
+  await tournament.createBet(created.tournamentId, match.id, match.teamAId, 500, blueVice);
+  await tournament.createBet(created.tournamentId, match.id, match.teamBId, 900, redVice);
   data = await dashboard(created.tournamentId);
   const prediction = data.predictionSummaries.find((summary) => summary.matchId === match.id);
   assert.deepEqual(prediction, {
@@ -433,4 +455,12 @@ test("tournament isolation, team leadership, result correction, and draft permis
     await draft.createDraft({ context: "practice", name: `저장 ${index + 1}`, mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, blueVice);
   }
   await assert.rejects(() => draft.createDraft({ context: "practice", name: "여섯 번째", mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, blueVice), /최대 5개/);
+});
+
+test("test players are idempotent and separated into league and scrim groups", async () => {
+  await tournament.seedTestPlayers(actors.get("admin"));
+  await tournament.seedTestPlayers(actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE id LIKE 'test_league_%'").get().count, 20);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE id LIKE 'test_scrim_%'").get().count, 20);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM riot_accounts WHERE user_id LIKE 'test_%' AND is_primary = 1").get().count, 40);
 });
