@@ -1,6 +1,8 @@
 import type { ExtractedScoreboardPlayer, OcrFieldConfidence } from "./scoreboard-ocr";
 
-export const OPENAI_SCOREBOARD_MODEL = "gpt-5.6-terra";
+// Scoreboard uploads are a well-scoped extraction task with a human confirmation step.
+// GPT-5 mini supports image input and structured responses at a substantially lower cost.
+export const OPENAI_SCOREBOARD_MODEL = "gpt-5-mini";
 
 type RosterEntry = {
   nickname: string;

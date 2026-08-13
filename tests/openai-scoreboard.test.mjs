@@ -72,7 +72,7 @@ test("AI analysis sends an original-detail image and strict schema", async () =>
       }), { status: 200, headers: { "content-type": "application/json" } });
     },
   });
-  assert.equal(requestBody.model, "gpt-5.6-terra");
+  assert.equal(requestBody.model, "gpt-5-mini");
   assert.equal(requestBody.store, false);
   assert.equal(requestBody.input[0].content[1].detail, "original");
   assert.equal(requestBody.text.format.strict, true);
