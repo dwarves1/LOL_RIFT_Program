@@ -484,6 +484,22 @@ button:disabled { opacity: .45; cursor: not-allowed; transform: none !important;
 @media (max-width: 1050px) { .fun-stat-grid { grid-template-columns: repeat(3,1fr); }.player-metric-grid { grid-template-columns: repeat(3,1fr); } }
 @media (max-width: 700px) { .bet-player-rosters, .relationship-highlights, .player-directory, .player-record-grid { grid-template-columns: 1fr; }.fun-stat-grid { grid-template-columns: 1fr 1fr; }.player-profile-hero { grid-template-columns: 56px 1fr; padding: 16px; }.player-profile-hero > i { width: 52px; height: 52px; font-size: 20px; }.profile-streak { grid-column: 1/-1; border-top: 1px solid var(--line); border-left: 0; }.player-metric-grid { grid-template-columns: 1fr 1fr; }.player-directory > button { grid-template-columns: 42px 1fr auto; }.player-directory em { display: none; }.player-data-time { align-items: flex-start; flex-wrap: wrap; }.player-data-time small { width: 100%; margin-left: 0; }.recent-player-matches > div:not(.section-heading) { grid-template-columns: 115px 1fr 36px; } }
 
+/* 2026 LOLMEN pre-registration and roster editing */
+.pre-register-panel, .team-roster-editor-panel { margin: 18px 0; }
+.pre-register-form { display: grid; grid-template-columns: minmax(160px,1.1fr) minmax(180px,1.4fr) minmax(100px,.55fr) auto; align-items: end; gap: 10px; padding: 16px; border: 1px solid rgba(250,204,21,.26); background: rgba(250,204,21,.035); }
+.pre-register-form label { display: grid; gap: 6px; }.pre-register-form label > span, .team-roster-editor-card label > span { color: var(--muted); font-size: 9px; font-weight: 800; }
+.pre-register-form input, .pre-register-list-head input, .team-roster-editor-card input, .team-roster-editor-card select { width: 100%; min-height: 40px; padding: 0 11px; border: 1px solid var(--line); background: #091321; color: var(--text); }
+.pre-register-form > div { display: flex; align-items: center; gap: 7px; min-height: 40px; }
+.pre-register-list-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; }.pre-register-list-head input { max-width: 320px; }.pre-register-list-head span { color: var(--muted); font-size: 9px; }
+.pre-register-list { margin-top: 8px; border: 1px solid var(--line); }.pre-register-list > div { display: grid; grid-template-columns: 38px minmax(170px,1fr) auto minmax(90px,auto) 52px; align-items: center; gap: 10px; min-height: 62px; padding: 9px 12px; border-top: 1px solid var(--line); }.pre-register-list > div:first-child { border-top: 0; }
+.pre-register-list i { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid rgba(250,204,21,.35); background: rgba(250,204,21,.08); color: var(--gold-2); font-style: normal; font-weight: 900; }.pre-register-list span { min-width: 0; }.pre-register-list strong, .pre-register-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.pre-register-list strong { font-size: 11px; }.pre-register-list small { margin-top: 3px; color: var(--muted); font-size: 9px; }.pre-register-list b { padding: 5px 7px; border: 1px solid rgba(250,204,21,.32); color: var(--gold-2); font-size: 8px; }.pre-register-list em { color: #9fb0c3; font-size: 9px; font-style: normal; }.pre-register-list > p { padding: 20px; color: var(--muted); text-align: center; }
+.team-roster-editor-list { display: grid; gap: 14px; }.team-roster-editor-card { border: 1px solid var(--line); background: rgba(255,255,255,.018); }.team-roster-editor-card > header { display: grid; grid-template-columns: 44px minmax(180px,1fr) auto; align-items: end; gap: 11px; padding: 13px; border-bottom: 1px solid var(--line); }.team-roster-editor-card > header label { display: grid; gap: 5px; }
+.team-roster-slots { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 0; }.team-roster-slots > div { min-width: 0; padding: 11px; border-right: 1px solid var(--line); }.team-roster-slots > div:last-child { border-right: 0; }.team-roster-slots > div > span { display: block; margin-bottom: 7px; color: var(--gold-2); font-size: 9px; font-weight: 900; letter-spacing: .08em; }.team-roster-slots select { margin-top: 7px; }
+.team-roster-slots .scrim-account-picker { min-width: 0; }.team-roster-slots .scrim-account-picker > input { min-width: 0; }.team-roster-slots .scrim-account-options { width: min(310px,calc(100vw - 42px)); z-index: 30; }
+.primary-account-chip.provisional { border-color: rgba(250,204,21,.45); color: var(--gold-2); }
+@media (max-width: 1100px) { .pre-register-form { grid-template-columns: 1fr 1fr; }.team-roster-slots { grid-template-columns: 1fr 1fr; }.team-roster-slots > div { border-bottom: 1px solid var(--line); } }
+@media (max-width: 700px) { .pre-register-form { grid-template-columns: 1fr; }.pre-register-form > div { flex-wrap: wrap; }.pre-register-list-head { align-items: stretch; flex-direction: column; }.pre-register-list-head input { max-width: none; }.pre-register-list > div { grid-template-columns: 36px minmax(0,1fr) auto; }.pre-register-list em { grid-column: 2; }.pre-register-list button { grid-column: 3; grid-row: 2; }.team-roster-editor-card > header { grid-template-columns: 40px 1fr; }.team-roster-editor-card > header button { grid-column: 1/-1; }.team-roster-slots { grid-template-columns: 1fr; }.team-roster-slots > div { border-right: 0; }.team-roster-slots .scrim-account-options { position: relative; width: 100%; } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
@@ -936,4 +952,8 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .result-meta-fields label:first-child { grid-column: 1; }
   .result-meta-fields label:nth-child(2) { grid-column: 2 / -1; }
   .result-meta-fields label:nth-child(3) { grid-column: 1; }
+}
+
+@media (max-width: 700px) {
+  .team-roster-slots .scrim-account-options { position: relative; top: auto; right: auto; width: 100%; margin-top: 5px; }
 }

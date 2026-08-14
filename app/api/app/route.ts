@@ -19,6 +19,8 @@ import {
   setTeamLogo,
   clearTeamLogo,
   setTeamLeaders,
+  savePreRegisteredPlayer,
+  updateTournamentTeam,
   setScrimBetting,
   joinTournamentByCode,
   rotateTournamentCode,
@@ -32,6 +34,8 @@ import {
   type CreateScrimMatchInput,
   type SaveMatchResultInput,
   type TeamLogoInput,
+  type PreRegisteredPlayerInput,
+  type UpdateTournamentTeamInput,
   type UserRole,
 } from "../../../lib/tournament-service";
 import {
@@ -79,7 +83,7 @@ export async function POST(request: Request) {
     const action = String(payload.action ?? "");
 
     if (action === "update_profile") {
-      await updateUserProfile({
+      const result = await updateUserProfile({
         realName: String(payload.realName ?? ""),
         riotGameName: String(payload.riotGameName ?? ""),
         riotTagline: String(payload.riotTagline ?? ""),
@@ -88,7 +92,7 @@ export async function POST(request: Request) {
           return { id: item.id ? String(item.id) : undefined, gameName: String(item.gameName ?? ""), tagline: String(item.tagline ?? ""), isPrimary: Boolean(item.isPrimary) };
         }) : undefined,
       }, user);
-      return Response.json({ ok: true });
+      return Response.json({ ok: true, ...result });
     }
     if (!user.profileComplete) {
       return Response.json({ error: "본계정과 실명 프로필을 먼저 설정해 주세요." }, { status: 403 });
@@ -200,6 +204,33 @@ export async function POST(request: Request) {
     }
     if (action === "seed_test_players") {
       const result = await seedTestPlayers(user);
+      return Response.json({ ok: true, ...result });
+    }
+    if (action === "save_pre_registered_player") {
+      const input = payload.input as Record<string, unknown>;
+      const result = await savePreRegisteredPlayer({
+        tournamentId: String(input.tournamentId ?? ""),
+        userId: input.userId ? String(input.userId) : undefined,
+        realName: String(input.realName ?? ""),
+        gameName: String(input.gameName ?? ""),
+        tagline: String(input.tagline ?? ""),
+      } satisfies PreRegisteredPlayerInput, user);
+      return Response.json({ ok: true, ...result });
+    }
+    if (action === "update_tournament_team") {
+      const input = payload.input as Record<string, unknown>;
+      const result = await updateTournamentTeam({
+        teamId: String(input.teamId ?? ""),
+        name: String(input.name ?? ""),
+        members: Array.isArray(input.members) ? input.members.map((member) => {
+          const item = member as Record<string, unknown>;
+          const role = String(item.teamRole ?? "member");
+          return {
+            riotAccountId: String(item.riotAccountId ?? ""),
+            teamRole: role === "captain" || role === "vice_captain" ? role : "member",
+          };
+        }) : [],
+      } satisfies UpdateTournamentTeamInput, user);
       return Response.json({ ok: true, ...result });
     }
     if (action === "set_match_best_of") {

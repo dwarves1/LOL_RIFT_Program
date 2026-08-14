@@ -18,9 +18,10 @@ export function getConfiguredOwnerEmail(): string | null {
 }
 
 const schemaStatements = [
-  `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, display_name TEXT NOT NULL, auth_display_name TEXT, real_name TEXT, riot_game_name TEXT, riot_tagline TEXT, riot_game_name_normalized TEXT, riot_tagline_normalized TEXT, profile_completed_at TEXT, profile_updated_at TEXT, role TEXT NOT NULL DEFAULT 'viewer', points_balance INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, display_name TEXT NOT NULL, auth_display_name TEXT, real_name TEXT, riot_game_name TEXT, riot_tagline TEXT, riot_game_name_normalized TEXT, riot_tagline_normalized TEXT, profile_completed_at TEXT, profile_updated_at TEXT, role TEXT NOT NULL DEFAULT 'viewer', account_status TEXT NOT NULL DEFAULT 'active', merged_into_user_id TEXT, claimed_at TEXT, points_balance INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_riot_id ON users(riot_game_name_normalized, riot_tagline_normalized)`,
+  `CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)`,
   `CREATE TABLE IF NOT EXISTS riot_id_history (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_history_user ON riot_id_history(user_id, changed_at)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_history_lookup ON riot_id_history(game_name_normalized, tagline_normalized)`,
@@ -292,6 +293,14 @@ async function migrateGoogleAuthentication(raw: D1Database) {
   ]);
 }
 
+async function migratePreRegisteredPlayers(raw: D1Database) {
+  const userColumns = (await raw.prepare("PRAGMA table_info(users)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "users", userColumns, "account_status", "TEXT NOT NULL DEFAULT 'active'");
+  await addColumnIfMissing(raw, "users", userColumns, "merged_into_user_id", "TEXT");
+  await addColumnIfMissing(raw, "users", userColumns, "claimed_at", "TEXT");
+  await raw.prepare("CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)").run();
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -306,13 +315,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_bets_tournament_settled')
            OR (type = 'index' AND name = 'idx_tournament_backups_tournament')
            OR (type = 'index' AND name = 'idx_auth_identities_user_provider')
+           OR (type = 'index' AND name = 'idx_users_account_status')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 7) return;
+        if (Number(schemaState?.marker_count ?? 0) === 8) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -330,6 +340,7 @@ export function ensureSchema(): Promise<void> {
         await migrateScrimOperations(raw);
         await migrateBackupsAndSettlements(raw);
         await migrateGoogleAuthentication(raw);
+        await migratePreRegisteredPlayers(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

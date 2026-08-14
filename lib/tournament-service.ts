@@ -35,6 +35,7 @@ import {
 import { currentSessionUserId, type GoogleIdentity } from "./google-auth";
 
 export type UserRole = "viewer" | "operator" | "admin";
+export type AccountStatus = "active" | "provisional" | "merged";
 
 export type RequestUser = {
   id: string;
@@ -46,6 +47,7 @@ export type RequestUser = {
   riotTagline: string | null;
   profileComplete: boolean;
   role: UserRole;
+  accountStatus: AccountStatus;
   pointsBalance: number;
   isLocalDemo: boolean;
 };
@@ -82,6 +84,20 @@ function publicDisplayName(gameName: string, tagline: string, realName: string) 
   return `${gameName}#${tagline}(${realName})`;
 }
 
+function isLolmen2026Tournament(tournament: { name: string; competitionKind: string }) {
+  const normalized = tournament.name.trim().normalize("NFKC").toLocaleLowerCase("ko-KR");
+  return tournament.competitionKind === "tournament" && normalized.includes("2026") && normalized.includes("롤멘");
+}
+
+async function canonicalUser(userId: string) {
+  const db = getDb();
+  const [current] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!current) return null;
+  if (current.accountStatus !== "merged" || !current.mergedIntoUserId) return current;
+  const [merged] = await db.select().from(users).where(eq(users.id, current.mergedIntoUserId)).limit(1);
+  return merged ?? null;
+}
+
 function isoAfter(start: string, minutes: number) {
   const date = new Date(start);
   date.setMinutes(date.getMinutes() + minutes);
@@ -97,11 +113,13 @@ export async function resolveGoogleIdentityToUserId(identity: GoogleIdentity) {
     .where(and(eq(authIdentities.provider, identity.provider), eq(authIdentities.providerSubject, identity.subject)))
     .limit(1);
   if (linkedIdentity) {
+    const linkedUser = await canonicalUser(linkedIdentity.userId);
+    if (!linkedUser) throw new Error("연결된 사용자 정보를 찾을 수 없습니다.");
     await db
       .update(authIdentities)
-      .set({ email: identity.email, lastSeenAt: new Date().toISOString() })
+      .set({ userId: linkedUser.id, email: identity.email, lastSeenAt: new Date().toISOString() })
       .where(and(eq(authIdentities.provider, identity.provider), eq(authIdentities.providerSubject, identity.subject)));
-    return linkedIdentity.userId;
+    return linkedUser.id;
   }
 
   // The single existing ChatGPT-era account is linked once after Google has
@@ -145,7 +163,7 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
   if (!isLocalDemo) {
     const sessionUserId = await currentSessionUserId(request);
     if (!sessionUserId) return null;
-    const [existingGoogleUser] = await getDb().select().from(users).where(eq(users.id, sessionUserId)).limit(1);
+    const existingGoogleUser = await canonicalUser(sessionUserId);
     if (!existingGoogleUser) return null;
     return {
       id: existingGoogleUser.id,
@@ -157,6 +175,7 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
       riotTagline: existingGoogleUser.riotTagline,
       profileComplete: Boolean(existingGoogleUser.profileCompletedAt),
       role: existingGoogleUser.role,
+      accountStatus: existingGoogleUser.accountStatus,
       pointsBalance: existingGoogleUser.pointsBalance,
       isLocalDemo: false,
     };
@@ -209,6 +228,7 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
       riotTagline: null,
       profileComplete: false,
       role,
+      accountStatus: "active",
       pointsBalance: 0,
       isLocalDemo,
     };
@@ -233,6 +253,7 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
     riotTagline: existing.riotTagline,
     profileComplete: Boolean(existing.profileCompletedAt),
     role: existing.role,
+    accountStatus: existing.accountStatus,
     pointsBalance: existing.pointsBalance,
     isLocalDemo,
   };
@@ -245,6 +266,114 @@ export type UpdateProfileInput = {
   riotAccounts?: Array<{ id?: string; gameName: string; tagline: string; isPrimary: boolean }>;
 };
 
+type NormalizedProfileAccount = {
+  id?: string;
+  gameName: string;
+  tagline: string;
+  isPrimary: boolean;
+  gameNameNormalized: string;
+  taglineNormalized: string;
+};
+
+async function claimPreRegisteredPlayer(
+  shellUser: typeof users.$inferSelect,
+  preRegisteredUser: typeof users.$inferSelect,
+  primaryAccount: typeof riotAccounts.$inferSelect,
+  normalizedAccounts: NormalizedProfileAccount[],
+  realName: string,
+  actor: RequestUser,
+) {
+  if (actor.profileComplete || shellUser.accountStatus !== "active" || preRegisteredUser.accountStatus !== "provisional") {
+    throw new Error("이미 다른 회원이 등록한 롤 계정입니다.");
+  }
+  const db = getDb();
+  const memberships = await db.select({
+    tournamentId: tournamentMembers.tournamentId,
+    tournamentName: tournaments.name,
+    competitionKind: tournaments.competitionKind,
+  }).from(tournamentMembers)
+    .innerJoin(tournaments, eq(tournaments.id, tournamentMembers.tournamentId))
+    .where(eq(tournamentMembers.userId, preRegisteredUser.id));
+  const targetTournament = memberships.find((membership) => isLolmen2026Tournament({
+    name: membership.tournamentName,
+    competitionKind: membership.competitionKind,
+  }));
+  if (!targetTournament) throw new Error("2026 롤멘 대회에 등록된 가입 전 선수만 자동 연동할 수 있습니다.");
+
+  const [existingIdentity] = await db.select({ provider: authIdentities.provider })
+    .from(authIdentities)
+    .where(eq(authIdentities.userId, preRegisteredUser.id))
+    .limit(1);
+  if (existingIdentity) throw new Error("이미 Google 계정과 연동된 선수입니다.");
+
+  const changedAt = new Date().toISOString();
+  const primary = normalizedAccounts.find((account) => account.isPrimary)!;
+  const displayName = publicDisplayName(primary.gameName, primary.tagline, realName);
+  const mergedEmail = `merged-${shellUser.id.replace(/[^a-zA-Z0-9_-]/g, "")}@lolrift.invalid`;
+  const statements: unknown[] = [];
+  statements.push(
+    db.update(users).set({
+      email: mergedEmail,
+      accountStatus: "merged",
+      mergedIntoUserId: preRegisteredUser.id,
+      profileUpdatedAt: changedAt,
+      lastSeenAt: changedAt,
+    }).where(eq(users.id, shellUser.id)),
+    db.update(users).set({
+      email: actor.email,
+      displayName,
+      authDisplayName: actor.authDisplayName,
+      realName,
+      riotGameName: primary.gameName,
+      riotTagline: primary.tagline,
+      riotGameNameNormalized: primary.gameNameNormalized,
+      riotTaglineNormalized: primary.taglineNormalized,
+      profileCompletedAt: preRegisteredUser.profileCompletedAt ?? changedAt,
+      profileUpdatedAt: changedAt,
+      accountStatus: "active",
+      claimedAt: changedAt,
+      lastSeenAt: changedAt,
+    }).where(eq(users.id, preRegisteredUser.id)),
+    db.update(riotAccounts).set({
+      gameName: primary.gameName,
+      tagline: primary.tagline,
+      gameNameNormalized: primary.gameNameNormalized,
+      taglineNormalized: primary.taglineNormalized,
+      isPrimary: true,
+      updatedAt: changedAt,
+    }).where(eq(riotAccounts.id, primaryAccount.id)),
+    db.update(players).set({ nickname: `${primary.gameName}#${primary.tagline}` }).where(eq(players.riotAccountId, primaryAccount.id)),
+    db.update(authIdentities).set({
+      userId: preRegisteredUser.id,
+      email: actor.email,
+      lastSeenAt: changedAt,
+    }).where(eq(authIdentities.userId, shellUser.id)),
+  );
+  for (const account of normalizedAccounts.filter((item) => !item.isPrimary)) {
+    statements.push(db.insert(riotAccounts).values({
+      id: uid("riot"), userId: preRegisteredUser.id,
+      gameName: account.gameName, tagline: account.tagline,
+      gameNameNormalized: account.gameNameNormalized, taglineNormalized: account.taglineNormalized,
+      isPrimary: false, createdAt: changedAt, updatedAt: changedAt,
+    }));
+  }
+  statements.push(
+    db.insert(auditLogs).values({
+      id: uid("audit"),
+      tournamentId: targetTournament.tournamentId,
+      actorId: preRegisteredUser.id,
+      actorName: displayName,
+      action: "pre_registered_player_claimed",
+      entityType: "user",
+      entityId: preRegisteredUser.id,
+      beforeJson: JSON.stringify({ status: "provisional", shellUserId: shellUser.id }),
+      afterJson: JSON.stringify({ status: "active", googleEmail: actor.email }),
+    }),
+  );
+  await db.batch(statements as never);
+  return { linkedPreRegistered: true, userId: preRegisteredUser.id };
+}
+
 export async function updateUserProfile(input: UpdateProfileInput, actor: RequestUser) {
   const realName = input.realName?.trim().normalize("NFKC");
   if (!realName || realName.length > 50) throw new Error("실명을 확인해 주세요.");
@@ -256,7 +385,7 @@ export async function updateUserProfile(input: UpdateProfileInput, actor: Reques
   if (submitted.length < 1 || submitted.length > 5 || submitted.filter((account) => account.isPrimary).length !== 1) {
     throw new Error("본계정 1개와 부계정 최대 4개를 등록해 주세요.");
   }
-  const normalizedAccounts = submitted.map((account) => {
+  const normalizedAccounts: NormalizedProfileAccount[] = submitted.map((account) => {
     const gameName = account.gameName?.trim().normalize("NFKC");
     const tagline = account.tagline?.trim().normalize("NFKC").toUpperCase();
     if (!gameName || gameName.length > 32 || gameName.includes("#") || !tagline || tagline.length > 16 || tagline.includes("#")) {
@@ -273,12 +402,29 @@ export async function updateUserProfile(input: UpdateProfileInput, actor: Reques
   const taglineNormalized = primary.taglineNormalized;
   const db = getDb();
   const registered = await db.select().from(riotAccounts);
-  if (normalizedAccounts.some((account) => registered.some((item) => item.userId !== actor.id && item.gameNameNormalized === account.gameNameNormalized && item.taglineNormalized === account.taglineNormalized))) {
-    throw new Error("이미 다른 회원이 등록한 롤 계정입니다.");
-  }
-
   const [existing] = await db.select().from(users).where(eq(users.id, actor.id)).limit(1);
   if (!existing) throw new Error("사용자 정보를 찾을 수 없습니다.");
+  const conflictingAccounts = normalizedAccounts.flatMap((account) => registered.filter((item) => (
+    item.userId !== actor.id &&
+    item.gameNameNormalized === account.gameNameNormalized &&
+    item.taglineNormalized === account.taglineNormalized
+  )));
+  if (conflictingAccounts.length) {
+    const primaryConflict = conflictingAccounts.find((account) => (
+      account.gameNameNormalized === gameNameNormalized && account.taglineNormalized === taglineNormalized
+    ));
+    const [preRegisteredUser] = primaryConflict
+      ? await db.select().from(users).where(eq(users.id, primaryConflict.userId)).limit(1)
+      : [];
+    if (
+      primaryConflict &&
+      preRegisteredUser?.accountStatus === "provisional" &&
+      conflictingAccounts.every((account) => account.userId === preRegisteredUser.id)
+    ) {
+      return claimPreRegisteredPlayer(existing, preRegisteredUser, primaryConflict, normalizedAccounts, realName, actor);
+    }
+    throw new Error("이미 다른 회원이 등록한 롤 계정입니다.");
+  }
   const changedAt = new Date().toISOString();
   if (
     existing.riotGameName &&
@@ -343,6 +489,7 @@ export async function updateUserProfile(input: UpdateProfileInput, actor: Reques
     { displayName: existing.displayName },
     { displayName },
   );
+  return { linkedPreRegistered: false, userId: actor.id };
 }
 
 async function audit(
@@ -639,6 +786,241 @@ export async function setTeamLeaders(
     captainUserId,
     viceCaptainUserId,
   });
+}
+
+export type PreRegisteredPlayerInput = {
+  tournamentId: string;
+  userId?: string;
+  realName: string;
+  gameName: string;
+  tagline: string;
+};
+
+function normalizedRiotIdentity(gameNameInput: string, taglineInput: string) {
+  const gameName = gameNameInput?.trim().normalize("NFKC");
+  const tagline = taglineInput?.trim().normalize("NFKC").toUpperCase();
+  if (!gameName || gameName.length > 32 || gameName.includes("#") || !tagline || tagline.length > 16 || tagline.includes("#")) {
+    throw new Error("본계정은 게임 이름#태그 형식으로 정확하게 입력해 주세요.");
+  }
+  return {
+    gameName,
+    tagline,
+    gameNameNormalized: normalizeIdentityPart(gameName),
+    taglineNormalized: normalizeIdentityPart(tagline),
+  };
+}
+
+async function requireLolmen2026Tournament(tournamentId: string, actor: RequestUser, adminOnly = false) {
+  if (adminOnly ? actor.role !== "admin" : actor.role === "viewer") throw new Error(adminOnly ? "관리자만 가입 전 선수를 관리할 수 있습니다." : "운영 권한이 필요합니다.");
+  const [tournament] = await getDb().select().from(tournaments).where(eq(tournaments.id, tournamentId)).limit(1);
+  if (!tournament || !isLolmen2026Tournament(tournament)) throw new Error("이 기능은 2026 롤멘 대회에서만 사용할 수 있습니다.");
+  if (!(await hasTournamentAccess(actor, tournament.id))) throw new Error("이 대회를 운영할 권한이 없습니다.");
+  return tournament;
+}
+
+export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, actor: RequestUser) {
+  const tournament = await requireLolmen2026Tournament(input.tournamentId, actor, true);
+  const realName = input.realName?.trim().normalize("NFKC");
+  if (!realName || realName.length > 50) throw new Error("선수 이름을 확인해 주세요.");
+  const identity = normalizedRiotIdentity(input.gameName, input.tagline);
+  const db = getDb();
+  const [duplicate] = await db.select().from(riotAccounts).where(and(
+    eq(riotAccounts.gameNameNormalized, identity.gameNameNormalized),
+    eq(riotAccounts.taglineNormalized, identity.taglineNormalized),
+  )).limit(1);
+  if (duplicate && duplicate.userId !== input.userId) throw new Error("이미 등록된 본계정입니다.");
+  const changedAt = new Date().toISOString();
+  const displayName = publicDisplayName(identity.gameName, identity.tagline, realName);
+
+  if (input.userId) {
+    const [target] = await db.select().from(users).where(eq(users.id, input.userId)).limit(1);
+    if (!target || target.accountStatus !== "provisional") throw new Error("수정할 가입 전 선수를 찾을 수 없습니다.");
+    const [membership] = await db.select().from(tournamentMembers).where(and(
+      eq(tournamentMembers.tournamentId, tournament.id),
+      eq(tournamentMembers.userId, target.id),
+    )).limit(1);
+    if (!membership) throw new Error("현재 대회에 등록된 선수만 수정할 수 있습니다.");
+    const [account] = await db.select().from(riotAccounts).where(and(
+      eq(riotAccounts.userId, target.id),
+      eq(riotAccounts.isPrimary, true),
+    )).limit(1);
+    if (!account) throw new Error("선수의 본계정을 찾을 수 없습니다.");
+    const statements: unknown[] = [];
+    if (account.gameNameNormalized !== identity.gameNameNormalized || account.taglineNormalized !== identity.taglineNormalized) {
+      statements.push(db.insert(riotIdHistory).values({
+          id: uid("riot_history"),
+          userId: target.id,
+          gameName: account.gameName,
+          tagline: account.tagline,
+          gameNameNormalized: account.gameNameNormalized,
+          taglineNormalized: account.taglineNormalized,
+          changedAt,
+      }));
+    }
+    statements.push(
+      db.update(users).set({
+        displayName,
+        realName,
+        riotGameName: identity.gameName,
+        riotTagline: identity.tagline,
+        riotGameNameNormalized: identity.gameNameNormalized,
+        riotTaglineNormalized: identity.taglineNormalized,
+        profileUpdatedAt: changedAt,
+      }).where(eq(users.id, target.id)),
+      db.update(riotAccounts).set({ ...identity, updatedAt: changedAt }).where(eq(riotAccounts.id, account.id)),
+      db.update(players).set({ nickname: `${identity.gameName}#${identity.tagline}` }).where(eq(players.riotAccountId, account.id)),
+      db.insert(auditLogs).values({
+        id: uid("audit"),
+        tournamentId: tournament.id,
+        actorId: actor.id,
+        actorName: actor.displayName,
+        action: "pre_registered_player_updated",
+        entityType: "user",
+        entityId: target.id,
+        beforeJson: JSON.stringify({ realName: target.realName, gameName: account.gameName, tagline: account.tagline }),
+        afterJson: JSON.stringify({ realName, gameName: identity.gameName, tagline: identity.tagline }),
+      }),
+    );
+    await db.batch(statements as never);
+    return { userId: target.id, accountId: account.id };
+  }
+
+  const userId = uid("provisional");
+  const accountId = uid("riot");
+  const internalEmail = `${userId}@lolrift.invalid`;
+  await db.batch([
+    db.insert(users).values({
+      id: userId,
+      email: internalEmail,
+      displayName,
+      realName,
+      riotGameName: identity.gameName,
+      riotTagline: identity.tagline,
+      riotGameNameNormalized: identity.gameNameNormalized,
+      riotTaglineNormalized: identity.taglineNormalized,
+      profileCompletedAt: changedAt,
+      profileUpdatedAt: changedAt,
+      role: "viewer",
+      accountStatus: "provisional",
+      pointsBalance: 0,
+    }),
+    db.insert(riotAccounts).values({
+      id: accountId,
+      userId,
+      ...identity,
+      isPrimary: true,
+      createdAt: changedAt,
+      updatedAt: changedAt,
+    }),
+    db.insert(tournamentMembers).values({ tournamentId: tournament.id, userId, role: "viewer" }),
+    db.insert(auditLogs).values({
+      id: uid("audit"),
+      tournamentId: tournament.id,
+      actorId: actor.id,
+      actorName: actor.displayName,
+      action: "pre_registered_player_created",
+      entityType: "user",
+      entityId: userId,
+      afterJson: JSON.stringify({ realName, gameName: identity.gameName, tagline: identity.tagline }),
+    }),
+  ] as never);
+  return { userId, accountId };
+}
+
+export type UpdateTournamentTeamInput = {
+  teamId: string;
+  name: string;
+  members: Array<{
+    riotAccountId: string;
+    teamRole: "member" | "captain" | "vice_captain";
+  }>;
+};
+
+export async function updateTournamentTeam(input: UpdateTournamentTeamInput, actor: RequestUser) {
+  const db = getDb();
+  const [team] = await db.select().from(teams).where(eq(teams.id, input.teamId)).limit(1);
+  if (!team) throw new Error("팀을 찾을 수 없습니다.");
+  const tournament = await requireLolmen2026Tournament(team.tournamentId, actor);
+  const name = input.name?.trim().normalize("NFKC");
+  if (!name || name.length > 40) throw new Error("팀명을 확인해 주세요.");
+  if (input.members.length !== 5 || input.members.some((member) => !member.riotAccountId)) throw new Error("TOP부터 SUP까지 본계정 5명을 선택해 주세요.");
+  if (input.members.filter((member) => member.teamRole === "captain").length !== 1 || input.members.filter((member) => member.teamRole === "vice_captain").length > 1) {
+    throw new Error("팀장 1명과 부팀장 최대 1명을 지정해 주세요.");
+  }
+  const accountIds = input.members.map((member) => member.riotAccountId);
+  if (new Set(accountIds).size !== 5) throw new Error("같은 본계정을 중복 선택할 수 없습니다.");
+  const accounts = await db.select().from(riotAccounts).where(inArray(riotAccounts.id, accountIds));
+  if (accounts.length !== 5 || accounts.some((account) => !account.isPrimary) || new Set(accounts.map((account) => account.userId)).size !== 5) {
+    throw new Error("서로 다른 선수 5명의 본계정만 선택할 수 있습니다.");
+  }
+  const accountUsers = await db.select({ id: users.id, status: users.accountStatus }).from(users).where(inArray(users.id, accounts.map((account) => account.userId)));
+  if (accountUsers.length !== 5 || accountUsers.some((user) => user.status === "merged")) throw new Error("사용할 수 없는 선수 계정이 포함되어 있습니다.");
+  const tournamentTeams = await db.select().from(teams).where(eq(teams.tournamentId, tournament.id));
+  if (tournamentTeams.some((row) => row.id !== team.id && normalizeIdentityPart(row.name) === normalizeIdentityPart(name))) throw new Error("같은 대회에 동일한 팀명을 사용할 수 없습니다.");
+  const tournamentTeamIds = new Set(tournamentTeams.map((row) => row.id));
+  const allTournamentPlayers = (await db.select().from(players)).filter((player) => tournamentTeamIds.has(player.teamId));
+  const selectedUserIds = new Set(accounts.map((account) => account.userId));
+  if (allTournamentPlayers.some((player) => player.teamId !== team.id && player.userId && selectedUserIds.has(player.userId))) {
+    throw new Error("이미 다른 팀에 배정된 선수가 포함되어 있습니다.");
+  }
+
+  const oldRoster = allTournamentPlayers.filter((player) => player.teamId === team.id);
+  const oldUserIds = new Set(oldRoster.map((player) => player.userId).filter((id): id is string => Boolean(id)));
+  const memberships = await db.select().from(tournamentMembers).where(eq(tournamentMembers.tournamentId, tournament.id));
+  const membershipMap = new Map(memberships.map((membership) => [membership.userId, membership]));
+  const accountMap = new Map(accounts.map((account) => [account.id, account]));
+  const captainAccount = accountMap.get(input.members.find((member) => member.teamRole === "captain")!.riotAccountId)!;
+  const statements: unknown[] = [
+    db.update(teams).set({ name, representativeUserId: captainAccount.userId }).where(eq(teams.id, team.id)),
+    db.delete(players).where(eq(players.teamId, team.id)),
+  ];
+  input.members.forEach((member, index) => {
+    const account = accountMap.get(member.riotAccountId)!;
+    statements.push(db.insert(players).values({
+        id: uid("player"),
+        teamId: team.id,
+        userId: account.userId,
+        riotAccountId: account.id,
+        teamRole: member.teamRole,
+        nickname: `${account.gameName}#${account.tagline}`,
+        position: POSITIONS[index],
+    }));
+  });
+  for (const userId of oldUserIds) {
+    if (selectedUserIds.has(userId)) continue;
+    const membership = membershipMap.get(userId);
+    if (membership && (membership.role === "viewer" || membership.role === "team_rep")) {
+      statements.push(db.update(tournamentMembers).set({ role: "viewer", teamId: null }).where(and(
+        eq(tournamentMembers.tournamentId, tournament.id), eq(tournamentMembers.userId, userId),
+      )));
+    }
+  }
+  for (const member of input.members) {
+    const account = accountMap.get(member.riotAccountId)!;
+    const membership = membershipMap.get(account.userId);
+    const teamRole = member.teamRole === "member" ? "viewer" as const : "team_rep" as const;
+    statements.push(membership
+      ? db.update(tournamentMembers).set({
+          role: membership.role === "owner" || membership.role === "operator" ? membership.role : teamRole,
+          teamId: team.id,
+        }).where(and(eq(tournamentMembers.tournamentId, tournament.id), eq(tournamentMembers.userId, account.userId)))
+      : db.insert(tournamentMembers).values({ tournamentId: tournament.id, userId: account.userId, role: teamRole, teamId: team.id }));
+  }
+  statements.push(
+    db.insert(auditLogs).values({
+      id: uid("audit"),
+      tournamentId: tournament.id,
+      actorId: actor.id,
+      actorName: actor.displayName,
+      action: "team_roster_updated",
+      entityType: "team",
+      entityId: team.id,
+      beforeJson: JSON.stringify({ name: team.name, players: oldRoster.map((player) => ({ userId: player.userId, position: player.position, role: player.teamRole })) }),
+      afterJson: JSON.stringify({ name, players: input.members.map((member, index) => ({ userId: accountMap.get(member.riotAccountId)!.userId, position: POSITIONS[index], role: member.teamRole })) }),
+    }),
+  );
+  await db.batch(statements as never);
+  return { teamId: team.id };
 }
 
 export async function joinTournamentByCode(code: string, actor: RequestUser) {
@@ -2361,12 +2743,13 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     : [];
   const rosterAccounts = requestUser && requestUser.role !== "viewer"
     ? await db.select({
-        id: riotAccounts.id,
-        userId: riotAccounts.userId,
-        gameName: riotAccounts.gameName,
-        tagline: riotAccounts.tagline,
-        isPrimary: riotAccounts.isPrimary,
-        displayName: users.displayName,
+        id: sql<string>`${riotAccounts.id}`.as("roster_account_id"),
+        userId: sql<string>`${riotAccounts.userId}`.as("roster_user_id"),
+        gameName: sql<string>`${riotAccounts.gameName}`.as("roster_game_name"),
+        tagline: sql<string>`${riotAccounts.tagline}`.as("roster_tagline"),
+        isPrimary: sql<boolean>`${riotAccounts.isPrimary}`.as("roster_is_primary"),
+        displayName: sql<string>`${users.displayName}`.as("roster_display_name"),
+        accountStatus: sql<AccountStatus>`${users.accountStatus}`.as("roster_account_status"),
       }).from(riotAccounts).innerJoin(users, eq(users.id, riotAccounts.userId)).orderBy(asc(riotAccounts.gameName))
     : [];
   const allTournaments = await db.select().from(tournaments).orderBy(desc(tournaments.startAt));
@@ -2398,6 +2781,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       accounts: [],
       myRiotAccounts,
       rosterAccounts,
+      supportsPreRegistration: false,
+      preRegisteredPlayers: [],
       leaderTeamIds: [],
       bets: [],
       predictionSummaries: [],
@@ -2412,6 +2797,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       summary: { leagueCompleted: 0, leagueTotal: 0, bracketCompleted: 0, bracketTotal: 0 },
     };
   }
+
+  const supportsPreRegistration = isLolmen2026Tournament(selected);
 
   if (requestUser?.profileComplete && await hasTournamentAccess(requestUser, selected.id)) {
     const entry = await ensureTournamentEntry(requestUser.id, selected.id);
@@ -2477,12 +2864,14 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       .innerJoin(matches, eq(matches.id, playerMatchStats.matchId))
       .where(eq(matches.tournamentId, selected.id)),
     db.select({
-      id: riotAccounts.id,
-      userId: users.id,
-      displayName: users.displayName,
-      riotGameName: riotAccounts.gameName,
-      riotTagline: riotAccounts.tagline,
-      isPrimary: riotAccounts.isPrimary,
+      id: sql<string>`${riotAccounts.id}`.as("dashboard_account_id"),
+      userId: sql<string>`${users.id}`.as("dashboard_user_id"),
+      displayName: sql<string>`${users.displayName}`.as("dashboard_display_name"),
+      riotGameName: sql<string>`${riotAccounts.gameName}`.as("dashboard_game_name"),
+      riotTagline: sql<string>`${riotAccounts.tagline}`.as("dashboard_tagline"),
+      isPrimary: sql<boolean>`${riotAccounts.isPrimary}`.as("dashboard_is_primary"),
+      realName: sql<string | null>`${users.realName}`.as("dashboard_real_name"),
+      accountStatus: sql<AccountStatus>`${users.accountStatus}`.as("dashboard_account_status"),
     }).from(tournamentMembers)
       .innerJoin(users, eq(users.id, tournamentMembers.userId))
       .innerJoin(riotAccounts, eq(riotAccounts.userId, users.id))
@@ -2540,6 +2929,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
           displayName: users.displayName,
           email: users.email,
           role: users.role,
+          accountStatus: users.accountStatus,
           pointsBalance: tournamentEntries.pointsBalance,
         })
         .from(users)
@@ -2549,7 +2939,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
         )
         .orderBy(asc(users.displayName)))
         .map((user) => ({ ...user, pointsBalance: user.pointsBalance ?? 0 }))
-        .filter((user) => !user.id.startsWith("test_"))
+        .filter((user) => !user.id.startsWith("test_") && user.accountStatus === "active")
     : [];
   const [backupRows, settlementRows] = requestUser && isStaff(requestUser)
     ? await Promise.all([
@@ -2700,16 +3090,35 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       displayName: account.displayName,
       riotGameName: account.riotGameName,
       riotTagline: account.riotTagline,
-      isPrimary: account.isPrimary,
+      isPrimary: Boolean(account.isPrimary),
+      accountStatus: account.accountStatus,
       isTest: account.userId.startsWith("test_"),
       testScope: account.userId.startsWith("test_scrim_") ? "scrim" : account.userId.startsWith("test_league_") ? "league" : null,
     })),
     myRiotAccounts,
     rosterAccounts: rosterAccounts.map((account) => ({
       ...account,
+      isPrimary: Boolean(account.isPrimary),
       isTest: account.userId.startsWith("test_"),
       testScope: account.userId.startsWith("test_scrim_") ? "scrim" as const : account.userId.startsWith("test_league_") ? "league" as const : null,
     })),
+    supportsPreRegistration,
+    preRegisteredPlayers: supportsPreRegistration && requestUser?.role === "admin"
+      ? accountRows.filter((account) => account.accountStatus === "provisional" && account.isPrimary).map((account) => {
+          const rosterPlayer = playerRows.find((player) => player.userId === account.userId);
+          const assignedTeam = rosterPlayer ? teamRows.find((team) => team.id === rosterPlayer.teamId) : null;
+          return {
+            userId: account.userId,
+            accountId: account.id,
+            realName: account.realName ?? account.displayName,
+            gameName: account.riotGameName ?? "",
+            tagline: account.riotTagline ?? "",
+            teamId: assignedTeam?.id ?? null,
+            teamName: assignedTeam?.name ?? null,
+            status: "provisional" as const,
+          };
+        })
+      : [],
     leaderTeamIds,
     bets: userBets,
     predictionSummaries,

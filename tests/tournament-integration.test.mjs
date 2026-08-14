@@ -464,3 +464,81 @@ test("test players are idempotent and separated into league and scrim groups", a
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE id LIKE 'test_scrim_%'").get().count, 20);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM riot_accounts WHERE user_id LIKE 'test_%' AND is_primary = 1").get().count, 40);
 });
+
+test("2026 롤멘 pre-registered players keep stats when Google signs up and rosters are edited", async () => {
+  const created = await createCompetition("2026 롤멘 대회", "league_only", 3);
+  const preRegistered = await tournament.savePreRegisteredPlayer({
+    tournamentId: created.tournamentId,
+    realName: "가입 전 선수",
+    gameName: "롤멘사전선수",
+    tagline: "LM26",
+  }, actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(preRegistered.userId).account_status, "provisional");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_members WHERE tournament_id = ? AND user_id = ?").get(created.tournamentId, preRegistered.userId).count, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM riot_accounts WHERE user_id = ? AND is_primary = 1").get(preRegistered.userId).count, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_members tm JOIN users u ON u.id = tm.user_id JOIN riot_accounts ra ON ra.user_id = u.id WHERE tm.tournament_id = ? AND u.id = ?").get(created.tournamentId, preRegistered.userId).count, 1);
+
+  let data = await dashboard(created.tournamentId);
+  assert.equal(data.supportsPreRegistration, true);
+  assert.equal(data.accounts.some((account) => account.userId === preRegistered.userId), true);
+  assert.equal(data.accounts.find((account) => account.userId === preRegistered.userId)?.accountStatus, "provisional");
+  assert.equal(data.preRegisteredPlayers.length, 1);
+  assert.equal(data.preRegisteredPlayers[0].userId, preRegistered.userId);
+
+  const team = data.teams[0];
+  const positionOrder = ["TOP", "JGL", "MID", "ADC", "SUP"];
+  const orderedPlayers = positionOrder.map((position) => team.players.find((player) => player.position === position));
+  await tournament.updateTournamentTeam({
+    teamId: team.id,
+    name: "롤멘 수정 팀",
+    members: orderedPlayers.map((player, index) => ({
+      riotAccountId: index === 4 ? preRegistered.accountId : player.riotAccountId,
+      teamRole: index === 0 ? "captain" : index === 1 ? "vice_captain" : "member",
+    })),
+  }, actors.get("admin"));
+  data = await dashboard(created.tournamentId);
+  const editedTeam = data.teams.find((row) => row.id === team.id);
+  assert.equal(editedTeam.name, "롤멘 수정 팀");
+  assert.ok(editedTeam.players.some((player) => player.userId === preRegistered.userId && player.position === "SUP"));
+
+  const firstMatch = data.matches[0];
+  sqlite.prepare("INSERT INTO player_match_stats (id, match_id, set_no, team_id, user_id, side, row_order, account_name_snapshot, champion_name, champion_level, lane, kills, deaths, assists, damage, gold, gold_per_minute, won) VALUES (?, ?, 1, ?, ?, 1, 1, ?, '가렌', 18, 'SUP', 2, 1, 8, 0, 12000, 0, 1)")
+    .run("stat_pre_registered_claim", firstMatch.id, team.id, preRegistered.userId, "롤멘사전선수");
+
+  const shellUserId = await tournament.resolveGoogleIdentityToUserId({
+    provider: "google",
+    subject: "google-subject-pre-registered",
+    email: "claimed-player@example.com",
+    displayName: "Google 가입자",
+  });
+  const shellActor = {
+    id: shellUserId,
+    email: "claimed-player@example.com",
+    displayName: "Google 가입자",
+    authDisplayName: "Google 가입자",
+    realName: null,
+    riotGameName: null,
+    riotTagline: null,
+    profileComplete: false,
+    role: "viewer",
+    accountStatus: "active",
+    pointsBalance: 0,
+    isLocalDemo: false,
+  };
+  const linked = await tournament.updateUserProfile({
+    realName: "실제 가입자",
+    riotGameName: "롤멘사전선수",
+    riotTagline: "LM26",
+  }, shellActor);
+  assert.equal(linked.linkedPreRegistered, true);
+  assert.equal(linked.userId, preRegistered.userId);
+  assert.equal(sqlite.prepare("SELECT user_id FROM auth_identities WHERE provider_subject = ?").get("google-subject-pre-registered").user_id, preRegistered.userId);
+  assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(shellUserId).account_status, "merged");
+  assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(preRegistered.userId).account_status, "active");
+  assert.equal(sqlite.prepare("SELECT user_id FROM player_match_stats WHERE id = ?").get("stat_pre_registered_claim").user_id, preRegistered.userId);
+
+  const linkedActor = { ...shellActor, id: preRegistered.userId, displayName: "롤멘사전선수#LM26(실제 가입자)", realName: "실제 가입자", riotGameName: "롤멘사전선수", riotTagline: "LM26", profileComplete: true };
+  data = await tournament.getDashboard(created.tournamentId, linkedActor);
+  assert.equal(data.preRegisteredPlayers.length, 0);
+  assert.equal(data.viewer.pointsBalance, 1000);
+});

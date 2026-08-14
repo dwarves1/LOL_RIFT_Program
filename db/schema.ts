@@ -25,6 +25,11 @@ export const users = sqliteTable(
     role: text("role", { enum: ["viewer", "operator", "admin"] })
       .notNull()
       .default("viewer"),
+    accountStatus: text("account_status", { enum: ["active", "provisional", "merged"] })
+      .notNull()
+      .default("active"),
+    mergedIntoUserId: text("merged_into_user_id"),
+    claimedAt: text("claimed_at"),
     pointsBalance: integer("points_balance").notNull().default(0),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     lastSeenAt: text("last_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -35,6 +40,7 @@ export const users = sqliteTable(
       table.riotGameNameNormalized,
       table.riotTaglineNormalized,
     ),
+    index("idx_users_account_status").on(table.accountStatus),
   ],
 );
 

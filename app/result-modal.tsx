@@ -19,7 +19,7 @@ type ResultTeam = {
   players?: Array<{ id: string; nickname: string; position: string; userId: string | null; riotAccountId: string | null }>;
 };
 type ResultMatch = { id: string; matchNo: string; roundLabel: string; teamAId: string | null; teamBId: string | null; bestOf?: number };
-type ResultAccount = { id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null };
+type ResultAccount = { id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null; accountStatus?: "active" | "provisional" | "merged" };
 export type ResultPlayerStat = {
   id?: string;
   matchId?: string;
@@ -543,7 +543,7 @@ export function ResultReviewModal({
                   {rows.map(({ player, index }) => <article className="result-player-card" key={player.rowOrder}>
                   <div className="result-player-identity">
                     <label><span>라인</span><select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select></label>
-                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, sourceAccountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}</option>)}</select></label>
+                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, sourceAccountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}{account.accountStatus === "provisional" ? " · 가입 전" : ""}</option>)}</select></label>
                     <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>이미지 계정명</span><input value={player.accountName} onChange={(event) => patchPlayerField(index, "accountName", event.target.value)} /></label>
                     <label className={lowConfidence(player, "championName") ? "low-confidence-field" : ""}><span>챔피언</span><input list="official-korean-champions" value={player.championName} onChange={(event) => patchPlayerField(index, "championName", event.target.value)} onBlur={(event) => { const corrected = correctedChampionName(event.target.value, championOptions); if (corrected.confidence) patchPlayerField(index, "championName", corrected.value); }} /></label>
                   </div>
