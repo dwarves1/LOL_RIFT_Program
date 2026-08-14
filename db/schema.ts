@@ -519,6 +519,19 @@ export const tournamentBackups = sqliteTable(
   ],
 );
 
+// QA sandboxes are deliberately tracked independently of a tournament name.
+// This lets an administrator remove only data generated for a test run without
+// ever touching a real season that happens to have a similar name.
+export const qaSandboxes = sqliteTable(
+  "qa_sandboxes",
+  {
+    tournamentId: text("tournament_id").primaryKey(),
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_qa_sandboxes_created").on(table.createdAt)],
+);
+
 export const auditLogs = sqliteTable(
   "audit_logs",
   {

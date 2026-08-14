@@ -59,6 +59,8 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_ledger_tournament_user_created ON point_ledger(tournament_id, user_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT, actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_tournament_created ON audit_logs(tournament_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS qa_sandboxes (tournament_id TEXT PRIMARY KEY NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE INDEX IF NOT EXISTS idx_qa_sandboxes_created ON qa_sandboxes(created_at)`,
 ];
 
 let schemaReady: Promise<void> | null = null;
@@ -301,6 +303,13 @@ async function migratePreRegisteredPlayers(raw: D1Database) {
   await raw.prepare("CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)").run();
 }
 
+async function migrateQaSandboxes(raw: D1Database) {
+  await raw.batch([
+    raw.prepare("CREATE TABLE IF NOT EXISTS qa_sandboxes (tournament_id TEXT PRIMARY KEY NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_qa_sandboxes_created ON qa_sandboxes(created_at)"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -316,13 +325,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_tournament_backups_tournament')
            OR (type = 'index' AND name = 'idx_auth_identities_user_provider')
            OR (type = 'index' AND name = 'idx_users_account_status')
+           OR (type = 'index' AND name = 'idx_qa_sandboxes_created')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 8) return;
+        if (Number(schemaState?.marker_count ?? 0) === 9) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -341,6 +351,7 @@ export function ensureSchema(): Promise<void> {
         await migrateBackupsAndSettlements(raw);
         await migrateGoogleAuthentication(raw);
         await migratePreRegisteredPlayers(raw);
+        await migrateQaSandboxes(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

@@ -302,7 +302,7 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   assert.equal(unauthorized.tournament, null);
   await assert.rejects(
     () => tournament.createScrimMatch({ tournamentId: created.tournamentId, scheduledAt: new Date().toISOString(), blueAccountIds: accountIds.slice(10, 15), redAccountIds: accountIds.slice(15, 20) }, actors.get("foreign_operator")),
-    /운영할 권한/,
+    /시즌 코드를 입력해 참가한 회원/,
   );
 });
 
@@ -541,4 +541,101 @@ test("2026 롤멘 pre-registered players keep stats when Google signs up and ros
   data = await tournament.getDashboard(created.tournamentId, linkedActor);
   assert.equal(data.preRegisteredPlayers.length, 0);
   assert.equal(data.viewer.pointsBalance, 1000);
+});
+
+test("QA scrim sandbox is isolated, opens sample betting, settles, and resets safely", async () => {
+  await assert.rejects(() => tournament.createQaScrimSandbox(actors.get("player1")), /관리자만/);
+  const created = await tournament.createQaScrimSandbox(actors.get("admin"));
+  assert.match(created.sharePath, new RegExp(`/scrim/${created.tournamentId}/bet/${created.matchId}`));
+  assert.equal(created.virtualPlayers, 20);
+  assert.equal(created.virtualBets, 10);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM qa_sandboxes WHERE tournament_id = ?").get(created.tournamentId).count, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE id LIKE 'qa_scrim_player_%'").get().count, 20);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_members WHERE tournament_id = ?").get(created.tournamentId).count, 21);
+
+  let data = await dashboard(created.tournamentId);
+  const match = data.matches.find((item) => item.id === created.matchId);
+  assert.equal(match.bettingStatus, "open");
+  const prediction = data.predictionSummaries.find((item) => item.matchId === created.matchId);
+  assert.deepEqual(prediction, {
+    matchId: created.matchId,
+    teamACount: 6,
+    teamBCount: 4,
+    totalCount: 10,
+    teamAPercent: 60,
+    teamBPercent: 40,
+  });
+
+  await tournament.setScrimBetting(created.matchId, "closed", actors.get("admin"));
+  data = await dashboard(created.tournamentId);
+  assert.equal(data.matches.find((item) => item.id === created.matchId).predictionCountAClosed, 6);
+  assert.equal(data.matches.find((item) => item.id === created.matchId).predictionCountBClosed, 4);
+  await tournament.setMatchWinner(created.matchId, match.teamAId, actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM bets WHERE match_id = ? AND status = 'won'").get(created.matchId).count, 6);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM bets WHERE match_id = ? AND status = 'lost'").get(created.matchId).count, 4);
+  sqlite.prepare("INSERT INTO match_result_images (id, match_id, set_no, object_key, file_name, content_type, file_size, created_by, reviewed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run("qa_sandbox_image", created.matchId, 1, "qa-sandbox/result.png", "result.png", "image/png", 100, "admin", "2026-08-14T00:00:00.000Z");
+
+  const reset = await tournament.resetQaScrimSandboxes(actors.get("admin"));
+  assert.equal(reset.deletedTournaments, 1);
+  assert.equal(reset.deletedVirtualPlayers, 20);
+  assert.deepEqual(reset.imageObjectKeys, ["qa-sandbox/result.png"]);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournaments WHERE id = ?").get(created.tournamentId).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM qa_sandboxes").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE id LIKE 'qa_scrim_player_%'").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE id LIKE 'test_scrim_%'").get().count, 20);
+  await assert.rejects(() => tournament.resetQaScrimSandboxes(actors.get("player1")), /관리자만/);
+});
+
+test("scrim members can run a match while operators can rollback, delete, and remove access", async () => {
+  const season = await tournament.createScrimSeason({
+    name: "Community operated scrim",
+    startAt: "2026-08-14T12:00:00.000Z",
+    starterPoints: 1000,
+  }, actors.get("admin"));
+  for (let index = 1; index <= 11; index += 1) {
+    await tournament.joinTournamentByCode(season.accessCode, actors.get(`player${index}`));
+  }
+
+  const communityMatch = await tournament.createScrimMatch({
+    tournamentId: season.tournamentId,
+    scheduledAt: "2026-08-14T13:00:00.000Z",
+    blueAccountIds: accountIds.slice(0, 5),
+    redAccountIds: accountIds.slice(5, 10),
+  }, actors.get("player11"));
+  const context = await tournament.getMatchImageAnalysisContext(communityMatch.matchId, actors.get("player11"));
+  assert.equal(context.teamA.roster.length, 5);
+  await tournament.setScrimBetting(communityMatch.matchId, "open", actors.get("player11"));
+  let data = await dashboard(season.tournamentId);
+  const match = data.matches.find((item) => item.id === communityMatch.matchId);
+  await tournament.createBet(season.tournamentId, match.id, match.teamAId, 300, actors.get("player1"));
+  await tournament.setScrimBetting(communityMatch.matchId, "closed", actors.get("player11"));
+  await tournament.setMatchWinner(communityMatch.matchId, match.teamAId, actors.get("player11"));
+  assert.equal(sqlite.prepare("SELECT status FROM bets WHERE match_id = ?").get(communityMatch.matchId).status, "won");
+
+  await tournament.rollbackScrimMatch(communityMatch.matchId, actors.get("admin"));
+  data = await dashboard(season.tournamentId);
+  const rolledBack = data.matches.find((item) => item.id === communityMatch.matchId);
+  assert.equal(rolledBack.status, "scheduled");
+  assert.equal(rolledBack.bettingStatus, "scheduled");
+  assert.equal(rolledBack.seriesScoreA, 0);
+  assert.equal(sqlite.prepare("SELECT status FROM bets WHERE match_id = ?").get(communityMatch.matchId).status, "refunded");
+  assert.equal(sqlite.prepare("SELECT points_balance FROM tournament_entries WHERE tournament_id = ? AND user_id = ?").get(season.tournamentId, "player1").points_balance, 1000);
+
+  const disposable = await tournament.createScrimMatch({
+    tournamentId: season.tournamentId,
+    scheduledAt: "2026-08-14T14:00:00.000Z",
+    blueAccountIds: accountIds.slice(0, 5),
+    redAccountIds: accountIds.slice(5, 10),
+  }, actors.get("admin"));
+  await tournament.deleteScrimMatch(disposable.matchId, actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM matches WHERE id = ?").get(disposable.matchId).count, 0);
+
+  await assert.rejects(() => tournament.removeTournamentMember(season.tournamentId, "admin", actors.get("admin")), /소유자/);
+  await tournament.removeTournamentMember(season.tournamentId, "player11", actors.get("admin"));
+  assert.equal(await tournament.hasTournamentAccess(actors.get("player11"), season.tournamentId), false);
+  await assert.rejects(
+    () => tournament.setScrimBetting(communityMatch.matchId, "open", actors.get("player11")),
+    /시즌 코드를 입력해 참가한 회원/,
+  );
 });

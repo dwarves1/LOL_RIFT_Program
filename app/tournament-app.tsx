@@ -214,6 +214,14 @@ type Dashboard = {
     role: Role;
     pointsBalance: number;
   }>;
+  members: Array<{
+    userId: string;
+    displayName: string;
+    email: string;
+    role: "owner" | "operator" | "team_rep" | "viewer";
+    teamId: string | null;
+    joinedAt: string;
+  }>;
   summary: {
     leagueCompleted: number;
     leagueTotal: number;
@@ -273,12 +281,22 @@ const AUDIT_LABEL: Record<string, string> = {
   scrim_match_created: "내전 경기를 생성했습니다",
   scrim_betting_opened: "내전 배팅을 시작했습니다",
   scrim_betting_closed: "내전 배팅을 종료했습니다",
+  scrim_match_rolled_back: "내전 경기 결과와 배팅을 되돌렸습니다",
+  scrim_match_deleted: "내전 경기를 삭제했습니다",
+  tournament_member_removed: "대회 참가자를 강퇴했습니다",
+  qa_scrim_sandbox_created: "QA 내전 시나리오를 생성했습니다",
+  qa_scrim_sandboxes_reset: "QA 내전 시나리오를 초기화했습니다",
 };
 
 const OPERATION_LABELS: Record<string, string> = {
   create_tournament: "새 대회를 만들고 있습니다",
   create_scrim_season: "내전 시즌을 만들고 있습니다",
   create_scrim_match: "내전 경기와 팀 구성을 저장하고 있습니다",
+  create_qa_scrim_sandbox: "격리된 QA 내전 시나리오를 준비하고 있습니다",
+  reset_qa_scrim_sandboxes: "QA 내전 시나리오와 테스트 데이터를 초기화하고 있습니다",
+  rollback_scrim_match: "내전 결과와 배팅을 롤백하고 있습니다",
+  delete_scrim_match: "내전 경기와 배팅 기록을 삭제하고 있습니다",
+  remove_tournament_member: "대회 참가자의 권한을 해제하고 있습니다",
   save_match_result: "경기 결과와 이미지를 저장하고 있습니다",
   set_match_schedule: "경기 일정을 저장하고 있습니다",
   confirm_match_schedule: "경기 일정을 확정하고 있습니다",
@@ -634,6 +652,8 @@ export function TournamentApp({
   const viewer = data.viewer;
   const isStaff = viewer?.role === "operator" || viewer?.role === "admin";
   const isScrim = data.tournament.competitionKind === "scrim_season";
+  const canOperateScrim = isScrim && Boolean(viewer?.profileComplete);
+  const canOpenOperations = Boolean(isStaff || canOperateScrim);
   const teamMap = new Map(data.teams.map((team) => [team.id, team]));
   const leagueMatches = data.matches.filter((match) => match.phase === "league" || match.phase === "scrim");
   const bracketMatches = data.matches.filter((match) => match.phase === "bracket");
@@ -677,7 +697,7 @@ export function TournamentApp({
               {item.label}
             </button>
           ))}
-          {isStaff && (
+          {canOpenOperations && (
             <button className={activeTab === "admin" ? "active" : ""} onClick={() => setActiveTab("admin")}>운영</button>
           )}
         </nav>
@@ -717,7 +737,7 @@ export function TournamentApp({
               ))}
             </select>
           </div>
-          {isStaff && <button className="primary-button compact" onClick={() => { if (isScrim) { setHistoricalScrim(false); setShowCreateScrimMatch(true); } else setShowCreate(true); }}>{isScrim ? "＋ 내전 경기" : "＋ 새 대회"}</button>}
+          {canOpenOperations && <button className="primary-button compact" onClick={() => { if (isScrim) { setHistoricalScrim(false); setShowCreateScrimMatch(true); } else setShowCreate(true); }}>{isScrim ? "＋ 내전 경기" : "＋ 새 대회"}</button>}
           {viewer && <div className="join-inline"><input value={joinCode} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="대회 코드" /><button onClick={() => command({ action: "join_tournament", code: joinCode }, "대회 참가가 완료되었습니다.")}>참가</button></div>}
         </section>
 
@@ -742,16 +762,19 @@ export function TournamentApp({
           else setSelectedPlayerId(userId);
         }} />}
         {activeTab === "points" && <PointsView {...shared} upcoming={predictionMatches} focusedMatchId={initialMatchId} openPlayer={(userId) => { setSelectedPlayerId(userId); setActiveTab("players"); }} />}
-        {activeTab === "admin" && isStaff && <AdminView {...shared} openCreate={() => setShowCreate(true)} openCreateScrim={() => setShowCreateScrim(true)} openCreateScrimMatch={() => { setHistoricalScrim(false); setShowCreateScrimMatch(true); }} openHistoricalScrim={() => { setHistoricalScrim(true); setShowCreateScrimMatch(true); }} />}
+        {activeTab === "admin" && canOpenOperations && <AdminView {...shared} openCreate={() => setShowCreate(true)} openCreateScrim={() => setShowCreateScrim(true)} openCreateScrimMatch={() => { setHistoricalScrim(false); setShowCreateScrimMatch(true); }} openHistoricalScrim={() => { setHistoricalScrim(true); setShowCreateScrimMatch(true); }} />}
       </main>
 
       <nav className="mobile-nav" aria-label="모바일 메뉴">
-        {(isScrim ? visibleNavItems.slice(0, 5) : visibleNavItems.slice(0, 4)).map((item) => (
+        {(isScrim ? visibleNavItems.filter((item) => item.id !== "stats") : visibleNavItems.slice(0, 4)).map((item) => (
           <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => { if (item.id === "players") setSelectedPlayerId(null); setActiveTab(item.id); }}>
             <span>{item.id === "home" ? "◆" : item.id === "schedule" ? "▤" : item.id === "standings" ? "≡" : "◇"}</span>
             {item.short}
           </button>
         ))}
+        {isScrim && canOperateScrim && <button className={activeTab === "admin" ? "active" : ""} onClick={() => setActiveTab("admin")}>
+          <span>⚙</span>운영
+        </button>}
         {!isScrim && <button className={["teams", "stats", "draft", "players", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab("players")}>
           <span>•••</span>더보기
         </button>}
@@ -774,7 +797,7 @@ export function TournamentApp({
           if (ok) setShowCreateScrim(false);
         }} />
       )}
-      {showCreateScrimMatch && isStaff && isScrim && (
+      {showCreateScrimMatch && canOperateScrim && (
         <CreateScrimMatchModal historical={historicalScrim} tournamentId={data.tournament.id} accounts={data.accounts} busy={busy} onClose={() => setShowCreateScrimMatch(false)} onCreate={async (input) => {
           const ok = await command({ action: "create_scrim_match", input }, historicalScrim ? "지난 내전 경기 일정을 만들었습니다. 결과 이미지를 확인해 주세요." : "내전 경기와 영구 배팅 링크를 생성했습니다.");
           if (ok) setShowCreateScrimMatch(false);
@@ -1062,7 +1085,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
 function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, predictionSummary, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; leaderTeamIds: string[]; predictionSummary?: PredictionSummary; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
-  const canManageMatch = isStaff || Boolean((match.teamAId && leaderTeamIds.includes(match.teamAId)) || (match.teamBId && leaderTeamIds.includes(match.teamBId)));
+  const canManageMatch = isStaff || match.phase === "scrim" || Boolean((match.teamAId && leaderTeamIds.includes(match.teamAId)) || (match.teamBId && leaderTeamIds.includes(match.teamBId)));
   return (
     <article className={`schedule-card ${match.status}`}>
       <div className={`match-time ${match.phase === "league" ? "no-number" : ""}`}>
@@ -1093,7 +1116,7 @@ function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, predictionSummar
       <div className="match-actions">
         {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
         {hasDetail && match.phase === "scrim" && <button type="button" className="summary-share-button" onClick={() => void shareOrCopy(`/scrim/${encodeURIComponent(match.tournamentId)}/match/${encodeURIComponent(match.id)}`, `${match.roundLabel} 내전 요약`)}>내전 요약 공유</button>}
-        {canManageMatch && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy} onClick={() => openResultReview(match)}>{hasDetail ? isStaff ? "세트 결과 추가·수정" : "다음 세트 결과 등록" : "세트 결과 이미지 등록"}</button>}
+        {canManageMatch && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")} onClick={() => openResultReview(match)}>{hasDetail ? isStaff ? "세트 결과 추가·수정" : "다음 세트 결과 등록" : "세트 결과 이미지 등록"}</button>}
         {teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : isStaff ? <MatchDraftCreator match={match} busy={busy} command={command} /> : null)}
         {canManageMatch && (!match.scheduleConfirmed || isStaff) && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} canSetBestOf={isStaff} />}
         {match.status === "scheduled" && (
@@ -1106,12 +1129,12 @@ function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, predictionSummar
         ) : (
           <span className="result-waiting">경기 예정</span>
         )}
-        {isStaff && teamA && teamB && match.bestOf === 1 && (
+        {(isStaff || match.phase === "scrim") && teamA && teamB && match.bestOf === 1 && (
           <div className="winner-buttons">
             {[teamA, teamB].map((team) => (
               <button
                 key={team.id}
-                disabled={busy}
+                disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")}
                 onClick={() => {
                   if (window.confirm(`${team.name}을(를) 승리팀으로 확정할까요?`)) {
                     void command({ action: "set_winner", matchId: match.id, winnerId: team.id }, `${team.name} 승리가 반영되었습니다.`);
@@ -1572,11 +1595,14 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming, focuse
   );
 }
 
-function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, openCreateScrimMatch, openHistoricalScrim }: SharedProps & { openCreate: () => void; openCreateScrim: () => void; openCreateScrimMatch: () => void; openHistoricalScrim: () => void }) {
+function AdminView({ data, teamMap, isStaff, busy, command, openCreate, openCreateScrim, openCreateScrimMatch, openHistoricalScrim }: SharedProps & { openCreate: () => void; openCreateScrim: () => void; openCreateScrimMatch: () => void; openHistoricalScrim: () => void }) {
   const upcoming = data.matches
     .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId)
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
   const isScrim = data.tournament?.competitionKind === "scrim_season";
+  const managedMatches = isScrim
+    ? data.matches.filter((match) => match.teamAId && match.teamBId).sort((a, b) => Number(a.status === "completed") - Number(b.status === "completed") || new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
+    : upcoming;
   const operations = {
     scheduled: upcoming.filter((match) => match.bettingStatus === "scheduled").length,
     open: upcoming.filter((match) => match.bettingStatus === "open").length,
@@ -1586,12 +1612,18 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
   const settlementIssues = data.settlementSummaries.filter((row) => row.state === "failed" || row.state === "ready" || row.state === "processing");
   return (
     <section className="page-section">
-      <PageTitle eyebrow="CONTROL ROOM" title={isScrim ? "내전 운영" : "대회 운영"} description={isScrim ? "참가자 10명과 팀 구성을 등록하고 배팅을 직접 시작·종료합니다." : "경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다."} />
-      <div className="admin-actions"><button className="primary-button" onClick={isScrim ? openCreateScrimMatch : openCreate}>{isScrim ? "＋ 내전 경기 생성" : "＋ 새 대회 생성"}</button>{isScrim && <button className="secondary-button" onClick={openHistoricalScrim}>지난 내전 등록</button>}<button className="secondary-button" onClick={openCreateScrim}>＋ 내전 시즌</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button>{data.viewer?.role === "admin" && <button className="secondary-button test-player-seed-button" disabled={busy} onClick={() => { if (!window.confirm("내전 테스트 선수 20명과 리그 테스트 선수 20명을 준비할까요?\n실제 Google 로그인 계정과는 분리되어 저장됩니다.")) return; void command({ action: "seed_test_players" }, "내전·리그 테스트 선수 20명씩을 준비했습니다."); }}>TEST 선수 40명 준비</button>}<div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div></div>
+      <PageTitle eyebrow="CONTROL ROOM" title={isScrim ? "내전 운영" : "대회 운영"} description={isScrim ? (isStaff ? "참가자 10명과 팀 구성을 등록하고 배팅을 직접 시작·종료합니다." : "시즌에 참가한 회원은 내전 경기 생성, 배팅 관리, 결과 등록을 함께 진행할 수 있습니다.") : "경기 일정을 확정하고 사용자 권한과 변경 이력을 관리합니다."} />
+      <div className="admin-actions">
+        <button className="primary-button" onClick={isScrim ? openCreateScrimMatch : openCreate}>{isScrim ? "＋ 내전 경기 생성" : "＋ 새 대회 생성"}</button>
+        {isScrim && <button className="secondary-button" onClick={openHistoricalScrim}>지난 내전 등록</button>}
+        {isStaff && <><button className="secondary-button" onClick={openCreateScrim}>＋ 내전 시즌</button><button className="secondary-button" disabled={busy} onClick={() => command({ action: "rotate_tournament_code", tournamentId: data.tournament!.id }, "새 대회 코드를 발급했습니다.")}>대회 코드 재발급 · 끝 {data.tournament?.accessCodeHint ?? "미발급"}</button></>}
+        {data.viewer?.role === "admin" && <><button className="secondary-button test-player-seed-button" disabled={busy} onClick={() => { if (!window.confirm("실제 회원·포인트와 분리된 QA 내전 시즌, 참가자 10명, 예시 배팅 10건을 만들까요?\n생성 후 공유 → 배팅 종료 → 결과 이미지 등록 → 정산을 순서대로 점검할 수 있습니다.")) return; void command({ action: "create_qa_scrim_sandbox" }, "QA 내전 시나리오를 만들고 배팅을 열었습니다. 공유·배팅 종료·결과 등록·정산을 순서대로 점검해 주세요."); }}>QA 내전 시나리오 생성</button><button className="secondary-button" disabled={busy} onClick={() => { if (!window.confirm("생성된 모든 QA 내전 시나리오와 테스트 선수·배팅·결과 이미지를 삭제할까요?\n실제 대회, 회원, 포인트에는 영향을 주지 않습니다.")) return; void command({ action: "reset_qa_scrim_sandboxes" }, "QA 내전 시나리오와 테스트 데이터를 초기화했습니다."); }}>QA 시나리오 초기화</button><button className="secondary-button test-player-seed-button" disabled={busy} onClick={() => { if (!window.confirm("내전 테스트 선수 20명과 리그 테스트 선수 20명을 준비할까요?\n실제 Google 로그인 계정과는 분리되어 저장됩니다.")) return; void command({ action: "seed_test_players" }, "내전·리그 테스트 선수 20명씩을 준비했습니다."); }}>TEST 선수 40명 준비</button></>}
+        <div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div>
+      </div>
       {data.supportsPreRegistration && data.viewer?.role === "admin" && <PreRegisteredPlayerPanel data={data} busy={busy} command={command} />}
       {data.supportsPreRegistration && <TeamRosterEditorPanel data={data} busy={busy} command={command} />}
-      {isScrim && <><div className="operation-metric-grid"><article><span>배팅 대기</span><strong>{operations.scheduled}</strong></article><article className="live"><span>배팅 중</span><strong>{operations.open}</strong></article><article className="warning"><span>결과 대기</span><strong>{operations.resultPending}</strong></article><article><span>확정 완료</span><strong>{operations.completed}</strong></article></div><div className="operation-tools"><span>결과와 포인트를 정정하면 기존 정산을 취소하고 다시 계산합니다.</span><a className="secondary-button" href={`/api/admin/backup?tournament=${encodeURIComponent(data.tournament!.id)}`}>CSV 백업 다운로드</a></div></>}
-      <section className="operations-safety-grid">
+      {isScrim && <><div className="operation-metric-grid"><article><span>배팅 대기</span><strong>{operations.scheduled}</strong></article><article className="live"><span>배팅 중</span><strong>{operations.open}</strong></article><article className="warning"><span>결과 대기</span><strong>{operations.resultPending}</strong></article><article><span>확정 완료</span><strong>{operations.completed}</strong></article></div><div className="operation-tools"><span>결과와 포인트를 정정하면 기존 정산을 취소하고 다시 계산합니다.</span>{isStaff && <a className="secondary-button" href={`/api/admin/backup?tournament=${encodeURIComponent(data.tournament!.id)}`}>CSV 백업 다운로드</a>}</div></>}
+      {isStaff && <section className="operations-safety-grid">
         <article className="panel backup-panel">
           <div className="section-heading"><div><p className="eyebrow">DATA PROTECTION</p><h2>자동 백업 · 복구 파일</h2></div><button className="secondary-button" disabled={busy} onClick={() => command({ action: "create_tournament_backup", tournamentId: data.tournament!.id }, "백업 파일을 만들었습니다.")}>지금 백업</button></div>
           <p className="admin-panel-help">배팅 시작·마감과 결과 수정·정산 전에는 자동 스냅샷이 생성됩니다. 자동 백업은 최신 30개까지 보관되며, 다운로드한 JSON은 복구 검토용 원본입니다.</p>
@@ -1603,13 +1635,13 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
           <p className="admin-panel-help">정산은 시도 이력과 지급 내역을 남깁니다. 오류·대기 상태만 재점검할 수 있으며, 이미 완료된 정산은 중복 지급하지 않습니다.</p>
           <div className="settlement-list">{data.settlementSummaries.filter((row) => row.totalBets || row.state !== "not_required").map((row) => { const match = data.matches.find((item) => item.id === row.matchId); const actionable = row.state === "failed" || row.state === "ready" || row.state === "processing"; return <div key={row.matchId}><span className={`settlement-state ${row.state}`}>{row.state === "completed" ? "정산 완료" : row.state === "failed" ? "오류" : row.state === "reversed" ? "정정됨" : "점검 필요"}</span><strong>{match?.roundLabel ?? "경기"}</strong><small>{row.totalBets}명 · 적중 {row.wonBets}명 · 지급 {row.paidOut.toLocaleString()}P{row.errorMessage ? ` · ${row.errorMessage}` : ""}</small>{actionable && match?.winnerId && <button className="text-button" disabled={busy} onClick={() => command({ action: "reconcile_bet_settlement", matchId: row.matchId }, "배팅 정산을 점검했습니다.")}>재점검</button>}</div>; })}{!data.settlementSummaries.some((row) => row.totalBets || row.state !== "not_required") && <p>정산 대상 경기가 없습니다.</p>}</div>
         </article>
-      </section>
+      </section>}
       <div className="admin-grid">
         <article className="panel schedule-confirmation-panel">
-          <div className="section-heading"><div><p className="eyebrow">{isScrim ? "SCRIM BETTING" : "SCHEDULE APPROVAL"}</p><h2>{isScrim ? "내전 경기·배팅 관리" : "경기 일정 확정"}</h2></div><span>{upcoming.length}</span></div>
+          <div className="section-heading"><div><p className="eyebrow">{isScrim ? "SCRIM BETTING" : "SCHEDULE APPROVAL"}</p><h2>{isScrim ? "내전 경기·배팅 관리" : "경기 일정 확정"}</h2></div><span>{managedMatches.length}</span></div>
           <p className="admin-panel-help">{isScrim ? "일정은 현재 시각으로 생성되며 수정할 수 있습니다. 배팅 시작 후 공유 링크를 카카오톡으로 보내고 경기 직전에 종료하세요." : "날짜·시간을 변경하면 먼저 일정을 저장해 주세요. 확정된 경기만 시작 1시간 전까지 포인트 예측에 표시됩니다."}</p>
           <div className="admin-schedule-list">
-            {upcoming.map((match) => {
+            {managedMatches.map((match) => {
               const teamA = teamMap.get(match.teamAId!);
               const teamB = teamMap.get(match.teamBId!);
               return (
@@ -1619,6 +1651,7 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
                   teamA={teamA}
                   teamB={teamB}
                   tournamentId={data.tournament!.id}
+                  canCorrect={isStaff}
                   busy={busy}
                   command={command}
                 /> : <AdminScheduleRow
@@ -1632,7 +1665,7 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
                 />
               );
             })}
-            {!upcoming.length && <div className="schedule-group-empty">확정할 예정 경기가 없습니다.</div>}
+            {!managedMatches.length && <div className="schedule-group-empty">관리할 내전 경기가 없습니다.</div>}
           </div>
         </article>
         <article className="panel audit-panel">
@@ -1653,6 +1686,16 @@ function AdminView({ data, teamMap, busy, command, openCreate, openCreateScrim, 
           <p className="admin-panel-help">팀장과 부팀장은 소속 팀 경기의 일정을 입력하고, 결과 이미지와 승패를 등록할 수 있습니다. 일정 확정과 잘못 등록된 결과의 정정은 운영자·관리자만 가능합니다.</p>
           <div className="team-leadership-list">
             {data.teams.map((team) => <TeamLeadershipControl key={`${team.id}:${team.players.map((player) => player.teamRole).join(",")}`} team={team} busy={busy} command={command} />)}
+          </div>
+        </article>
+      )}
+      {isStaff && (
+        <article className="panel role-panel">
+          <div className="section-heading"><div><p className="eyebrow">TOURNAMENT MEMBERS</p><h2>대회 참가자 관리</h2></div><span>{data.members.length}명</span></div>
+          <p className="admin-panel-help">강퇴하면 이 대회의 열람·내전 운영·배팅 권한이 즉시 사라집니다. 기존 경기 기록과 포인트 정산 이력은 보존됩니다.</p>
+          <div className="role-table">
+            {data.members.map((member) => <div key={member.userId}><i>{member.displayName.slice(0, 1)}</i><span><strong>{member.displayName}</strong><small>{member.email} · {formatDate(member.joinedAt)}</small></span><b>{member.role === "owner" ? "소유자" : member.role === "operator" ? "운영자" : member.role === "team_rep" ? "팀 대표" : "참가자"}</b>{member.role === "owner" ? <small>강퇴 불가</small> : <button className="text-button" disabled={busy} onClick={() => { if (!window.confirm(`${member.displayName}님을 이 대회에서 강퇴할까요?\n기존 경기·배팅 기록은 보존됩니다.`)) return; void command({ action: "remove_tournament_member", tournamentId: data.tournament!.id, userId: member.userId }, `${member.displayName}님을 대회에서 강퇴했습니다.`); }}>강퇴</button>}</div>)}
+            {!data.members.length && <div className="role-empty">아직 참가자가 없습니다.</div>}
           </div>
         </article>
       )}
@@ -1881,11 +1924,12 @@ function BetPlayerRosters({ match, teamMap, tournamentId, playerInsightMap, open
   })}</div></div>)}</div>;
 }
 
-function ScrimMatchControl({ match, teamA, teamB, tournamentId, busy, command }: {
+function ScrimMatchControl({ match, teamA, teamB, tournamentId, canCorrect, busy, command }: {
   match: Match;
   teamA?: Team;
   teamB?: Team;
   tournamentId: string;
+  canCorrect: boolean;
   busy: boolean;
   command: SharedProps["command"];
 }) {
@@ -1898,12 +1942,13 @@ function ScrimMatchControl({ match, teamA, teamB, tournamentId, busy, command }:
     <header><div><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><span>{match.roundLabel} · {formatDate(match.scheduledAt)}</span></div><b className={`betting-state ${match.bettingStatus}`}>{match.bettingStatus === "open" ? "배팅 중" : match.bettingStatus === "closed" ? "배팅 종료" : "대기"}</b></header>
     <div className="scrim-rosters"><span><b>BLUE</b>{names(teamA)}</span><span><b>RED</b>{names(teamB)}</span></div>
     <div className="scrim-control-actions">
-      <input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} aria-label="내전 경기 일시" />
-      <button type="button" disabled={busy || scheduledAt === originalScheduledAt} onClick={() => command({ action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() }, "내전 경기 일정을 변경했습니다.")}>일정 저장</button>
+      <input type="datetime-local" value={scheduledAt} disabled={busy || match.status !== "scheduled"} onChange={(event) => setScheduledAt(event.target.value)} aria-label="내전 경기 일시" />
+      <button type="button" disabled={busy || match.status !== "scheduled" || scheduledAt === originalScheduledAt} onClick={() => command({ action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() }, "내전 경기 일정을 변경했습니다.")}>일정 저장</button>
       {match.bettingStatus === "scheduled" && <button type="button" className="primary-button compact" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "open" }, "배팅을 시작했습니다. 공유 링크를 사용할 수 있습니다.")}>배팅 시작</button>}
       {match.bettingStatus === "open" && <button type="button" className="accent-button" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "closed" }, "배팅을 종료했습니다.")}>배팅 종료</button>}
       <button type="button" className="secondary-button" onClick={() => void shareOrCopy(matchPath, `${teamA?.name} vs ${teamB?.name} 내전 배팅`).then(window.alert).catch(() => undefined)}>경기 링크 공유</button>
       <button type="button" className="text-button" onClick={() => void shareOrCopy(permanentPath, "내전 배팅 현황").then(window.alert).catch(() => undefined)}>영구 링크</button>
+      {canCorrect && <><button type="button" className="text-button" disabled={busy} onClick={() => { if (!window.confirm("등록된 결과·통계와 배팅을 모두 취소하고 배팅 대기 상태로 되돌릴까요?\n유료 배팅 포인트는 모두 환불되며, 다시 배팅을 시작할 수 있습니다.")) return; void command({ action: "rollback_scrim_match", matchId: match.id }, "내전 경기 결과와 배팅을 배팅 대기 상태로 되돌렸습니다."); }}>결과·배팅 롤백</button><button type="button" className="text-button" disabled={busy} onClick={() => { if (!window.confirm("이 내전 경기와 팀 구성, 배팅 기록을 삭제할까요?\n유료 배팅 포인트는 모두 환불되며 이 작업은 되돌릴 수 없습니다.")) return; void command({ action: "delete_scrim_match", matchId: match.id }, "내전 경기를 삭제하고 배팅 포인트를 환불했습니다."); }}>경기 삭제</button></>}
     </div>
   </div>;
 }

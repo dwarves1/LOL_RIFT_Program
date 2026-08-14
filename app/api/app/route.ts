@@ -7,6 +7,8 @@ import {
   confirmMatchSchedule,
   unconfirmMatchSchedule,
   seedTestPlayers,
+  createQaScrimSandbox,
+  resetQaScrimSandboxes,
   createTiebreakerMatch,
   getDashboard,
   getMatchImageAnalysisContext,
@@ -22,6 +24,9 @@ import {
   savePreRegisteredPlayer,
   updateTournamentTeam,
   setScrimBetting,
+  rollbackScrimMatch,
+  deleteScrimMatch,
+  removeTournamentMember,
   joinTournamentByCode,
   rotateTournamentCode,
   updateUserProfile,
@@ -133,6 +138,15 @@ export async function POST(request: Request) {
       const created = await createScrimMatch(payload.input as CreateScrimMatchInput, user);
       return Response.json({ ok: true, ...created });
     }
+    if (action === "create_qa_scrim_sandbox") {
+      const created = await createQaScrimSandbox(user);
+      return Response.json({ ok: true, ...created });
+    }
+    if (action === "reset_qa_scrim_sandboxes") {
+      const reset = await resetQaScrimSandboxes(user);
+      for (const objectKey of reset.imageObjectKeys) await env.RESULT_IMAGES.delete(objectKey);
+      return Response.json({ ok: true, tournamentId: "", ...reset });
+    }
     if (action === "set_scrim_betting") {
       const result = await setScrimBetting(
         String(payload.matchId ?? ""),
@@ -140,6 +154,16 @@ export async function POST(request: Request) {
         user,
       );
       return Response.json({ ok: true, ...result });
+    }
+    if (action === "rollback_scrim_match") {
+      const result = await rollbackScrimMatch(String(payload.matchId ?? ""), user);
+      for (const objectKey of result.imageObjectKeys) await env.RESULT_IMAGES.delete(objectKey);
+      return Response.json({ ok: true });
+    }
+    if (action === "delete_scrim_match") {
+      const result = await deleteScrimMatch(String(payload.matchId ?? ""), user);
+      for (const objectKey of result.imageObjectKeys) await env.RESULT_IMAGES.delete(objectKey);
+      return Response.json({ ok: true });
     }
     if (action === "create_tournament_backup") {
       const result = await createTournamentBackup(String(payload.tournamentId ?? ""), user, "manual", "운영자 수동 백업");
@@ -320,6 +344,10 @@ export async function POST(request: Request) {
     if (action === "set_role") {
       await setUserRole(String(payload.userId), String(payload.role) as UserRole, user);
       return Response.json({ ok: true });
+    }
+    if (action === "remove_tournament_member") {
+      const result = await removeTournamentMember(String(payload.tournamentId ?? ""), String(payload.userId ?? ""), user);
+      return Response.json({ ok: true, ...result });
     }
     if (action === "save_match_result") {
       const input = payload.input as Record<string, unknown>;
