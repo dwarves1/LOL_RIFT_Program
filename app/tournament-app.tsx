@@ -8,6 +8,7 @@ import { DraftView, MatchDraftCreator } from "./draft-view";
 import { StatsView } from "./stats-view";
 import { positionLabel } from "../lib/positions";
 import { buildPlayerInsights, opggSearchUrl, type PlayerCompetitionRecord, type PlayerInsight, type RelationshipRecord } from "../lib/player-insights";
+import { FeedbackAdminPanel, FeedbackWidget, type FeedbackEntry } from "./feedback";
 
 type Role = "viewer" | "operator" | "admin";
 type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "stats" | "draft" | "players" | "points" | "admin";
@@ -234,6 +235,8 @@ type Dashboard = {
     teamId: string | null;
     joinedAt: string;
   }>;
+  feedback: FeedbackEntry[];
+  unreadFeedbackCount: number;
   summary: {
     leagueCompleted: number;
     leagueTotal: number;
@@ -301,9 +304,12 @@ const AUDIT_LABEL: Record<string, string> = {
   qa_scrim_sandboxes_reset: "QA 내전 시나리오를 초기화했습니다",
   lolmen_2026_test_data_reset: "2026 롤멘 테스트 포인트와 잘못된 결과 이미지를 초기화했습니다",
   lolmen_2026_result_assets_deleted: "잘못된 결과 이미지 파일 정리를 완료했습니다",
+  feedback_status_updated: "피드백 처리 상태를 변경했습니다",
 };
 
 const OPERATION_LABELS: Record<string, string> = {
+  submit_feedback: "의견을 운영자에게 전달하고 있습니다",
+  update_feedback: "피드백 처리 상태를 저장하고 있습니다",
   create_tournament: "새 대회를 만들고 있습니다",
   create_scrim_season: "내전 시즌을 만들고 있습니다",
   create_scrim_match: "내전 경기와 팀 구성을 저장하고 있습니다",
@@ -668,6 +674,7 @@ export function TournamentApp({
             onSave={(profile) => command({ action: "update_profile", ...profile }, "프로필을 저장했습니다.")}
           />
         )}
+        <FeedbackWidget viewer={viewer ?? null} tournament={null} signInPath={signInPath} busy={busy} command={command} />
       </main>
       {operation && <OperationOverlay label={operation.label} />}
       </>
@@ -725,7 +732,7 @@ export function TournamentApp({
             </button>
           ))}
           {canOpenOperations && (
-            <button className={activeTab === "admin" ? "active" : ""} onClick={() => setActiveTab("admin")}>운영</button>
+            <button className={activeTab === "admin" ? "active" : ""} onClick={() => setActiveTab("admin")}>운영{isAdmin && data.unreadFeedbackCount > 0 && <span className="feedback-nav-badge">{Math.min(data.unreadFeedbackCount, 99)}</span>}</button>
           )}
         </nav>
         <div className="account-area">
@@ -800,7 +807,7 @@ export function TournamentApp({
           </button>
         ))}
         {isScrim && canOperateScrim && <button className={activeTab === "admin" ? "active" : ""} onClick={() => setActiveTab("admin")}>
-          <span>⚙</span>운영
+          <span>⚙</span>운영{isAdmin && data.unreadFeedbackCount > 0 && <b className="feedback-nav-badge">{Math.min(data.unreadFeedbackCount, 99)}</b>}
         </button>}
         {!isScrim && <button className={["teams", "stats", "draft", "players", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => { setSelectedPlayerId(null); setPlayerSearchQuery(""); setActiveTab("players"); }}>
           <span>•••</span>더보기
@@ -867,6 +874,7 @@ export function TournamentApp({
           }}
         /> : null;
       })()}
+      <FeedbackWidget viewer={viewer} tournament={data.tournament} signInPath={signInPath} busy={busy} command={command} />
     </div>{operation && <OperationOverlay label={operation.label} />}</>
   );
 }
@@ -1630,6 +1638,7 @@ function AdminView({ data, teamMap, isStaff, busy, command, openCreate, openCrea
         </article>
       )}
       {data.supportsPreRegistration && <TeamRosterEditorPanel data={data} busy={busy} command={command} />}
+      {data.viewer?.role === "admin" && <FeedbackAdminPanel data={data} busy={busy} command={command} />}
       {isScrim && <><div className="operation-metric-grid"><article><span>배팅 대기</span><strong>{operations.scheduled}</strong></article><article className="live"><span>배팅 중</span><strong>{operations.open}</strong></article><article className="warning"><span>결과 대기</span><strong>{operations.resultPending}</strong></article><article><span>확정 완료</span><strong>{operations.completed}</strong></article></div><div className="operation-tools"><span>결과와 포인트를 정정하면 기존 정산을 취소하고 다시 계산합니다.</span>{isStaff && <a className="secondary-button" href={`/api/admin/backup?tournament=${encodeURIComponent(data.tournament!.id)}`}>CSV 백업 다운로드</a>}</div></>}
       {isStaff && <section className="operations-safety-grid">
         <article className="panel backup-panel">

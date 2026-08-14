@@ -62,6 +62,10 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_audit_tournament_created ON audit_logs(tournament_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS qa_sandboxes (tournament_id TEXT PRIMARY KEY NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_qa_sandboxes_created ON qa_sandboxes(created_at)`,
+  `CREATE TABLE IF NOT EXISTS feedback_messages (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, tournament_id TEXT, category TEXT NOT NULL, message TEXT NOT NULL, page_path TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new', admin_note TEXT, handled_by TEXT, handled_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback_messages(status, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_feedback_tournament_created ON feedback_messages(tournament_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback_messages(user_id, created_at)`,
 ];
 
 let schemaReady: Promise<void> | null = null;
@@ -319,6 +323,15 @@ async function migrateQaSandboxes(raw: D1Database) {
   ]);
 }
 
+async function migrateFeedbackMessages(raw: D1Database) {
+  await raw.batch([
+    raw.prepare("CREATE TABLE IF NOT EXISTS feedback_messages (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, tournament_id TEXT, category TEXT NOT NULL, message TEXT NOT NULL, page_path TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new', admin_note TEXT, handled_by TEXT, handled_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback_messages(status, created_at)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_feedback_tournament_created ON feedback_messages(tournament_id, created_at)"),
+    raw.prepare("CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback_messages(user_id, created_at)"),
+  ]);
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -336,13 +349,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_users_account_status')
            OR (type = 'index' AND name = 'idx_qa_sandboxes_created')
            OR (type = 'index' AND name = 'idx_matches_tournament_status')
+           OR (type = 'index' AND name = 'idx_feedback_status_created')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 10) return;
+        if (Number(schemaState?.marker_count ?? 0) === 11) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -363,6 +377,7 @@ export function ensureSchema(): Promise<void> {
         await migratePreRegisteredPlayers(raw);
         await migrateQaSandboxes(raw);
         await migrateMatchCancellations(raw);
+        await migrateFeedbackMessages(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

@@ -39,6 +39,8 @@ import {
   reconcileBetSettlement,
   getTournamentBackupPayload,
   restoreTournamentBackupAsCopy,
+  submitFeedback,
+  updateFeedbackMessage,
   type CreateTournamentInput,
   type CreateScrimSeasonInput,
   type CreateScrimMatchInput,
@@ -47,6 +49,8 @@ import {
   type PreRegisteredPlayerInput,
   type UpdateTournamentTeamInput,
   type UserRole,
+  type FeedbackCategory,
+  type FeedbackStatus,
 } from "../../../lib/tournament-service";
 import {
   advanceDraftSet,
@@ -105,6 +109,17 @@ export async function POST(request: Request) {
     }
     const payload = (await request.json()) as Record<string, unknown>;
     const action = String(payload.action ?? "");
+
+    if (action === "submit_feedback") {
+      const input = payload.input as Record<string, unknown>;
+      const result = await submitFeedback({
+        tournamentId: input.tournamentId ? String(input.tournamentId) : null,
+        category: String(input.category ?? "") as FeedbackCategory,
+        message: String(input.message ?? ""),
+        pagePath: String(input.pagePath ?? "/"),
+      }, user);
+      return Response.json({ ok: true, ...result });
+    }
 
     if (action === "update_profile") {
       const result = await updateUserProfile({
@@ -371,6 +386,15 @@ export async function POST(request: Request) {
     }
     if (action === "set_role") {
       await setUserRole(String(payload.userId), String(payload.role) as UserRole, user);
+      return Response.json({ ok: true });
+    }
+    if (action === "update_feedback") {
+      await updateFeedbackMessage(
+        String(payload.feedbackId ?? ""),
+        String(payload.status ?? "") as FeedbackStatus,
+        String(payload.adminNote ?? ""),
+        user,
+      );
       return Response.json({ ok: true });
     }
     if (action === "remove_tournament_member") {

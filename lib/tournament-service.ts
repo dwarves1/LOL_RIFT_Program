@@ -3,6 +3,7 @@ import {
   asc,
   desc,
   eq,
+  gte,
   inArray,
   ne,
   sql,
@@ -32,12 +33,22 @@ import {
   betSettlements,
   tournamentBackups,
   qaSandboxes,
+  feedbackMessages,
 } from "../db/schema";
 import { currentSessionUserId, type GoogleIdentity } from "./google-auth";
 import { emptyPlayerHistory, getPlayerHistoryData } from "./player-history-service";
 
 export type UserRole = "viewer" | "operator" | "admin";
 export type AccountStatus = "active" | "provisional" | "merged";
+export type FeedbackCategory = "issue" | "idea" | "question" | "other";
+export type FeedbackStatus = "new" | "reviewed" | "completed";
+
+export type SubmitFeedbackInput = {
+  tournamentId?: string | null;
+  category: FeedbackCategory;
+  message: string;
+  pagePath: string;
+};
 
 export type RequestUser = {
   id: string;
@@ -653,6 +664,85 @@ async function canManageMatch(actor: RequestUser, match: typeof matches.$inferSe
   // and vice-captain are roster labels only until their permissions are split.
   if (match.phase === "scrim") return true;
   return isStaff(actor);
+}
+
+export async function submitFeedback(input: SubmitFeedbackInput, actor: RequestUser) {
+  await ensureSchema();
+  const db = getDb();
+  const categories: FeedbackCategory[] = ["issue", "idea", "question", "other"];
+  if (!categories.includes(input.category)) throw new Error("의견 종류를 선택해 주세요.");
+
+  const message = input.message.trim().normalize("NFKC");
+  if (message.length < 10) throw new Error("의견을 10자 이상 입력해 주세요.");
+  if (message.length > 1000) throw new Error("의견은 1,000자 이하로 입력해 주세요.");
+
+  const rawPagePath = input.pagePath.trim();
+  const pagePath = rawPagePath.startsWith("/")
+    && !rawPagePath.startsWith("//")
+    && !rawPagePath.includes("\\")
+    && rawPagePath.length <= 500
+    ? rawPagePath
+    : "/";
+  const tournamentId = input.tournamentId?.trim() || null;
+  if (tournamentId) {
+    const [tournament] = await db.select({ id: tournaments.id }).from(tournaments).where(eq(tournaments.id, tournamentId)).limit(1);
+    if (!tournament) throw new Error("선택한 대회를 찾을 수 없습니다.");
+  }
+
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const [recent] = await db.select({ count: sql<number>`count(*)` }).from(feedbackMessages).where(and(
+    eq(feedbackMessages.userId, actor.id),
+    gte(feedbackMessages.createdAt, oneHourAgo),
+  ));
+  if (Number(recent?.count ?? 0) >= 5) throw new Error("한 시간에 최대 5건까지 보낼 수 있습니다. 잠시 후 다시 시도해 주세요.");
+
+  const id = uid("feedback");
+  const now = new Date().toISOString();
+  await db.insert(feedbackMessages).values({
+    id,
+    userId: actor.id,
+    tournamentId,
+    category: input.category,
+    message,
+    pagePath,
+    status: "new",
+    createdAt: now,
+    updatedAt: now,
+  });
+  return { id };
+}
+
+export async function updateFeedbackMessage(
+  feedbackId: string,
+  status: FeedbackStatus,
+  adminNote: string,
+  actor: RequestUser,
+) {
+  await ensureSchema();
+  if (actor.role !== "admin") throw new Error("관리자만 피드백을 관리할 수 있습니다.");
+  const statuses: FeedbackStatus[] = ["new", "reviewed", "completed"];
+  if (!statuses.includes(status)) throw new Error("올바른 처리 상태를 선택해 주세요.");
+  const note = adminNote.trim().normalize("NFKC");
+  if (note.length > 1000) throw new Error("관리자 메모는 1,000자 이하로 입력해 주세요.");
+
+  const db = getDb();
+  const [existing] = await db.select().from(feedbackMessages).where(eq(feedbackMessages.id, feedbackId)).limit(1);
+  if (!existing) throw new Error("피드백을 찾을 수 없습니다.");
+  const now = new Date().toISOString();
+  await db.update(feedbackMessages).set({
+    status,
+    adminNote: note || null,
+    handledBy: status === "new" ? null : actor.id,
+    handledAt: status === "new" ? null : now,
+    updatedAt: now,
+  }).where(eq(feedbackMessages.id, feedbackId));
+  await audit(actor, "feedback_status_updated", "feedback", feedbackId, existing.tournamentId, {
+    status: existing.status,
+    hasAdminNote: Boolean(existing.adminNote),
+  }, {
+    status,
+    hasAdminNote: Boolean(note),
+  });
 }
 
 export async function getMatchImageAnalysisContext(matchId: string, actor: RequestUser) {
@@ -3529,6 +3619,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       audit: [],
       users: [],
       members: [],
+      feedback: [],
+      unreadFeedbackCount: 0,
       summary: { leagueCompleted: 0, leagueTotal: 0, bracketCompleted: 0, bracketTotal: 0 },
     };
   }
@@ -3700,6 +3792,31 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
         .map((user) => ({ ...user, pointsBalance: user.pointsBalance ?? 0 }))
         .filter((user) => !user.id.startsWith("test_") && user.accountStatus === "active")
     : [];
+  const [feedbackRows, unreadFeedbackRows] = requestUser?.role === "admin"
+    ? await Promise.all([
+      db.select({
+        id: feedbackMessages.id,
+        userId: feedbackMessages.userId,
+        tournamentId: feedbackMessages.tournamentId,
+        tournamentName: tournaments.name,
+        category: feedbackMessages.category,
+        message: feedbackMessages.message,
+        pagePath: feedbackMessages.pagePath,
+        status: feedbackMessages.status,
+        adminNote: feedbackMessages.adminNote,
+        handledBy: feedbackMessages.handledBy,
+        createdAt: feedbackMessages.createdAt,
+        updatedAt: feedbackMessages.updatedAt,
+        reporterName: users.displayName,
+        reporterEmail: users.email,
+      }).from(feedbackMessages)
+        .innerJoin(users, eq(users.id, feedbackMessages.userId))
+        .leftJoin(tournaments, eq(tournaments.id, feedbackMessages.tournamentId))
+        .orderBy(desc(feedbackMessages.createdAt))
+        .limit(100),
+      db.select({ count: sql<number>`count(*)` }).from(feedbackMessages).where(eq(feedbackMessages.status, "new")),
+    ])
+    : [[], []];
   const [backupRows, settlementRows] = requestUser && isStaff(requestUser)
     ? await Promise.all([
       db.select({
@@ -3897,6 +4014,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     audit: auditRows,
     users: adminUsers,
     members: memberRows,
+    feedback: feedbackRows,
+    unreadFeedbackCount: Number(unreadFeedbackRows[0]?.count ?? 0),
     summary: {
       leagueCompleted: leagueMatches.filter((match) => isResolvedMatchStatus(match.status)).length,
       leagueTotal: leagueMatches.length,

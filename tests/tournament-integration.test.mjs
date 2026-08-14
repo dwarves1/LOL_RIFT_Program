@@ -197,6 +197,38 @@ test("five competition formats create and progress with the configured BO rules"
   }
 });
 
+test("signed-in viewers can send feedback and only administrators can manage it", async () => {
+  const created = await createCompetition("QA 피드백 대회", "league_only", 2);
+  const sender = actors.get("outsider");
+  const admin = actors.get("admin");
+  const submitted = await tournament.submitFeedback({
+    tournamentId: created.tournamentId,
+    category: "idea",
+    message: "모바일 경기 일정 화면에서 팀 이름을 조금 더 크게 보여주세요.",
+    pagePath: `/?tournament=${created.tournamentId}&tab=schedule`,
+  }, sender);
+
+  let data = await tournament.getDashboard(created.tournamentId, admin);
+  const feedback = data.feedback.find((entry) => entry.id === submitted.id);
+  assert.ok(feedback);
+  assert.equal(feedback.status, "new");
+  assert.equal(feedback.reporterEmail, sender.email);
+  assert.equal(data.unreadFeedbackCount, 1);
+
+  const viewerData = await tournament.getDashboard(created.tournamentId, sender);
+  assert.deepEqual(viewerData.feedback, []);
+  assert.equal(viewerData.unreadFeedbackCount, 0);
+  await assert.rejects(
+    tournament.updateFeedbackMessage(submitted.id, "reviewed", "확인했습니다.", sender),
+    /관리자만/,
+  );
+
+  await tournament.updateFeedbackMessage(submitted.id, "completed", "다음 배포에서 반영", admin);
+  data = await tournament.getDashboard(created.tournamentId, admin);
+  assert.equal(data.feedback.find((entry) => entry.id === submitted.id)?.status, "completed");
+  assert.equal(data.unreadFeedbackCount, 0);
+});
+
 test("tournament matches can be cancelled with refunds and resolved progress", async () => {
   const leagueOnly = await createCompetition("QA 경기 무효", "league_only", 3);
   let data = await dashboard(leagueOnly.tournamentId);

@@ -535,6 +535,33 @@ export const qaSandboxes = sqliteTable(
   (table) => [index("idx_qa_sandboxes_created").on(table.createdAt)],
 );
 
+export const feedbackMessages = sqliteTable(
+  "feedback_messages",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    tournamentId: text("tournament_id"),
+    category: text("category", {
+      enum: ["issue", "idea", "question", "other"],
+    }).notNull(),
+    message: text("message").notNull(),
+    pagePath: text("page_path").notNull(),
+    status: text("status", {
+      enum: ["new", "reviewed", "completed"],
+    }).notNull().default("new"),
+    adminNote: text("admin_note"),
+    handledBy: text("handled_by"),
+    handledAt: text("handled_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_feedback_status_created").on(table.status, table.createdAt),
+    index("idx_feedback_tournament_created").on(table.tournamentId, table.createdAt),
+    index("idx_feedback_user_created").on(table.userId, table.createdAt),
+  ],
+);
+
 export const auditLogs = sqliteTable(
   "audit_logs",
   {
