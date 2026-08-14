@@ -5,6 +5,7 @@ import { isPredictionOpen } from "../lib/match-rules";
 import { ProfileModal } from "./profile-modal";
 import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
 import { DraftView, MatchDraftCreator } from "./draft-view";
+import { StatsView } from "./stats-view";
 import { positionLabel } from "../lib/positions";
 import { buildPlayerInsights, opggSearchUrl, type PlayerCompetitionRecord, type PlayerInsight, type RelationshipRecord } from "../lib/player-insights";
 
@@ -437,6 +438,7 @@ export function TournamentApp({
   const [historicalScrim, setHistoricalScrim] = useState(false);
   const [pendingReviewMatchId, setPendingReviewMatchId] = useState<string | null>(null);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(initialPlayerId);
+  const [playerSearchQuery, setPlayerSearchQuery] = useState("");
   const [isKakaoBrowser, setIsKakaoBrowser] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [reviewMatch, setReviewMatch] = useState<Match | null>(null);
@@ -575,6 +577,14 @@ export function TournamentApp({
   }, [data, pendingReviewMatchId]);
 
   useEffect(() => {
+    if (!data || activeTab !== "draft" || data.viewer?.role === "admin") return;
+    // Direct links to the administrator-only draft screen are returned to the tournament home.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setActiveTab("home");
+    setMessage("밴픽 메뉴는 관리자만 이용할 수 있습니다.");
+  }, [activeTab, data]);
+
+  useEffect(() => {
     if (autoOpenedDetail.current || initialTab !== "schedule" || !initialMatchId || !data) return;
     const match = data.matches.find((row) => row.id === initialMatchId);
     if (match && data.resultImages.some((image) => image.matchId === match.id)) {
@@ -666,6 +676,7 @@ export function TournamentApp({
 
   const viewer = data.viewer;
   const isStaff = viewer?.role === "operator" || viewer?.role === "admin";
+  const isAdmin = viewer?.role === "admin";
   const isScrim = data.tournament.competitionKind === "scrim_season";
   const canOperateScrim = isScrim && Boolean(viewer?.profileComplete);
   const canOpenOperations = Boolean(isStaff || canOperateScrim);
@@ -681,9 +692,10 @@ export function TournamentApp({
   const predictionMatches = upcoming.filter((match) => isScrim
     ? match.bettingStatus === "open"
     : match.scheduleConfirmed && isPredictionOpen(match.scheduledAt, predictionNow));
+  const roleVisibleNavItems = NAV_ITEMS.filter((item) => item.id !== "draft" || isAdmin);
   const visibleNavItems = isScrim
-    ? NAV_ITEMS.filter((item) => !["standings", "bracket", "teams", "draft"].includes(item.id))
-    : NAV_ITEMS;
+    ? roleVisibleNavItems.filter((item) => !["standings", "bracket", "teams", "draft"].includes(item.id))
+    : roleVisibleNavItems;
   const totalMatches = data.matches.length;
   const completedMatches = data.matches.filter((match) => match.status === "completed" || match.status === "cancelled").length;
   const progress = totalMatches ? Math.round((completedMatches / totalMatches) * 100) : 0;
@@ -708,7 +720,7 @@ export function TournamentApp({
         </button>
         <nav className="desktop-nav" aria-label="주요 메뉴">
           {visibleNavItems.map((item) => (
-            <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => { if (item.id === "players") setSelectedPlayerId(null); setActiveTab(item.id); }}>
+            <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => { if (item.id === "players") { setSelectedPlayerId(null); setPlayerSearchQuery(""); } setActiveTab(item.id); }}>
               {item.label}
             </button>
           ))}
@@ -770,9 +782,9 @@ export function TournamentApp({
         {activeTab === "standings" && <StandingsView {...shared} />}
         {activeTab === "bracket" && <BracketView {...shared} matches={bracketMatches} />}
         {activeTab === "teams" && <TeamsView data={data} />}
-        {activeTab === "stats" && <StatsView data={data} teamMap={teamMap} />}
-        {activeTab === "draft" && <DraftView data={data} teamMap={teamMap} busy={busy} command={command} />}
-        {activeTab === "players" && <PlayerSearchView data={data} selectedPlayerId={selectedPlayerId} onSelectPlayer={(userId) => {
+        {activeTab === "stats" && <StatsView data={data} teamMap={teamMap} onOpenPlayer={(userId, accountName) => { setSelectedPlayerId(userId); setPlayerSearchQuery(userId ? "" : accountName); setActiveTab("players"); }} />}
+        {activeTab === "draft" && isAdmin && <DraftView data={data} teamMap={teamMap} busy={busy} command={command} />}
+        {activeTab === "players" && <PlayerSearchView data={data} selectedPlayerId={selectedPlayerId} initialQuery={playerSearchQuery} onSelectPlayer={(userId) => {
           if (!userId && new URLSearchParams(window.location.search).get("player")) window.history.back();
           else setSelectedPlayerId(userId);
         }} />}
@@ -782,7 +794,7 @@ export function TournamentApp({
 
       <nav className="mobile-nav" aria-label="모바일 메뉴">
         {(isScrim ? visibleNavItems.filter((item) => item.id !== "stats") : visibleNavItems.slice(0, 4)).map((item) => (
-          <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => { if (item.id === "players") setSelectedPlayerId(null); setActiveTab(item.id); }}>
+          <button key={item.id} className={activeTab === item.id ? "active" : ""} onClick={() => { if (item.id === "players") { setSelectedPlayerId(null); setPlayerSearchQuery(""); } setActiveTab(item.id); }}>
             <span>{item.id === "home" ? "◆" : item.id === "schedule" ? "▤" : item.id === "standings" ? "≡" : "◇"}</span>
             {item.short}
           </button>
@@ -790,7 +802,7 @@ export function TournamentApp({
         {isScrim && canOperateScrim && <button className={activeTab === "admin" ? "active" : ""} onClick={() => setActiveTab("admin")}>
           <span>⚙</span>운영
         </button>}
-        {!isScrim && <button className={["teams", "stats", "draft", "players", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => setActiveTab("players")}>
+        {!isScrim && <button className={["teams", "stats", "draft", "players", "points", "admin"].includes(activeTab) ? "active" : ""} onClick={() => { setSelectedPlayerId(null); setPlayerSearchQuery(""); setActiveTab("players"); }}>
           <span>•••</span>더보기
         </button>}
       </nav>
@@ -1087,7 +1099,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
       {groupMatches.length ? (
         <div className="schedule-list">
           {groupMatches.map((match) => (
-            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} predictionSummary={data.predictionSummaries.find((summary) => summary.matchId === match.id)} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} isAdmin={data.viewer?.role === "admin"} predictionSummary={data.predictionSummaries.find((summary) => summary.matchId === match.id)} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
           ))}
         </div>
       ) : (
@@ -1097,7 +1109,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   );
 }
 
-function ScheduleCard({ match, teamMap, isStaff, predictionSummary, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; predictionSummary?: PredictionSummary; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
+function ScheduleCard({ match, teamMap, isStaff, isAdmin, predictionSummary, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; isAdmin: boolean; predictionSummary?: PredictionSummary; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
   const canManageMatch = isStaff || match.phase === "scrim";
@@ -1134,7 +1146,7 @@ function ScheduleCard({ match, teamMap, isStaff, predictionSummary, busy, comman
           {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
           {hasDetail && match.phase === "scrim" && <button type="button" className="summary-share-button" onClick={() => void shareOrCopy(`/scrim/${encodeURIComponent(match.tournamentId)}/match/${encodeURIComponent(match.id)}`, `${match.roundLabel} 내전 요약`)}>내전 요약 공유</button>}
           {canManageMatch && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")} onClick={() => openResultReview(match)}>{hasDetail ? isStaff ? "세트 결과 추가·수정" : "다음 세트 결과 등록" : "세트 결과 이미지 등록"}</button>}
-          {teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : isStaff ? <MatchDraftCreator match={match} busy={busy} command={command} /> : null)}
+          {isAdmin && teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : <MatchDraftCreator match={match} busy={busy} command={command} />)}
           {canManageMatch && (!match.scheduleConfirmed || isStaff) && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} canSetBestOf={isStaff} />}
           {match.status === "scheduled" && (
             <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
@@ -1441,67 +1453,9 @@ function TeamsView({ data }: { data: Dashboard }) {
   );
 }
 
-function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Team> }) {
-  const accountMap = new Map(data.accounts.map((account) => [account.userId, account.displayName]));
-  const playerRows = [...data.playerStats.reduce((map, row) => {
-    const key = row.userId ?? `snapshot:${row.accountName}`;
-    const current = map.get(key) ?? {
-      key,
-      name: row.userId ? (accountMap.get(row.userId) ?? row.accountName) : row.accountName,
-      games: 0,
-      wins: 0,
-      kills: 0,
-      deaths: 0,
-      assists: 0,
-      gold: 0,
-      champions: new Map<string, { games: number; wins: number }>(),
-      lanes: new Map<string, { games: number; wins: number }>(),
-    };
-    current.games += 1;
-    current.wins += row.won ? 1 : 0;
-    current.kills += row.kills;
-    current.deaths += row.deaths;
-    current.assists += row.assists;
-    current.gold += row.gold;
-    const champion = current.champions.get(row.championName) ?? { games: 0, wins: 0 };
-    current.champions.set(row.championName, { games: champion.games + 1, wins: champion.wins + (row.won ? 1 : 0) });
-    const lane = current.lanes.get(row.lane) ?? { games: 0, wins: 0 };
-    current.lanes.set(row.lane, { games: lane.games + 1, wins: lane.wins + (row.won ? 1 : 0) });
-    map.set(key, current);
-    return map;
-  }, new Map<string, {
-    key: string; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; gold: number; champions: Map<string, { games: number; wins: number }>; lanes: Map<string, { games: number; wins: number }>;
-  }>()).values()].sort((a, b) => b.games - a.games || b.wins - a.wins || b.gold - a.gold);
-  const teamRows = [...data.teams.map((team) => {
-    const rows = data.teamStats.filter((row) => row.teamId === team.id);
-    return {
-      team,
-      games: rows.length,
-      wins: rows.filter((row) => row.won).length,
-      kills: rows.reduce((sum, row) => sum + row.kills, 0),
-      deaths: rows.reduce((sum, row) => sum + row.deaths, 0),
-      assists: rows.reduce((sum, row) => sum + row.assists, 0),
-      gold: rows.reduce((sum, row) => sum + row.gold, 0),
-    };
-  })].filter((row) => row.games).sort((a, b) => b.wins - a.wins || b.games - a.games);
 
-  if (!data.playerStats.length) {
-    return <section className="page-section"><PageTitle eyebrow="ANALYTICS" title="경기 통계" description="결과 이미지를 등록하면 계정·챔피언·라인별 기록이 자동으로 쌓입니다." /><EmptyState title="아직 통계가 없습니다" detail="운영자가 경기 결과 이미지를 검토하고 등록하면 통계를 확인할 수 있습니다." /></section>;
-  }
-  return <section className="page-section stats-page">
-    <PageTitle eyebrow="ANALYTICS" title="경기 통계" description="등록된 결과 이미지를 기준으로 계산한 대회 누적 통계입니다." />
-    <div className="stats-summary-grid"><div><span>분석 경기</span><strong>{new Set(data.playerStats.map((row) => row.matchId)).size}</strong></div><div><span>기록 계정</span><strong>{playerRows.length}</strong></div><div><span>총 킬</span><strong>{data.teamStats.reduce((sum, row) => sum + row.kills, 0)}</strong></div><div><span>등록 이미지</span><strong>{data.resultImages.length}</strong></div></div>
-    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div></div><div className="stats-table"><div className="stats-table-head"><span>계정</span><span>경기(승-패)</span><span>승률</span><span>평균 K/D/A</span><span>KDA</span><span>평균 골드</span><span>챔피언별 전적</span><span>라인별 전적</span></div>{playerRows.map((row) => {
-      const topChampion = [...row.champions].sort((a, b) => b[1].games - a[1].games)[0];
-      const topLane = [...row.lanes].sort((a, b) => b[1].games - a[1].games)[0];
-      return <div className="stats-table-row" key={row.key}><strong>{row.name}</strong><span>{row.games} ({row.wins}-{row.games - row.wins})</span><span>{Math.round(row.wins / row.games * 100)}%</span><span>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</span><b>{((row.kills + row.assists) / Math.max(1, row.deaths)).toFixed(2)}</b><span>{Math.round(row.gold / row.games).toLocaleString()}</span><span>{topChampion ? `${topChampion[0]} ${topChampion[1].wins}승 ${topChampion[1].games - topChampion[1].wins}패` : "-"}</span><span>{topLane ? `${positionLabel(topLane[0], true)} ${topLane[1].wins}승 ${topLane[1].games - topLane[1].wins}패` : "-"}</span></div>;
-    })}</div></article>
-    {data.tournament?.competitionKind !== "scrim_season" && <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as React.CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>}
-  </section>;
-}
-
-function PlayerSearchView({ data, selectedPlayerId, onSelectPlayer }: { data: Dashboard; selectedPlayerId: string | null; onSelectPlayer: (userId: string | null) => void }) {
-  const [query, setQuery] = useState("");
+function PlayerSearchView({ data, selectedPlayerId, initialQuery, onSelectPlayer }: { data: Dashboard; selectedPlayerId: string | null; initialQuery: string; onSelectPlayer: (userId: string | null) => void }) {
+  const [query, setQuery] = useState(initialQuery);
   const scrimInsights = useMemo(() => buildPlayerInsights({ ...data.playerHistory, scope: "scrim" }), [data.playerHistory]);
   const tournamentInsights = useMemo(() => buildPlayerInsights({ ...data.playerHistory, scope: "tournament" }), [data.playerHistory]);
   const normalized = query.trim().toLocaleLowerCase("ko");

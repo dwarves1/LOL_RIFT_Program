@@ -3534,6 +3534,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
   }
 
   const supportsPreRegistration = isLolmen2026Tournament(selected);
+  const canViewDrafts = requestUser?.role === "admin" || Boolean(requestUser?.isLocalDemo);
   const lolmen2026ResetComplete = supportsPreRegistration && requestUser?.role === "admin"
     ? Boolean((await db.select({ id: auditLogs.id }).from(auditLogs).where(and(
       eq(auditLogs.tournamentId, selected.id),
@@ -3627,7 +3628,9 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       winnerTeamId: matchGames.winnerTeamId,
       status: matchGames.status,
     }).from(matchGames).innerJoin(matches, eq(matches.id, matchGames.matchId)).where(eq(matches.tournamentId, selected.id)),
-    db.select().from(draftSessions).where(eq(draftSessions.tournamentId, selected.id)).orderBy(desc(draftSessions.updatedAt)),
+    canViewDrafts
+      ? db.select().from(draftSessions).where(eq(draftSessions.tournamentId, selected.id)).orderBy(desc(draftSessions.updatedAt))
+      : Promise.resolve([]),
     db.select({
       matchId: bets.matchId,
       teamId: bets.teamId,
@@ -3672,7 +3675,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
   const ledgerRows = requestUser
     ? await db.select().from(pointLedger).where(and(eq(pointLedger.userId, requestUser.id), eq(pointLedger.tournamentId, selected.id))).orderBy(desc(pointLedger.createdAt)).limit(30)
     : [];
-  const practiceDraftRows = requestUser
+  const practiceDraftRows = requestUser && canViewDrafts
     ? await db.select().from(draftSessions).where(and(
         eq(draftSessions.ownerUserId, requestUser.id),
         eq(draftSessions.context, "practice"),

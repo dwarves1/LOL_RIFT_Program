@@ -399,7 +399,7 @@ test("automatic backups export a validated snapshot and restore a safe copy", as
   assert.ok(restored.accessCode.startsWith("RIFT-"));
 });
 
-test("tournament isolation, staff-only operations, result correction, and draft permissions", async () => {
+test("tournament isolation, staff-only operations, result correction, and admin-only draft permissions", async () => {
   const created = await createCompetition("QA 권한", "league_then_bracket");
   let data = await dashboard(created.tournamentId);
   const match = data.matches[0];
@@ -461,9 +461,13 @@ test("tournament isolation, staff-only operations, result correction, and draft 
   const draftRedTeam = data.teams.find((team) => team.id === draftMatch.teamBId);
   const draftBlueVice = actors.get(draftBlueTeam.players.find((player) => player.teamRole === "vice_captain").userId);
   const draftRedVice = actors.get(draftRedTeam.players.find((player) => player.teamRole === "vice_captain").userId);
+  await assert.rejects(() => draft.createDraft({ context: "practice", name: "operator draft", mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, actors.get("foreign_operator")), /관리자만/);
   const matchDraftId = await draft.createDraft({ context: "match", matchId: draftMatch.id, mode: "fearless", bestOf: 3, timerMode: "unlimited", undoEnabled: true }, actors.get("admin"));
-  await assert.rejects(() => draft.joinDraft(matchDraftId, "blue", draftBlueVice), /운영자나 관리자/);
-  await assert.rejects(() => draft.joinDraft(matchDraftId, "red", draftRedVice), /운영자나 관리자/);
+  const viewerDraftData = await tournament.getDashboard(created.tournamentId, actors.get("outsider"));
+  assert.deepEqual(viewerDraftData.draftSessions, []);
+  assert.deepEqual(viewerDraftData.practiceDrafts, []);
+  await assert.rejects(() => draft.joinDraft(matchDraftId, "blue", draftBlueVice), /관리자만/);
+  await assert.rejects(() => draft.joinDraft(matchDraftId, "red", draftRedVice), /관리자만/);
   await draft.joinDraft(matchDraftId, "blue", actors.get("admin"));
   await draft.joinDraft(matchDraftId, "red", actors.get("admin"));
   await draft.startDraft(matchDraftId, actors.get("admin"));
@@ -519,9 +523,9 @@ test("tournament isolation, staff-only operations, result correction, and draft 
   assert.equal(outsiderData.bets.find((bet) => bet.matchId === match.id).status, "lost");
 
   for (let index = 0; index < 5; index += 1) {
-    await draft.createDraft({ context: "practice", name: `저장 ${index + 1}`, mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, blueVice);
+    await draft.createDraft({ context: "practice", name: `저장 ${index + 1}`, mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, actors.get("admin"));
   }
-  await assert.rejects(() => draft.createDraft({ context: "practice", name: "여섯 번째", mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, blueVice), /최대 5개/);
+  await assert.rejects(() => draft.createDraft({ context: "practice", name: "여섯 번째", mode: "standard", bestOf: 1, timerMode: "unlimited", undoEnabled: true }, actors.get("admin")), /최대 5개/);
 });
 
 test("test players are idempotent and separated into league and scrim groups", async () => {

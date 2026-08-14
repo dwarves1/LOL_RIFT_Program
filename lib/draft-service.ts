@@ -26,6 +26,12 @@ const uid = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
 const now = () => new Date().toISOString();
 const bestOfValue = (value: number): 1 | 3 | 5 => value === 3 || value === 5 ? value : 1;
 
+function requireDraftAdmin(user: RequestUser) {
+  if (user.role !== "admin" && !user.isLocalDemo) {
+    throw new Error("관리자만 밴픽 기능을 이용할 수 있습니다.");
+  }
+}
+
 function parseState(value: string): DraftState {
   try {
     const parsed = JSON.parse(value) as DraftState;
@@ -60,6 +66,7 @@ export async function createDraft(input: {
   timerSeconds?: number;
   undoEnabled: boolean;
 }, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const bestOf = bestOfValue(input.bestOf);
   const mode: DraftMode = input.mode === "fearless" || input.mode === "hard_fearless" ? input.mode : "standard";
@@ -102,11 +109,12 @@ export async function createDraft(input: {
 }
 
 export async function joinDraft(sessionId: string, side: DraftSide, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.context !== "match" || session.status !== "lobby") throw new Error("참가할 수 있는 밴픽 대기실이 아닙니다.");
   if (!(await canOperateTournament(actor, session.tournamentId))) {
-    throw new Error("운영자나 관리자만 경기 밴픽의 팀 대표로 참가할 수 있습니다.");
+    throw new Error("관리자만 경기 밴픽의 팀 대표로 참가할 수 있습니다.");
   }
   const teamId = side === "blue" ? session.blueTeamId : session.redTeamId;
   if (!teamId) throw new Error("팀이 확정되지 않았습니다.");
@@ -119,15 +127,17 @@ export async function joinDraft(sessionId: string, side: DraftSide, actor: Reque
 }
 
 export async function startDraft(sessionId: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.status !== "lobby") throw new Error("시작할 수 있는 밴픽이 아닙니다.");
-  if (!(await canOperateTournament(actor, session.tournamentId))) throw new Error("운영자만 밴픽을 시작할 수 있습니다.");
+  if (!(await canOperateTournament(actor, session.tournamentId))) throw new Error("관리자만 밴픽을 시작할 수 있습니다.");
   if (!session.blueUserId || !session.redUserId) throw new Error("블루팀과 레드팀 대표가 모두 참가해야 합니다.");
   await db.update(draftSessions).set({ status: "active", turnExpiresAt: nextExpiry(session.timerMode, session.timerSeconds), version: session.version + 1, updatedAt: now() }).where(eq(draftSessions.id, session.id));
 }
 
 export async function resumeDraft(sessionId: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.status !== "active" || session.timerMode !== "limited") {
@@ -156,6 +166,7 @@ function unavailableChampions(state: DraftState, mode: DraftMode, currentSet: nu
 }
 
 export async function draftAction(sessionId: string, championId: string, expectedVersion: number, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.status !== "active") throw new Error("진행 중인 밴픽이 아닙니다.");
@@ -185,6 +196,7 @@ export async function draftAction(sessionId: string, championId: string, expecte
 }
 
 export async function undoDraft(sessionId: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || !session.undoEnabled || session.currentStep < 1) throw new Error("되돌릴 수 있는 선택이 없습니다.");
@@ -199,11 +211,12 @@ export async function undoDraft(sessionId: string, actor: RequestUser) {
 }
 
 export async function advanceDraftSet(sessionId: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.currentStep !== STEPS.length) throw new Error("현재 세트 밴픽을 먼저 완료해 주세요.");
   const canAdvance = session.context === "practice" ? session.ownerUserId === actor.id : await canOperateTournament(actor, session.tournamentId);
-  if (!canAdvance) throw new Error("운영자만 다음 세트를 시작할 수 있습니다.");
+  if (!canAdvance) throw new Error("관리자만 다음 세트를 시작할 수 있습니다.");
   if (session.currentSet >= session.bestOf) {
     await db.update(draftSessions).set({ status: "completed", version: session.version + 1, updatedAt: now() }).where(eq(draftSessions.id, session.id));
     return;
@@ -214,6 +227,7 @@ export async function advanceDraftSet(sessionId: string, actor: RequestUser) {
 }
 
 export async function resetDraft(sessionId: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const db = getDb();
   const [session] = await db.select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session) throw new Error("밴픽을 찾을 수 없습니다.");
@@ -223,6 +237,7 @@ export async function resetDraft(sessionId: string, actor: RequestUser) {
 }
 
 export async function renameDraft(sessionId: string, name: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const [session] = await getDb().select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.ownerUserId !== actor.id) throw new Error("이 밴픽을 저장할 권한이 없습니다.");
   const nextName = name.trim().slice(0, 40);
@@ -231,6 +246,7 @@ export async function renameDraft(sessionId: string, name: string, actor: Reques
 }
 
 export async function deleteDraft(sessionId: string, actor: RequestUser) {
+  requireDraftAdmin(actor);
   const [session] = await getDb().select().from(draftSessions).where(eq(draftSessions.id, sessionId)).limit(1);
   if (!session || session.context !== "practice" || session.ownerUserId !== actor.id) throw new Error("삭제할 수 있는 밴픽이 아닙니다.");
   await getDb().delete(draftSessions).where(eq(draftSessions.id, session.id));
