@@ -6,6 +6,7 @@ import {
   createScrimMatch,
   confirmMatchSchedule,
   unconfirmMatchSchedule,
+  cancelTournamentMatch,
   seedTestPlayers,
   createQaScrimSandbox,
   resetQaScrimSandboxes,
@@ -247,6 +248,10 @@ export async function POST(request: Request) {
     }
     if (action === "unconfirm_match_schedule") {
       const result = await unconfirmMatchSchedule(String(payload.matchId), user);
+      return Response.json({ ok: true, ...result });
+    }
+    if (action === "cancel_tournament_match") {
+      const result = await cancelTournamentMatch(String(payload.matchId), user);
       return Response.json({ ok: true, ...result });
     }
     if (action === "seed_test_players") {

@@ -138,7 +138,7 @@ async function dashboard(tournamentId) {
 async function completeReadyBracket(tournamentId) {
   for (;;) {
     const data = await dashboard(tournamentId);
-    const pending = data.matches.filter((match) => match.phase === "bracket" && match.status !== "completed");
+    const pending = data.matches.filter((match) => match.phase === "bracket" && match.status === "scheduled");
     if (!pending.length) return data;
     const ready = pending.find((match) => match.teamAId && match.teamBId);
     assert.ok(ready, "at least one bracket match must be resolvable");
@@ -195,6 +195,69 @@ test("five competition formats create and progress with the configured BO rules"
     data = await completeReadyBracket(created.tournamentId);
     assert.equal(data.tournament.status, "completed");
   }
+});
+
+test("tournament matches can be cancelled with refunds and resolved progress", async () => {
+  const leagueOnly = await createCompetition("QA 경기 무효", "league_only", 3);
+  let data = await dashboard(leagueOnly.tournamentId);
+  const cancelledMatch = data.matches[0];
+  const cancelledTeam = data.teams.find((team) => team.id === cancelledMatch.teamAId);
+  const teamViewer = actors.get(cancelledTeam.players[1].userId);
+
+  await assert.rejects(() => tournament.cancelTournamentMatch(cancelledMatch.id, teamViewer), /운영 권한/);
+  await tournament.joinTournamentByCode(leagueOnly.accessCode, actors.get("outsider"));
+  await tournament.confirmMatchSchedule(cancelledMatch.id, actors.get("admin"));
+  await tournament.createBet(leagueOnly.tournamentId, cancelledMatch.id, cancelledMatch.teamAId, 250, actors.get("outsider"));
+
+  const refund = await tournament.cancelTournamentMatch(cancelledMatch.id, actors.get("admin"));
+  assert.deepEqual(refund, { refundedBets: 1, refundedPoints: 250, cancelledFreePoints: 0 });
+  data = await dashboard(leagueOnly.tournamentId);
+  const cancelled = data.matches.find((match) => match.id === cancelledMatch.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.winnerId, null);
+  assert.equal(cancelled.loserId, null);
+  assert.equal(cancelled.scheduleConfirmed, false);
+  assert.ok(cancelled.cancelledAt);
+  assert.equal(cancelled.cancelledBy, "admin");
+  assert.equal(data.summary.leagueCompleted, 1);
+  assert.equal(data.standings.reduce((sum, row) => sum + row.played, 0), 0);
+  assert.equal(sqlite.prepare("SELECT points_balance FROM tournament_entries WHERE tournament_id = ? AND user_id = ?").get(leagueOnly.tournamentId, "outsider").points_balance, 1000);
+  assert.equal(sqlite.prepare("SELECT status FROM bets WHERE match_id = ? AND user_id = ?").get(cancelledMatch.id, "outsider").status, "refunded");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE entity_id = ? AND action = 'match_cancelled'").get(cancelledMatch.id).count, 1);
+  await assert.rejects(() => tournament.cancelTournamentMatch(cancelledMatch.id, actors.get("admin")), /진행 전인 대회 경기/);
+  await assert.rejects(() => tournament.setMatchWinner(cancelledMatch.id, cancelledMatch.teamAId, actors.get("admin")), /무효 처리된 경기/);
+
+  for (const match of data.matches.filter((match) => match.status === "scheduled")) {
+    await tournament.setMatchWinner(match.id, match.teamAId, actors.get("admin"));
+  }
+  data = await dashboard(leagueOnly.tournamentId);
+  assert.equal(data.tournament.status, "completed");
+  assert.equal(data.summary.leagueCompleted, data.summary.leagueTotal);
+
+  const leagueBracket = await createCompetition("QA 무효 후 본선", "league_then_bracket");
+  data = await dashboard(leagueBracket.tournamentId);
+  await tournament.cancelTournamentMatch(data.matches[0].id, actors.get("admin"));
+  for (const match of data.matches.slice(1)) await tournament.setMatchWinner(match.id, match.teamAId, actors.get("admin"));
+  data = await dashboard(leagueBracket.tournamentId);
+  await tournament.createBracket(leagueBracket.tournamentId, data.standings.map((row) => row.teamId), actors.get("admin"));
+  data = await dashboard(leagueBracket.tournamentId);
+  assert.ok(data.matches.some((match) => match.phase === "bracket"));
+
+  const bracketOnly = await createCompetition("QA 토너먼트 무효", "bracket_only", 4);
+  data = await dashboard(bracketOnly.tournamentId);
+  const firstRound = data.matches.find((match) => match.phase === "bracket" && match.matchNo !== "F" && match.teamAId && match.teamBId);
+  await assert.rejects(() => tournament.cancelTournamentMatch(firstRound.id, actors.get("admin")), /다음 대진/);
+  for (const match of data.matches.filter((match) => match.matchNo !== "F")) {
+    await tournament.setMatchWinner(match.id, match.teamAId, actors.get("admin"));
+  }
+  data = await dashboard(bracketOnly.tournamentId);
+  const final = data.matches.find((match) => match.matchNo === "F");
+  assert.ok(final.teamAId && final.teamBId);
+  await tournament.cancelTournamentMatch(final.id, actors.get("admin"));
+  data = await dashboard(bracketOnly.tournamentId);
+  assert.equal(data.matches.find((match) => match.id === final.id).status, "cancelled");
+  assert.equal(data.tournament.status, "completed");
+  assert.equal(data.summary.bracketCompleted, data.summary.bracketTotal);
 });
 
 test("Google identity links the previous member without changing tournament data IDs", async () => {

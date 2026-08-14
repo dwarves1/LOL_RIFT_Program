@@ -75,10 +75,12 @@ type Match = {
   scheduleConfirmed: boolean;
   scheduleUpdatedBy: string | null;
   scheduleUpdatedAt: string | null;
-  status: "scheduled" | "completed";
+  status: "scheduled" | "completed" | "cancelled";
   winnerId: string | null;
   loserId: string | null;
   completedAt: string | null;
+  cancelledAt: string | null;
+  cancelledBy: string | null;
   sortOrder: number;
   bettingStatus: "scheduled" | "open" | "closed" | "settled";
   bettingOpenedAt: string | null;
@@ -272,6 +274,7 @@ const AUDIT_LABEL: Record<string, string> = {
   match_schedule_changed: "경기 일정을 변경했습니다",
   match_schedule_confirmed: "경기 일정을 확정했습니다",
   match_schedule_unconfirmed: "일정 확정을 취소하고 예측 포인트를 반환했습니다",
+  match_cancelled: "경기를 무효 처리하고 예측 포인트를 반환했습니다",
   test_players_seeded: "내전·리그 테스트 선수를 준비했습니다",
   user_role_changed: "사용자 권한을 변경했습니다",
   profile_completed: "공개 프로필을 등록했습니다",
@@ -682,7 +685,7 @@ export function TournamentApp({
     ? NAV_ITEMS.filter((item) => !["standings", "bracket", "teams", "draft"].includes(item.id))
     : NAV_ITEMS;
   const totalMatches = data.matches.length;
-  const completedMatches = data.matches.filter((match) => match.status === "completed").length;
+  const completedMatches = data.matches.filter((match) => match.status === "completed" || match.status === "cancelled").length;
   const progress = totalMatches ? Math.round((completedMatches / totalMatches) * 100) : 0;
 
   const shared = {
@@ -1017,8 +1020,8 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, openResultReview,
   const visible = [...(phase === "league" ? leagueMatches : bracketMatches)].sort(
     (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime() || a.sortOrder - b.sortOrder,
   );
-  const upcomingMatches = visible.filter((match) => match.status !== "completed");
-  const completedMatches = visible.filter((match) => match.status === "completed");
+  const upcomingMatches = visible.filter((match) => match.status === "scheduled");
+  const completedMatches = visible.filter((match) => match.status === "completed" || match.status === "cancelled");
   return (
     <section className="page-section">
       <PageTitle eyebrow="MATCH CENTER" title="경기 일정 및 결과" description="경기는 시간순으로 표시되며, 남은 경기와 진행한 경기를 나누어 확인할 수 있습니다." />
@@ -1042,8 +1045,8 @@ function ScheduleView({ data, teamMap, isStaff, busy, command, openResultReview,
             openResultDetail={openResultDetail}
           />
           <ScheduleGroup
-            title="진행한 경기"
-            detail="결과가 확정된 경기"
+            title="진행 완료 경기"
+            detail="결과가 확정되거나 취소된 경기"
             matches={completedMatches}
             emptyDetail="아직 진행한 경기가 없습니다."
             teamMap={teamMap}
@@ -1098,6 +1101,7 @@ function ScheduleCard({ match, teamMap, isStaff, predictionSummary, busy, comman
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
   const canManageMatch = isStaff || match.phase === "scrim";
+  const isCancelled = match.status === "cancelled";
   return (
     <article className={`schedule-card ${match.status}`}>
       <div className={`match-time ${match.phase === "league" ? "no-number" : ""}`}>
@@ -1113,9 +1117,9 @@ function ScheduleCard({ match, teamMap, isStaff, predictionSummary, busy, comman
             <strong>{teamA?.name ?? "대진 대기"}</strong>
             {teamA && match.winnerId === teamA.id && <span>WIN</span>}
           </div>
-          <div className="schedule-score" aria-label={`세트 점수 ${match.seriesScoreA} 대 ${match.seriesScoreB}`}>
-            <small>{match.status === "completed" ? "FINAL" : "SCORE"}</small>
-            <strong>{match.seriesScoreA}<i>:</i>{match.seriesScoreB}</strong>
+          <div className="schedule-score" aria-label={isCancelled ? "취소된 경기" : `세트 점수 ${match.seriesScoreA} 대 ${match.seriesScoreB}`}>
+            <small>{isCancelled ? "CANCELLED" : match.status === "completed" ? "FINAL" : "SCORE"}</small>
+            {isCancelled ? <strong className="cancelled-score">경기 취소</strong> : <strong>{match.seriesScoreA}<i>:</i>{match.seriesScoreB}</strong>}
           </div>
           <div className={`schedule-team team-b ${teamB && match.winnerId === teamB.id ? "winner" : ""}`}>
             <TeamMark team={teamB} small />
@@ -1123,41 +1127,43 @@ function ScheduleCard({ match, teamMap, isStaff, predictionSummary, busy, comman
             {teamB && match.winnerId === teamB.id && <span>WIN</span>}
           </div>
         </div>
-        {teamA && teamB && <PredictionBalance summary={predictionSummary} />}
+        {!isCancelled && teamA && teamB && <PredictionBalance summary={predictionSummary} />}
       </div>
       <div className="match-actions">
-        {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
-        {hasDetail && match.phase === "scrim" && <button type="button" className="summary-share-button" onClick={() => void shareOrCopy(`/scrim/${encodeURIComponent(match.tournamentId)}/match/${encodeURIComponent(match.id)}`, `${match.roundLabel} 내전 요약`)}>내전 요약 공유</button>}
-        {canManageMatch && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")} onClick={() => openResultReview(match)}>{hasDetail ? isStaff ? "세트 결과 추가·수정" : "다음 세트 결과 등록" : "세트 결과 이미지 등록"}</button>}
-        {teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : isStaff ? <MatchDraftCreator match={match} busy={busy} command={command} /> : null)}
-        {canManageMatch && (!match.scheduleConfirmed || isStaff) && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} canSetBestOf={isStaff} />}
-        {match.status === "scheduled" && (
-          <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
-            {match.scheduleConfirmed ? "일정 확정" : "일정 미확정"}
-          </span>
-        )}
-        {match.status === "completed" ? (
-          <span className="result-complete">결과 확정</span>
-        ) : (
-          <span className="result-waiting">경기 예정</span>
-        )}
-        {(isStaff || match.phase === "scrim") && teamA && teamB && match.bestOf === 1 && (
-          <div className="winner-buttons">
-            {[teamA, teamB].map((team) => (
-              <button
-                key={team.id}
-                disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")}
-                onClick={() => {
-                  if (window.confirm(`${team.name}을(를) 승리팀으로 확정할까요?`)) {
-                    void command({ action: "set_winner", matchId: match.id, winnerId: team.id }, `${team.name} 승리가 반영되었습니다.`);
-                  }
-                }}
-              >
-                {team.name} 승리
-              </button>
-            ))}
-          </div>
-        )}
+        {isCancelled ? <span className="result-cancelled">경기 무효</span> : <>
+          {hasDetail && <button type="button" className="result-detail-button" onClick={() => openResultDetail(match)}>상세 결과</button>}
+          {hasDetail && match.phase === "scrim" && <button type="button" className="summary-share-button" onClick={() => void shareOrCopy(`/scrim/${encodeURIComponent(match.tournamentId)}/match/${encodeURIComponent(match.id)}`, `${match.roundLabel} 내전 요약`)}>내전 요약 공유</button>}
+          {canManageMatch && teamA && teamB && <button type="button" className="result-upload-button" disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")} onClick={() => openResultReview(match)}>{hasDetail ? isStaff ? "세트 결과 추가·수정" : "다음 세트 결과 등록" : "세트 결과 이미지 등록"}</button>}
+          {teamA && teamB && (draftSession ? <span className="draft-status-chip">밴픽 {draftSession.status === "lobby" ? "참가 대기" : draftSession.status === "active" ? `${draftSession.currentSet}세트 진행` : "완료"}</span> : isStaff ? <MatchDraftCreator match={match} busy={busy} command={command} /> : null)}
+          {canManageMatch && (!match.scheduleConfirmed || isStaff) && <MatchScheduleEditor key={match.scheduledAt} match={match} busy={busy} command={command} canSetBestOf={isStaff} />}
+          {match.status === "scheduled" && (
+            <span className={match.scheduleConfirmed ? "schedule-confirmed" : "schedule-unconfirmed"}>
+              {match.scheduleConfirmed ? "일정 확정" : "일정 미확정"}
+            </span>
+          )}
+          {match.status === "completed" ? (
+            <span className="result-complete">결과 확정</span>
+          ) : (
+            <span className="result-waiting">경기 예정</span>
+          )}
+          {(isStaff || match.phase === "scrim") && teamA && teamB && match.bestOf === 1 && (
+            <div className="winner-buttons">
+              {[teamA, teamB].map((team) => (
+                <button
+                  key={team.id}
+                  disabled={busy || (match.phase === "scrim" && match.bettingStatus === "open")}
+                  onClick={() => {
+                    if (window.confirm(`${team.name}을(를) 승리팀으로 확정할까요?`)) {
+                      void command({ action: "set_winner", matchId: match.id, winnerId: team.id }, `${team.name} 승리가 반영되었습니다.`);
+                    }
+                  }}
+                >
+                  {team.name} 승리
+                </button>
+              ))}
+            </div>
+          )}
+        </>}
       </div>
     </article>
   );
@@ -1231,7 +1237,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
     setSelectedTeamId((current) => data.teams.some((team) => team.id === current) ? current : (data.standings[0]?.teamId ?? ""));
   }, [data.standings, data.teams]);
   const regularMatches = data.matches.filter((match) => match.phase === "league" && match.matchType === "regular");
-  const allLeagueDone = regularMatches.length > 0 && regularMatches.every((match) => match.status === "completed");
+  const allLeagueDone = regularMatches.length > 0 && regularMatches.every((match) => match.status === "completed" || match.status === "cancelled");
   const hasBracket = data.summary.bracketTotal > 0;
   const canOperate = data.viewer?.role === "operator" || data.viewer?.role === "admin";
   const orderRows = seedOrder.map((id) => data.standings.find((row) => row.teamId === id)!).filter(Boolean);
@@ -1276,7 +1282,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
         <aside className="panel seed-panel">
           <div className="section-heading"><div><p className="eyebrow">FINAL SEED</p><h2>토너먼트 시드</h2></div></div>
           {!allLeagueDone ? (
-            <div className="seed-lock"><span>⌛</span><strong>리그 진행 중</strong><p>{data.summary.leagueCompleted}/{data.summary.leagueTotal}경기 결과가 확정되었습니다.</p></div>
+            <div className="seed-lock"><span>⌛</span><strong>리그 진행 중</strong><p>{data.summary.leagueCompleted}/{data.summary.leagueTotal}경기가 완료 또는 취소 처리되었습니다.</p></div>
           ) : hasBracket ? (
             <div className="seed-lock success"><span>✓</span><strong>시드 확정 완료</strong><p>토너먼트 대진에 반영되었습니다.</p></div>
           ) : (
@@ -1398,20 +1404,21 @@ function BracketView({ data, teamMap, isStaff, busy, command, matches: bracketMa
 
 function BracketCard({ match, teamMap, isStaff, busy, command }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"] }) {
   const entries = [match.teamAId, match.teamBId].map((id) => id ? teamMap.get(id) : undefined);
+  const isCancelled = match.status === "cancelled";
   return (
     <article className={`bracket-card ${match.status}`}>
-      <header><strong>{match.matchNo === "F" ? "FINAL" : match.matchNo}</strong><span>{match.roundLabel} · BO{match.bestOf} · {match.seriesScoreA}:{match.seriesScoreB}</span></header>
+      <header><strong>{match.matchNo === "F" ? "FINAL" : match.matchNo}</strong><span>{match.roundLabel} · BO{match.bestOf} · {isCancelled ? "경기 취소" : `${match.seriesScoreA}:${match.seriesScoreB}`}</span></header>
       {entries.map((team, index) => (
         <div className={team && match.winnerId === team.id ? "winner" : ""} key={team?.id ?? index}>
           <TeamMark team={team} small /><span>{team?.name ?? "결과 대기"}</span>{team && match.winnerId === team.id && <b>W</b>}
-          {isStaff && match.bestOf === 1 && team && entries.every(Boolean) && (
+          {!isCancelled && isStaff && match.bestOf === 1 && team && entries.every(Boolean) && (
             <button disabled={busy} onClick={() => {
               if (window.confirm(`${team.name} 승리를 확정할까요?`)) void command({ action: "set_winner", matchId: match.id, winnerId: team.id }, `${team.name} 승리가 다음 대진에 반영되었습니다.`);
             }}>승리</button>
           )}
         </div>
       ))}
-      <footer>{formatDate(match.scheduledAt)}</footer>
+      <footer>{formatDate(match.scheduledAt)}{isCancelled && <strong>경기 무효</strong>}</footer>
     </article>
   );
 }
@@ -1712,7 +1719,7 @@ function AdminView({ data, teamMap, isStaff, busy, command, openCreate, openCrea
                 />
               );
             })}
-            {!managedMatches.length && <div className="schedule-group-empty">관리할 내전 경기가 없습니다.</div>}
+            {!managedMatches.length && <div className="schedule-group-empty">관리할 예정 경기가 없습니다.</div>}
           </div>
         </article>
         <article className="panel audit-panel">
@@ -1929,30 +1936,48 @@ function AdminScheduleRow({ match, teamA, teamB, busy, command, refundSummary }:
       </div>
       <span><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><small>{match.roundLabel}</small></span>
       <b className={match.scheduleConfirmed ? "confirmed" : "waiting"}>{match.scheduleConfirmed ? "확정" : "미확정"}</b>
-      <button
-        type="button"
-        className="secondary-button schedule-confirm-button"
-        disabled={busy || match.scheduleConfirmed || scheduleChanged}
-        title={scheduleChanged ? "변경한 일정을 먼저 저장해 주세요." : undefined}
-        onClick={() => command({ action: "confirm_match_schedule", matchId: match.id }, "경기 일정을 확정했습니다.")}
-      >
-        {match.scheduleConfirmed ? "확정 완료" : scheduleChanged ? "저장 필요" : "일정 확정"}
-      </button>
-      {match.scheduleConfirmed && <button
-        type="button"
-        className="danger-button schedule-unconfirm-button"
-        disabled={busy}
-        onClick={() => {
-          const betCount = refundSummary?.betCount ?? 0;
-          const paidPoints = refundSummary?.paidPoints ?? 0;
-          const freePoints = refundSummary?.freePoints ?? 0;
-          const detail = betCount
-            ? `\n예측 ${betCount}건 · 차감 포인트 ${paidPoints.toLocaleString()}P 반환 · 무료 예측 ${freePoints.toLocaleString()}P 취소`
-            : "\n현재 등록된 예측은 없습니다.";
-          if (!window.confirm(`이 경기의 일정 확정을 취소할까요?${detail}\n경기는 다시 일정 미확정 상태가 됩니다.`)) return;
-          void command({ action: "unconfirm_match_schedule", matchId: match.id }, `일정 확정을 취소하고 ${paidPoints.toLocaleString()}P를 반환했습니다.`);
-        }}
-      >확정 취소</button>}
+      <div className="admin-schedule-actions">
+        <button
+          type="button"
+          className="secondary-button schedule-confirm-button"
+          disabled={busy || match.scheduleConfirmed || scheduleChanged}
+          title={scheduleChanged ? "변경한 일정을 먼저 저장해 주세요." : undefined}
+          onClick={() => command({ action: "confirm_match_schedule", matchId: match.id }, "경기 일정을 확정했습니다.")}
+        >
+          {match.scheduleConfirmed ? "확정 완료" : scheduleChanged ? "저장 필요" : "일정 확정"}
+        </button>
+        {match.scheduleConfirmed && <button
+          type="button"
+          className="danger-button schedule-unconfirm-button"
+          disabled={busy}
+          onClick={() => {
+            const betCount = refundSummary?.betCount ?? 0;
+            const paidPoints = refundSummary?.paidPoints ?? 0;
+            const freePoints = refundSummary?.freePoints ?? 0;
+            const detail = betCount
+              ? `\n예측 ${betCount}건 · 차감 포인트 ${paidPoints.toLocaleString()}P 반환 · 무료 예측 ${freePoints.toLocaleString()}P 취소`
+              : "\n현재 등록된 예측은 없습니다.";
+            if (!window.confirm(`이 경기의 일정 확정을 취소할까요?${detail}\n경기는 다시 일정 미확정 상태가 됩니다.`)) return;
+            void command({ action: "unconfirm_match_schedule", matchId: match.id }, `일정 확정을 취소하고 ${paidPoints.toLocaleString()}P를 반환했습니다.`);
+          }}
+        >확정 취소</button>}
+        <button
+          type="button"
+          className="danger-button match-cancel-button"
+          disabled={busy || scheduleChanged}
+          title={scheduleChanged ? "변경한 일정을 먼저 저장해 주세요." : undefined}
+          onClick={() => {
+            const betCount = refundSummary?.betCount ?? 0;
+            const paidPoints = refundSummary?.paidPoints ?? 0;
+            const freePoints = refundSummary?.freePoints ?? 0;
+            const detail = betCount
+              ? `\n예측 ${betCount}건 · 차감 포인트 ${paidPoints.toLocaleString()}P 반환 · 무료 예측 ${freePoints.toLocaleString()}P 취소`
+              : "\n현재 등록된 예측은 없습니다.";
+            if (!window.confirm(`${formatDate(match.scheduledAt)}\n${matchLabel}\n\n이 경기를 무효 처리할까요?${detail}\n승패와 리그 전적에는 반영되지 않으며 진행 완료 경기로 표시됩니다.`)) return;
+            void command({ action: "cancel_tournament_match", matchId: match.id }, `경기를 무효 처리하고 ${paidPoints.toLocaleString()}P를 반환했습니다.`);
+          }}
+        >경기 무효</button>
+      </div>
     </div>
   );
 }

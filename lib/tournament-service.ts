@@ -2311,6 +2311,10 @@ function calculateStandings(
   }));
 }
 
+function isResolvedMatchStatus(status: string) {
+  return status === "completed" || status === "cancelled";
+}
+
 export async function createBracket(tournamentId: string, seedOrder: string[], actor: RequestUser) {
   await requireTournamentOperator(actor, tournamentId);
   return createBracketInternal(tournamentId, seedOrder, actor);
@@ -2335,7 +2339,7 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
     .select()
     .from(matches)
     .where(and(eq(matches.tournamentId, tournamentId), eq(matches.phase, "league")));
-  if (leagueMatches.some((match) => match.status !== "completed")) {
+  if (leagueMatches.some((match) => !isResolvedMatchStatus(match.status))) {
     throw new Error("리그전 결과를 모두 확정한 후 토너먼트를 생성할 수 있습니다.");
   }
   const [existing] = await db
@@ -2455,7 +2459,7 @@ export async function createTiebreakerMatch(
     throw new Error("이 대회의 팀만 선택할 수 있습니다.");
   }
   const leagueRows = await db.select().from(matches).where(and(eq(matches.tournamentId, tournamentId), eq(matches.phase, "league")));
-  if (leagueRows.some((match) => match.matchType === "regular" && match.status !== "completed")) {
+  if (leagueRows.some((match) => match.matchType === "regular" && !isResolvedMatchStatus(match.status))) {
     throw new Error("정규 리그전 결과를 모두 확정한 뒤 순위 결정전을 생성해 주세요.");
   }
   const standings = calculateStandings(tournamentTeams, leagueRows.filter((match) => match.matchType === "regular"));
@@ -2709,6 +2713,9 @@ async function propagateBracket(tournamentId: string) {
           loserId: null,
           status: "scheduled",
           completedAt: null,
+          cancelledAt: null,
+          cancelledBy: null,
+          scheduleConfirmed: false,
         })
         .where(eq(matches.id, match.id));
     }
@@ -2725,6 +2732,7 @@ export async function setMatchWinner(
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  if (match.status === "cancelled") throw new Error("무효 처리된 경기에는 승리팀을 등록할 수 없습니다.");
   if (match.phase === "scrim" && match.bettingStatus === "open") {
     throw new Error("배팅을 종료한 뒤 내전 결과를 확정해 주세요.");
   }
@@ -2777,7 +2785,7 @@ export async function setMatchWinner(
     const [tournament] = await db.select().from(tournaments).where(eq(tournaments.id, match.tournamentId)).limit(1);
     if (tournament?.bracketFormat === "none") {
       const leagueMatches = await db.select().from(matches).where(and(eq(matches.tournamentId, match.tournamentId), eq(matches.phase, "league")));
-      if (leagueMatches.every((item) => item.id === match.id || item.status === "completed")) {
+      if (leagueMatches.every((item) => item.id === match.id || isResolvedMatchStatus(item.status))) {
         await db.update(tournaments).set({ status: "completed" }).where(eq(tournaments.id, match.tournamentId));
       }
     }
@@ -2841,6 +2849,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId)).limit(1);
   if (!match || !match.teamAId || !match.teamBId) throw new Error("결과를 등록할 경기를 찾을 수 없습니다.");
+  if (match.status === "cancelled") throw new Error("무효 처리된 경기에는 결과 이미지를 등록할 수 없습니다.");
   if (match.phase === "scrim" && match.bettingStatus === "open") {
     throw new Error("배팅을 종료한 뒤 내전 결과 이미지를 등록해 주세요.");
   }
@@ -3022,6 +3031,7 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  if (match.status === "cancelled") throw new Error("무효 처리된 경기의 일정은 변경할 수 없습니다.");
   if (!(await canManageMatch(actor, match))) throw new Error("이 경기의 일정을 입력할 권한이 없습니다.");
   if (match.scheduleConfirmed && !isStaff(actor)) throw new Error("확정된 일정은 운영자나 관리자만 변경할 수 있습니다.");
   const nextScheduledAt = date.toISOString();
@@ -3159,6 +3169,135 @@ export async function unconfirmMatchSchedule(matchId: string, actor: RequestUser
       afterJson: JSON.stringify({ scheduleConfirmed: false, refundedBets: activeBets.length, refundedPoints, cancelledFreePoints }),
     }),
   );
+  await db.batch(statements as never);
+  return { refundedBets: activeBets.length, refundedPoints, cancelledFreePoints };
+}
+
+export async function cancelTournamentMatch(matchId: string, actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  if (match.phase === "scrim") throw new Error("내전 경기는 무효 처리할 수 없습니다.");
+  if (match.status !== "scheduled" || match.winnerId || match.loserId || match.settlementStatus === "completed") {
+    throw new Error("진행 전인 대회 경기만 무효 처리할 수 있습니다.");
+  }
+  if (!match.teamAId || !match.teamBId) throw new Error("대진이 확정된 경기만 무효 처리할 수 있습니다.");
+
+  if (match.phase === "bracket") {
+    const bracketRows = await db.select().from(matches).where(and(
+      eq(matches.tournamentId, match.tournamentId),
+      eq(matches.phase, "bracket"),
+    ));
+    const winnerSource = `winner:${match.matchNo}`;
+    const loserSource = `loser:${match.matchNo}`;
+    const dependent = bracketRows.find((row) =>
+      row.id !== match.id && [row.sourceA, row.sourceB].some((source) => source === winnerSource || source === loserSource),
+    );
+    if (dependent) {
+      throw new Error("다음 대진으로 연결되는 토너먼트 경기는 무효 처리할 수 없습니다. 진출할 팀을 부전승으로 확정해 주세요.");
+    }
+  }
+
+  const activeBets = await db.select().from(bets).where(and(eq(bets.matchId, match.id), ne(bets.status, "refunded")));
+  if (activeBets.some((bet) => bet.status !== "pending")) {
+    throw new Error("정산이 시작된 예측이 있어 경기를 무효 처리할 수 없습니다.");
+  }
+  const entries = activeBets.length
+    ? await db.select().from(tournamentEntries).where(and(
+      eq(tournamentEntries.tournamentId, match.tournamentId),
+      inArray(tournamentEntries.userId, activeBets.map((bet) => bet.userId)),
+    ))
+    : [];
+  const entryMap = new Map(entries.map((entry) => [entry.userId, entry]));
+  const refundedPoints = activeBets.reduce((sum, bet) => sum + bet.paidStake, 0);
+  const cancelledFreePoints = activeBets.reduce((sum, bet) => sum + bet.freeStake, 0);
+  const changedAt = new Date().toISOString();
+  const statements = [];
+
+  for (const bet of activeBets) {
+    const entry = entryMap.get(bet.userId);
+    if (!entry) throw new Error("예측 참가자의 대회 포인트 지갑을 찾을 수 없습니다.");
+    if (bet.paidStake > 0) {
+      const nextBalance = entry.pointsBalance + bet.paidStake;
+      statements.push(
+        db.update(tournamentEntries).set({ pointsBalance: nextBalance }).where(and(
+          eq(tournamentEntries.tournamentId, match.tournamentId),
+          eq(tournamentEntries.userId, bet.userId),
+        )),
+        db.insert(pointLedger).values({
+          id: uid("point"),
+          userId: bet.userId,
+          tournamentId: match.tournamentId,
+          betId: bet.id,
+          type: "bet_refund",
+          amount: bet.paidStake,
+          balanceAfter: nextBalance,
+          description: "경기 무효 처리로 예측 포인트 반환",
+        }),
+      );
+    }
+    statements.push(db.update(bets).set({ status: "refunded", payout: 0, settledAt: changedAt }).where(eq(bets.id, bet.id)));
+  }
+
+  await createAutomaticBackup(match.tournamentId, actor, "경기 무효 처리 전 자동 백업");
+  statements.push(
+    db.update(matchGames).set({ status: "cancelled", completedAt: changedAt }).where(and(
+      eq(matchGames.matchId, match.id),
+      eq(matchGames.status, "scheduled"),
+    )),
+    db.update(matches).set({
+      status: "cancelled",
+      winnerId: null,
+      loserId: null,
+      seriesScoreA: 0,
+      seriesScoreB: 0,
+      scheduleConfirmed: false,
+      bettingStatus: "closed",
+      predictionCountAClosed: null,
+      predictionCountBClosed: null,
+      settlementStatus: "not_required",
+      settlementUpdatedAt: changedAt,
+      completedAt: null,
+      cancelledAt: changedAt,
+      cancelledBy: actor.id,
+    }).where(eq(matches.id, match.id)),
+    db.insert(auditLogs).values({
+      id: uid("audit"),
+      tournamentId: match.tournamentId,
+      actorId: actor.id,
+      actorName: actor.displayName,
+      action: "match_cancelled",
+      entityType: "match",
+      entityId: match.id,
+      beforeJson: JSON.stringify({
+        status: match.status,
+        scheduledAt: match.scheduledAt,
+        scheduleConfirmed: match.scheduleConfirmed,
+        teamAId: match.teamAId,
+        teamBId: match.teamBId,
+        activeBets: activeBets.length,
+      }),
+      afterJson: JSON.stringify({
+        status: "cancelled",
+        refundedBets: activeBets.length,
+        refundedPoints,
+        cancelledFreePoints,
+        cancelledAt: changedAt,
+      }),
+    }),
+  );
+
+  const [tournament] = await db.select().from(tournaments).where(eq(tournaments.id, match.tournamentId)).limit(1);
+  if (match.matchNo === "F" || (match.phase === "league" && tournament?.bracketFormat === "none")) {
+    const phaseRows = await db.select().from(matches).where(and(
+      eq(matches.tournamentId, match.tournamentId),
+      eq(matches.phase, match.phase),
+    ));
+    const allResolved = phaseRows.every((row) => row.id === match.id || isResolvedMatchStatus(row.status));
+    if (allResolved) statements.push(db.update(tournaments).set({ status: "completed" }).where(eq(tournaments.id, match.tournamentId)));
+  }
+
   await db.batch(statements as never);
   return { refundedBets: activeBets.length, refundedPoints, cancelledFreePoints };
 }
@@ -3756,9 +3895,9 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     users: adminUsers,
     members: memberRows,
     summary: {
-      leagueCompleted: leagueMatches.filter((match) => match.status === "completed").length,
+      leagueCompleted: leagueMatches.filter((match) => isResolvedMatchStatus(match.status)).length,
       leagueTotal: leagueMatches.length,
-      bracketCompleted: bracketMatches.filter((match) => match.status === "completed").length,
+      bracketCompleted: bracketMatches.filter((match) => isResolvedMatchStatus(match.status)).length,
       bracketTotal: bracketMatches.length,
     },
   };

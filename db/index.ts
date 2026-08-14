@@ -36,8 +36,9 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY NOT NULL, team_id TEXT NOT NULL, user_id TEXT, nickname TEXT NOT NULL, position TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id)`,
   `CREATE INDEX IF NOT EXISTS idx_players_user ON players(user_id)`,
-  `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, schedule_confirmed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, schedule_confirmed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, cancelled_at TEXT, cancelled_by TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_matches_tournament_phase_order ON matches(tournament_id, phase, sort_order)`,
+  `CREATE INDEX IF NOT EXISTS idx_matches_tournament_status ON matches(tournament_id, status)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tournament_number ON matches(tournament_id, phase, match_no)`,
   `CREATE TABLE IF NOT EXISTS match_result_images (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, object_key TEXT NOT NULL, file_name TEXT NOT NULL, content_type TEXT NOT NULL, file_size INTEGER NOT NULL, width INTEGER, height INTEGER, duration_seconds INTEGER, extraction_json TEXT, image_hash TEXT, created_by TEXT NOT NULL, reviewed_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_match_result_images_match ON match_result_images(match_id)`,
@@ -303,6 +304,14 @@ async function migratePreRegisteredPlayers(raw: D1Database) {
   await raw.prepare("CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)").run();
 }
 
+async function migrateMatchCancellations(raw: D1Database) {
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "cancelled_at", "TEXT");
+  await addColumnIfMissing(raw, "matches", matchColumns, "cancelled_by", "TEXT");
+  await raw.prepare("CREATE INDEX IF NOT EXISTS idx_matches_tournament_status ON matches(tournament_id, status)").run();
+  await raw.prepare("PRAGMA optimize").run();
+}
+
 async function migrateQaSandboxes(raw: D1Database) {
   await raw.batch([
     raw.prepare("CREATE TABLE IF NOT EXISTS qa_sandboxes (tournament_id TEXT PRIMARY KEY NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
@@ -326,13 +335,14 @@ export function ensureSchema(): Promise<void> {
            OR (type = 'index' AND name = 'idx_auth_identities_user_provider')
            OR (type = 'index' AND name = 'idx_users_account_status')
            OR (type = 'index' AND name = 'idx_qa_sandboxes_created')
+           OR (type = 'index' AND name = 'idx_matches_tournament_status')
       `)
       .first<{ marker_count: number }>()
       .then(async (schemaState) => {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 9) return;
+        if (Number(schemaState?.marker_count ?? 0) === 10) return;
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -352,6 +362,7 @@ export function ensureSchema(): Promise<void> {
         await migrateGoogleAuthentication(raw);
         await migratePreRegisteredPlayers(raw);
         await migrateQaSandboxes(raw);
+        await migrateMatchCancellations(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();

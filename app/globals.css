@@ -1019,3 +1019,35 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .player-competition-card > header { align-items: flex-start; flex-direction: column; }.player-competition-card > div { grid-template-columns: 1fr 1fr; }
   .recent-player-matches.tournament > div:not(.section-heading), .recent-player-matches.scrim > div:not(.section-heading) { grid-template-columns: minmax(0,1fr) 44px 40px; }.recent-player-matches > div:not(.section-heading) time { grid-column: 1/-1; }.recent-player-matches.tournament > div:not(.section-heading) > span { grid-column: 1/-1; }
 }
+
+/* Tournament match cancellation. */
+.schedule-card.cancelled { border-left: 2px solid rgba(251,113,133,.72); background: linear-gradient(135deg, rgba(60,28,38,.7), rgba(10,22,37,.94)); }
+.bracket-card.cancelled { border-color: rgba(251,113,133,.48); background: linear-gradient(145deg, rgba(60,28,38,.82), rgba(10,20,34,.98)); }
+.bracket-card.cancelled > div { opacity: .72; }
+.bracket-card.cancelled footer { display: flex; justify-content: space-between; gap: 8px; }
+.bracket-card.cancelled footer strong { color: #fda4af; }
+.schedule-card.cancelled .schedule-team, .schedule-card.cancelled .match-time { opacity: .74; }
+.schedule-score .cancelled-score { color: #fda4af; font-size: 15px; font-weight: 900; }
+.result-cancelled { padding: 7px 10px; border: 1px solid rgba(251,113,133,.36); border-radius: 6px; background: rgba(251,113,133,.09); color: #fda4af; font-size: 12px; font-weight: 900; }
+.admin-schedule-row { grid-template-columns: minmax(270px,320px) minmax(220px,1fr) 62px minmax(250px,auto); }
+.admin-schedule-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.admin-schedule-actions button { min-width: 78px; white-space: nowrap; }
+.match-cancel-button { min-height: 40px; padding: 8px 10px; border: 1px solid rgba(251,113,133,.52) !important; border-radius: 6px; background: rgba(127,29,29,.16); color: #fecaca !important; font-size: 12px; font-weight: 900; cursor: pointer; }
+
+@media (max-width: 1000px) {
+  .admin-schedule-row { grid-template-columns: minmax(240px,1fr) minmax(180px,1fr) 62px; }
+  .admin-schedule-actions { grid-column: 1/-1; justify-content: flex-end; }
+}
+
+@media (max-width: 800px) {
+  .admin-schedule-row { grid-template-columns: minmax(0,1fr) auto; }
+  .admin-schedule-editor, .admin-schedule-row > span, .admin-schedule-actions { grid-column: 1/-1; }
+  .admin-schedule-actions { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .admin-schedule-actions button { width: 100%; min-height: 42px; }
+}
+
+@media (max-width: 480px) {
+  .admin-schedule-actions { grid-template-columns: 1fr 1fr; }
+  .match-cancel-button { grid-column: 1/-1; }
+  .schedule-score .cancelled-score { font-size: 11px; white-space: normal; }
+}

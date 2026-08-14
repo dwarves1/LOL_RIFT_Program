@@ -323,13 +323,15 @@ export const matches = sqliteTable(
       enum: ["not_required", "ready", "processing", "completed", "failed", "reversed"],
     }).notNull().default("not_required"),
     settlementUpdatedAt: text("settlement_updated_at"),
-    status: text("status", { enum: ["scheduled", "completed"] })
+    status: text("status", { enum: ["scheduled", "completed", "cancelled"] })
       .notNull()
       .default("scheduled"),
     winnerId: text("winner_id"),
     loserId: text("loser_id"),
     sortOrder: integer("sort_order").notNull(),
     completedAt: text("completed_at"),
+    cancelledAt: text("cancelled_at"),
+    cancelledBy: text("cancelled_by"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
@@ -344,6 +346,7 @@ export const matches = sqliteTable(
       table.matchNo,
     ),
     index("idx_matches_betting_status").on(table.tournamentId, table.bettingStatus),
+    index("idx_matches_tournament_status").on(table.tournamentId, table.status),
   ],
 );
 

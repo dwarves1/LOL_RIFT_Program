@@ -84,6 +84,7 @@ export async function createDraft(input: {
 
   const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId ?? "")).limit(1);
   if (!match || !match.teamAId || !match.teamBId) throw new Error("양 팀이 확정된 경기만 밴픽을 만들 수 있습니다.");
+  if (match.status === "cancelled") throw new Error("무효 처리된 경기에는 밴픽을 만들 수 없습니다.");
   if (!(await canOperateTournament(actor, match.tournamentId))) throw new Error("이 경기의 밴픽을 만들 권한이 없습니다.");
   const [existing] = await db.select().from(draftSessions).where(eq(draftSessions.matchId, match.id)).limit(1);
   if (existing) return existing.id;
