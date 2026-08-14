@@ -1190,3 +1190,59 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .result-detail-modal > header { padding: 15px 14px; }
   .result-detail-body { padding-inline: 10px; }
 }
+
+/* Player readability, champion portraits, and expanded analytics. */
+.player-search-page .page-title > span { font-size: 14px; line-height: 1.65; }
+.player-search-page .player-data-time, .player-detail-page .player-data-time { padding: 13px 15px; font-size: 13px; line-height: 1.5; }
+.player-search-page .player-data-time small, .player-detail-page .player-data-time small { font-size: 12px; }
+.player-search-page .player-scope-note { font-size: 13px; }
+.player-search-page .fun-stat-grid > article > span { font-size: 12px; }
+.player-search-page .fun-stat-grid > article > strong { font-size: 27px; }
+.player-search-page .co-leader-list button span { font-size: 13px; }
+.player-search-page .co-leader-list button small, .player-search-page .co-leader-list summary { font-size: 11px; }
+.player-search-page .relationship-highlights article > span { font-size: 11px; }
+.player-search-page .relationship-highlights article > strong { font-size: 18px; }
+.player-search-page .relationship-highlights article p { font-size: 13px; line-height: 1.5; }
+.player-search-page .lane-leader-panel > div:last-child > section > b { font-size: 13px; }
+.player-search-page .lane-leader-panel > div:last-child > section > strong { font-size: 21px; }
+.player-search-page .player-search-box label span { font-size: 12px; }
+.player-search-page .player-search-box input { min-height: 52px; font-size: 16px; }
+.player-search-page .player-search-box > b { font-size: 15px; }
+.player-search-page .player-directory > button { min-height: 88px; padding: 14px; gap: 13px; }
+.player-search-page .player-directory i { width: 46px; height: 46px; font-size: 16px; }
+.player-search-page .player-directory span strong { font-size: 15px; }
+.player-search-page .player-directory span small { font-size: 12px; line-height: 1.45; }
+.player-search-page .player-record-summary b { font-size: 12px; }
+.player-search-page .player-directory em { font-size: 11px; }
+.player-detail-page .player-back-button { font-size: 13px; }
+.player-detail-page .player-profile-hero h1 { font-size: 28px; }
+.player-detail-page .player-profile-hero div > span { font-size: 14px; line-height: 1.55; }
+.player-detail-page .profile-streak span, .player-detail-page .profile-streak small { font-size: 11px; }
+.player-detail-page .profile-streak strong { font-size: 24px; }
+.player-detail-page .player-record-tabs button { font-size: 15px; }
+.player-detail-page .player-account-panel span strong { font-size: 14px; }
+.player-detail-page .player-account-panel span small { font-size: 11px; }
+.player-detail-page .player-account-panel a { font-size: 12px; }
+.player-detail-page .player-metric-grid span, .player-detail-page .player-metric-grid small { font-size: 11px; line-height: 1.45; }
+.player-detail-page .player-metric-grid strong { font-size: 20px; }
+.player-detail-page .player-record-panel > div:not(.section-heading), .player-detail-page .player-record-panel > .player-profile-link { min-height: 54px; align-items: center; padding: 10px 0; font-size: 13px; }
+.player-record-name { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.player-record-name > span { overflow: hidden; color: #edf3fa; text-overflow: ellipsis; white-space: nowrap; }
+.player-record-name img { width: 40px; height: 40px; flex: 0 0 40px; border: 1px solid rgba(233,185,73,.34); border-radius: 8px; background: #07111f; object-fit: cover; }
+.player-detail-page .player-competition-card header span { font-size: 13px; }
+.player-detail-page .player-competition-card header > strong { font-size: 14px; }
+.player-detail-page .player-competition-card > div > span { font-size: 11px; }
+.player-detail-page .player-competition-card > div strong { font-size: 16px; }
+.player-detail-page .recent-player-matches > div:not(.section-heading) { min-height: 54px; font-size: 12px; }
+.player-detail-page .recent-player-matches time, .player-detail-page .recent-player-matches > div:not(.section-heading) strong small { font-size: 11px; }
+.player-detail-page .recent-player-matches > div:not(.section-heading) em { font-size: 15px; }
+.stats-table { min-width: 1360px; }
+.stats-table-head, .stats-table-row { grid-template-columns: minmax(210px,1.4fr) 100px 70px 165px 70px 75px 80px 75px 105px 125px 125px; }
+
+@media (max-width: 700px) {
+  .player-search-page .page-title > span { font-size: 13px; }
+  .player-search-page .player-directory > button { grid-template-columns: 46px minmax(0,1fr) auto; }
+  .player-detail-page .player-profile-hero h1 { font-size: 23px; }
+  .player-detail-page .player-record-panel > div:not(.section-heading) { min-height: 58px; }
+  .player-record-name img { width: 38px; height: 38px; flex-basis: 38px; }
+}

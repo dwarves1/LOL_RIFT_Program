@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { isPredictionOpen } from "../lib/match-rules";
@@ -994,6 +995,7 @@ function HomeView({
         <article className="panel recent-results">
           <div className="section-heading">
             <div><p className="eyebrow">RECENT RESULTS</p><h2>최근 결과</h2></div>
+            <button className="text-button" onClick={() => setActiveTab("schedule")}>전체 보기 →</button>
           </div>
           <div className="result-list">
             {lastResults.map((match) => (
@@ -1493,6 +1495,20 @@ function TeamsView({ data }: { data: Dashboard }) {
 
 function PlayerSearchView({ data, selectedPlayerId, initialQuery, onSelectPlayer }: { data: Dashboard; selectedPlayerId: string | null; initialQuery: string; onSelectPlayer: (userId: string | null) => void }) {
   const [query, setQuery] = useState(initialQuery);
+  const [championPortraits, setChampionPortraits] = useState<Map<string, string>>(() => new Map());
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/champions?catalog=current-no-jade", { signal: controller.signal })
+      .then((response) => response.ok ? response.json() as Promise<{ champions?: Array<{ name: string; imageUrl: string }> }> : Promise.reject(new Error("챔피언 목록을 불러오지 못했습니다.")))
+      .then((payload) => {
+        setChampionPortraits(new Map((payload.champions ?? []).map((champion) => [normalizeChampionKey(champion.name), champion.imageUrl])));
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setChampionPortraits(new Map());
+      });
+    return () => controller.abort();
+  }, []);
   const scrimInsights = useMemo(() => buildPlayerInsights({ ...data.playerHistory, scope: "scrim" }), [data.playerHistory]);
   const tournamentInsights = useMemo(() => buildPlayerInsights({ ...data.playerHistory, scope: "tournament" }), [data.playerHistory]);
   const normalized = query.trim().toLocaleLowerCase("ko");
@@ -1501,7 +1517,7 @@ function PlayerSearchView({ data, selectedPlayerId, initialQuery, onSelectPlayer
   const selectedScrimPlayer = selectedPlayerId ? scrimInsights.playerMap.get(selectedPlayerId) ?? null : null;
   if (selectedPlayerId) {
     return selectedTournamentPlayer || selectedScrimPlayer
-      ? <PlayerDetailView tournamentPlayer={selectedTournamentPlayer} scrimPlayer={selectedScrimPlayer} tournamentId={data.tournament!.id} currentCompetitionKind={data.tournament!.competitionKind} tournamentUpdatedAt={tournamentInsights.lastUpdatedAt} scrimUpdatedAt={scrimInsights.lastUpdatedAt} onBack={() => onSelectPlayer(null)} onSelectPlayer={(userId) => onSelectPlayer(userId)} />
+      ? <PlayerDetailView tournamentPlayer={selectedTournamentPlayer} scrimPlayer={selectedScrimPlayer} championPortraits={championPortraits} tournamentId={data.tournament!.id} currentCompetitionKind={data.tournament!.competitionKind} tournamentUpdatedAt={tournamentInsights.lastUpdatedAt} scrimUpdatedAt={scrimInsights.lastUpdatedAt} onBack={() => onSelectPlayer(null)} onSelectPlayer={(userId) => onSelectPlayer(userId)} />
       : <section className="page-section"><PageTitle eyebrow="PLAYER DATABASE" title="플레이어를 찾을 수 없습니다" description="현재 시즌에 참가한 회원만 조회할 수 있습니다." /><button className="secondary-button" onClick={() => onSelectPlayer(null)}>검색으로 돌아가기</button></section>;
   }
   const fun = scrimInsights.funStats;
@@ -1540,7 +1556,7 @@ function PlayerSearchView({ data, selectedPlayerId, initialQuery, onSelectPlayer
   </section>;
 }
 
-function PlayerDetailView({ tournamentPlayer, scrimPlayer, tournamentId, currentCompetitionKind, tournamentUpdatedAt, scrimUpdatedAt, onBack, onSelectPlayer }: { tournamentPlayer: PlayerInsight | null; scrimPlayer: PlayerInsight | null; tournamentId: string; currentCompetitionKind: Tournament["competitionKind"]; tournamentUpdatedAt: string | null; scrimUpdatedAt: string | null; onBack: () => void; onSelectPlayer: (userId: string) => void }) {
+function PlayerDetailView({ tournamentPlayer, scrimPlayer, championPortraits, tournamentId, currentCompetitionKind, tournamentUpdatedAt, scrimUpdatedAt, onBack, onSelectPlayer }: { tournamentPlayer: PlayerInsight | null; scrimPlayer: PlayerInsight | null; championPortraits: Map<string, string>; tournamentId: string; currentCompetitionKind: Tournament["competitionKind"]; tournamentUpdatedAt: string | null; scrimUpdatedAt: string | null; onBack: () => void; onSelectPlayer: (userId: string) => void }) {
   const defaultScope = currentCompetitionKind === "tournament" && tournamentPlayer?.games ? "tournament" : scrimPlayer?.games ? "scrim" : "tournament";
   const [recordScope, setRecordScope] = useState<"tournament" | "scrim">(defaultScope);
   const player = (recordScope === "tournament" ? tournamentPlayer : scrimPlayer) ?? tournamentPlayer ?? scrimPlayer!;
@@ -1556,7 +1572,7 @@ function PlayerDetailView({ tournamentPlayer, scrimPlayer, tournamentId, current
     <article className="panel player-account-panel"><div className="section-heading"><div><p className="eyebrow">REGISTERED RIOT IDS</p><h2>등록 롤 계정</h2></div></div><div>{player.accounts.map((account, index) => <div key={account.id}><span><strong>{accountRiotId(account)}</strong><small>{index === 0 ? "대표 계정" : "등록 계정"}</small></span><a href={opggSearchUrl(account)} target="_blank" rel="noopener noreferrer">OP.GG 전적 검색 ↗</a></div>)}</div></article>
     <div className="player-metric-grid"><div><span>{isTournament ? "대회" : "내전"} 승률</span><strong>{player.games ? `${player.winRate}%` : "-"}</strong><small>{player.wins}승 {player.losses}패</small></div><div><span>평균 K / D / A</span><strong>{player.analyzedGames ? `${(player.kills / statGames).toFixed(1)} / ${(player.deaths / statGames).toFixed(1)} / ${(player.assists / statGames).toFixed(1)}` : "-"}</strong><small>{player.analyzedGames ? `분석 ${player.analyzedGames}세트` : "상세 분석 없음"}</small></div><div><span>KDA</span><strong>{player.analyzedGames ? player.kda.toFixed(2) : "-"}</strong><small>(킬+어시)/데스</small></div><div><span>평균 골드</span><strong>{player.analyzedGames ? player.averageGold.toLocaleString() : "-"}</strong><small>분석 세트당</small></div></div>
     {isTournament && <div className="player-competition-list">{player.competitions.map((competition) => <CompetitionRecordCard key={competition.tournamentId} competition={competition} />)}{!player.competitions.length && <div className="panel player-empty-record"><strong>대회 기록이 없습니다</strong><p>해당 선수가 참가한 완료 대회 경기가 등록되면 표시됩니다.</p></div>}</div>}
-    <div className="player-record-grid"><RecordPanel title="챔피언별 전적" rows={player.champions.map((row) => ({ label: row.name, value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /><RecordPanel title="라인별 전적" rows={player.lanes.map((row) => ({ label: positionLabel(row.name, true), value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /></div>
+    <div className="player-record-grid"><RecordPanel title="챔피언별 전적" rows={player.champions.map((row) => ({ label: row.name, imageUrl: championPortraits.get(normalizeChampionKey(row.name)), value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /><RecordPanel title="라인별 전적" rows={player.lanes.map((row) => ({ label: positionLabel(row.name, true), value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /></div>
     {!isTournament && <div className="player-record-grid"><RelationshipPanel title="동료 전적" rows={player.teammates} tournamentId={tournamentId} onSelect={onSelectPlayer} /><RelationshipPanel title="상대 전적" rows={player.opponents} tournamentId={tournamentId} onSelect={onSelectPlayer} /></div>}
     <article className={`panel recent-player-matches ${isTournament ? "tournament" : "scrim"}`}><div className="section-heading"><div><p className="eyebrow">{isTournament ? "RECENT TOURNAMENTS" : "RECENT SCRIMS"}</p><h2>최근 {isTournament ? "대회 경기" : "내전"}</h2></div></div>{player.recentMatches.map((match) => <div key={match.matchId}><time>{formatDate(match.scheduledAt)}</time>{isTournament && <span>{match.tournamentName}</span>}<strong>{match.teamName && match.opponentName ? `${match.teamName} vs ${match.opponentName}` : match.roundLabel}<small>{match.roundLabel}</small></strong><em>{match.score ?? "-"}</em><b className={match.won ? "win" : "loss"}>{match.won ? "승리" : "패배"}</b></div>)}{!player.recentMatches.length && <p className="player-empty-copy">아직 확정된 {isTournament ? "대회 경기" : "내전"} 기록이 없습니다.</p>}</article>
   </section>;
@@ -1574,8 +1590,8 @@ function CompetitionRecordCard({ competition }: { competition: PlayerCompetition
   return <article className="panel player-competition-card"><header><div><p className="eyebrow">TOURNAMENT RECORD</p><h2>{competition.tournamentName}</h2><span>{competition.teamNames.join(" · ") || "소속팀 미확인"}</span></div><strong>{competition.games}경기 · {competition.wins}승 {competition.losses}패</strong></header><div><span>승률<strong>{competition.winRate}%</strong></span><span>분석 세트<strong>{competition.analyzedGames}</strong></span><span>평균 K/D/A<strong>{competition.analyzedGames ? `${(competition.kills / statGames).toFixed(1)} / ${(competition.deaths / statGames).toFixed(1)} / ${(competition.assists / statGames).toFixed(1)}` : "-"}</strong></span><span>KDA<strong>{competition.analyzedGames ? competition.kda.toFixed(2) : "-"}</strong></span></div></article>;
 }
 
-function RecordPanel({ title, rows }: { title: string; rows: Array<{ label: string; value: string; rate: number }> }) {
-  return <article className="panel player-record-panel"><div className="section-heading"><div><p className="eyebrow">RECORDS</p><h2>{title}</h2></div></div>{rows.slice(0, 10).map((row) => <div key={row.label}><strong>{row.label}</strong><span>{row.value}</span><b>{row.rate}%</b></div>)}{!rows.length && <p className="player-empty-copy">이미지 통계가 등록되면 표시됩니다.</p>}</article>;
+function RecordPanel({ title, rows }: { title: string; rows: Array<{ label: string; imageUrl?: string; value: string; rate: number }> }) {
+  return <article className="panel player-record-panel"><div className="section-heading"><div><p className="eyebrow">RECORDS</p><h2>{title}</h2></div></div>{rows.slice(0, 10).map((row) => <div className={row.imageUrl ? "has-champion-portrait" : ""} key={row.label}><strong className="player-record-name">{row.imageUrl && <img src={row.imageUrl} alt="" loading="lazy" />}<span>{row.label}</span></strong><span>{row.value}</span><b>{row.rate}%</b></div>)}{!rows.length && <p className="player-empty-copy">이미지 통계가 등록되면 표시됩니다.</p>}</article>;
 }
 
 function RelationshipPanel({ title, rows, tournamentId, onSelect }: { title: string; rows: RelationshipRecord[]; tournamentId: string; onSelect: (userId: string) => void }) {
@@ -1588,6 +1604,10 @@ function StreakBadge({ badge }: { badge: { kind: "win" | "loss"; count: number; 
 
 function accountRiotId(account: { riotGameName: string | null; riotTagline: string | null }) {
   return `${account.riotGameName ?? "미등록"}#${account.riotTagline ?? "-"}`;
+}
+
+function normalizeChampionKey(value: string) {
+  return value.trim().normalize("NFKC").toLocaleLowerCase("ko-KR");
 }
 
 function PointsView({ data, teamMap, busy, command, signInPath, upcoming, focusedMatchId, openPlayer }: SharedProps & { upcoming: Match[]; focusedMatchId?: string | null; openPlayer: (userId: string) => void }) {
