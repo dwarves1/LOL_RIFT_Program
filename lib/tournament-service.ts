@@ -312,6 +312,7 @@ async function claimPreRegisteredPlayer(
   const primary = normalizedAccounts.find((account) => account.isPrimary)!;
   const displayName = publicDisplayName(primary.gameName, primary.tagline, realName);
   const mergedEmail = `merged-${shellUser.id.replace(/[^a-zA-Z0-9_-]/g, "")}@lolrift.invalid`;
+  const preRegisteredAccounts = await db.select().from(riotAccounts).where(eq(riotAccounts.userId, preRegisteredUser.id));
   const statements: unknown[] = [];
   statements.push(
     db.update(users).set({
@@ -352,12 +353,25 @@ async function claimPreRegisteredPlayer(
     }).where(eq(authIdentities.userId, shellUser.id)),
   );
   for (const account of normalizedAccounts.filter((item) => !item.isPrimary)) {
-    statements.push(db.insert(riotAccounts).values({
-      id: uid("riot"), userId: preRegisteredUser.id,
-      gameName: account.gameName, tagline: account.tagline,
-      gameNameNormalized: account.gameNameNormalized, taglineNormalized: account.taglineNormalized,
-      isPrimary: false, createdAt: changedAt, updatedAt: changedAt,
-    }));
+    const existingAccount = preRegisteredAccounts.find((item) => (
+      item.gameNameNormalized === account.gameNameNormalized
+      && item.taglineNormalized === account.taglineNormalized
+    ));
+    if (existingAccount) {
+      statements.push(db.update(riotAccounts).set({
+        gameName: account.gameName,
+        tagline: account.tagline,
+        isPrimary: false,
+        updatedAt: changedAt,
+      }).where(eq(riotAccounts.id, existingAccount.id)));
+    } else {
+      statements.push(db.insert(riotAccounts).values({
+        id: uid("riot"), userId: preRegisteredUser.id,
+        gameName: account.gameName, tagline: account.tagline,
+        gameNameNormalized: account.gameNameNormalized, taglineNormalized: account.taglineNormalized,
+        isPrimary: false, createdAt: changedAt, updatedAt: changedAt,
+      }));
+    }
   }
   statements.push(
     db.insert(auditLogs).values({
@@ -419,7 +433,7 @@ export async function updateUserProfile(input: UpdateProfileInput, actor: Reques
       ? await db.select().from(users).where(eq(users.id, primaryConflict.userId)).limit(1)
       : [];
     if (
-      primaryConflict &&
+      primaryConflict?.isPrimary &&
       preRegisteredUser?.accountStatus === "provisional" &&
       conflictingAccounts.every((account) => account.userId === preRegisteredUser.id)
     ) {
@@ -1172,6 +1186,16 @@ async function createAutomaticBackup(tournamentId: string, actor: RequestUser, r
 
 const LOLMEN_2026_RESET_ACTION = "lolmen_2026_test_data_reset";
 const LOLMEN_2026_ASSET_CLEANUP_ACTION = "lolmen_2026_result_assets_deleted";
+const LOLMEN_2026_MANDU_ACCOUNT_CLEANUP_ACTION = "lolmen_2026_mandu_account_linked_v1";
+const LOLMEN_2026_MANDU_CANONICAL_NAME = "물만두반 고기만두반";
+const LOLMEN_2026_MANDU_ALIASES = new Set([
+  LOLMEN_2026_MANDU_CANONICAL_NAME,
+  "물만두판 고기만두판",
+  "몰만두만 고기만두반",
+  "롤만두밥 고기만두밥",
+  "롤만두번 고기만두번",
+  "물만두란 고기만두란",
+].map(normalizeIdentityPart));
 const LOLMEN_2026_ERRONEOUS_RESULT_IMAGE_IDS = [
   "result_image_537ab99d-3ec5-47e6-9ae1-2959074726b4",
   "result_image_6fbd4ca0-4fe1-4e0d-89a2-fe9d3aa7784d",
@@ -1328,6 +1352,101 @@ function lolmen2026MaintenanceActor(): RequestUser {
     pointsBalance: 0,
     isLocalDemo: false,
   };
+}
+
+/**
+ * Links the seven OCR variants currently stored for 벌꿀오소리's ADC to the
+ * captain's internal user and registers the canonical Riot ID as a secondary
+ * account. The audit row is written in the same D1 batch, so retries are safe.
+ */
+export async function runPendingLolmen2026ManduAccountCleanup() {
+  await ensureSchema();
+  const db = getDb();
+  const tournamentRows = await db.select().from(tournaments);
+  const tournament = tournamentRows.find((row) => (
+    row.competitionKind === "tournament"
+    && row.name.trim().normalize("NFKC") === "2026 롤멘 대회"
+  ));
+  if (!tournament) return null;
+
+  const [completed] = await db.select({ id: auditLogs.id, afterJson: auditLogs.afterJson }).from(auditLogs).where(and(
+    eq(auditLogs.tournamentId, tournament.id),
+    eq(auditLogs.action, LOLMEN_2026_MANDU_ACCOUNT_CLEANUP_ACTION),
+  )).limit(1);
+  if (completed) {
+    return { alreadyCompleted: true, updatedStats: 0, accountCreated: false };
+  }
+
+  const tournamentTeams = await db.select().from(teams).where(eq(teams.tournamentId, tournament.id));
+  const team = tournamentTeams.find((row) => normalizeIdentityPart(row.name).includes(normalizeIdentityPart("벌꿀오소리")));
+  if (!team?.representativeUserId) throw new Error("벌꿀오소리 팀장 계정을 찾을 수 없습니다.");
+
+  const [targetUser] = await db.select().from(users).where(eq(users.id, team.representativeUserId)).limit(1);
+  if (!targetUser || targetUser.accountStatus === "merged") throw new Error("벌꿀오소리 팀장 사용자 정보를 확인할 수 없습니다.");
+  const targetAccounts = await db.select().from(riotAccounts).where(eq(riotAccounts.userId, targetUser.id));
+  const primaryAccount = targetAccounts.find((account) => account.isPrimary);
+  if (!primaryAccount || normalizeIdentityPart(primaryAccount.gameName) !== normalizeIdentityPart("최하망")) {
+    throw new Error("벌꿀오소리 팀장의 본계정이 최하망인지 확인해 주세요.");
+  }
+
+  const secondaryIdentity = normalizedRiotIdentity(LOLMEN_2026_MANDU_CANONICAL_NAME, "만두만두");
+  const [identityOwner] = await db.select().from(riotAccounts).where(and(
+    eq(riotAccounts.gameNameNormalized, secondaryIdentity.gameNameNormalized),
+    eq(riotAccounts.taglineNormalized, secondaryIdentity.taglineNormalized),
+  )).limit(1);
+  if (identityOwner && identityOwner.userId !== targetUser.id) {
+    throw new Error("물만두반 고기만두반#만두만두 계정이 다른 사용자에게 등록되어 있습니다.");
+  }
+
+  const teamStats = await db.select().from(playerMatchStats).where(eq(playerMatchStats.teamId, team.id));
+  const targetStats = teamStats.filter((row) => LOLMEN_2026_MANDU_ALIASES.has(normalizeIdentityPart(row.accountNameSnapshot)));
+  if (!targetStats.length) throw new Error("정리할 물만두반 고기만두반 상세 기록을 찾을 수 없습니다.");
+
+  const now = new Date().toISOString();
+  const actor = lolmen2026MaintenanceActor();
+  const accountCreated = !identityOwner;
+  const statements: unknown[] = [];
+  if (!identityOwner) {
+    statements.push(db.insert(riotAccounts).values({
+      id: uid("riot"),
+      userId: targetUser.id,
+      ...secondaryIdentity,
+      isPrimary: false,
+      createdAt: now,
+      updatedAt: now,
+    }));
+  } else if (identityOwner.isPrimary) {
+    statements.push(db.update(riotAccounts).set({ isPrimary: false, updatedAt: now }).where(eq(riotAccounts.id, identityOwner.id)));
+  }
+  for (const stat of targetStats) {
+    statements.push(db.update(playerMatchStats).set({
+      userId: targetUser.id,
+      accountNameSnapshot: LOLMEN_2026_MANDU_CANONICAL_NAME,
+      updatedAt: now,
+    }).where(eq(playerMatchStats.id, stat.id)));
+  }
+  statements.push(db.insert(auditLogs).values({
+    id: uid("audit"),
+    tournamentId: tournament.id,
+    actorId: actor.id,
+    actorName: actor.displayName,
+    action: LOLMEN_2026_MANDU_ACCOUNT_CLEANUP_ACTION,
+    entityType: "user",
+    entityId: targetUser.id,
+    beforeJson: JSON.stringify({
+      primaryRiotId: `${primaryAccount.gameName}#${primaryAccount.tagline}`,
+      statNames: targetStats.map((stat) => ({ id: stat.id, name: stat.accountNameSnapshot, userId: stat.userId })),
+    }),
+    afterJson: JSON.stringify({
+      secondaryRiotId: `${secondaryIdentity.gameName}#${secondaryIdentity.tagline}`,
+      canonicalStatName: LOLMEN_2026_MANDU_CANONICAL_NAME,
+      updatedStatIds: targetStats.map((stat) => stat.id),
+      accountCreated,
+    }),
+    createdAt: now,
+  }));
+  await db.batch(statements as never);
+  return { alreadyCompleted: false, updatedStats: targetStats.length, accountCreated };
 }
 
 /** Runs the explicitly requested one-time production cleanup on first request. */

@@ -10,6 +10,7 @@ import {
   createQaScrimSandbox,
   resetQaScrimSandboxes,
   resetLolmen2026TestData,
+  runPendingLolmen2026ManduAccountCleanup,
   runPendingLolmen2026DeploymentCleanup,
   markLolmen2026ResultAssetsDeleted,
   createTiebreakerMatch,
@@ -72,6 +73,11 @@ function errorResponse(error: unknown) {
 
 export async function GET(request: Request) {
   try {
+    try {
+      await runPendingLolmen2026ManduAccountCleanup();
+    } catch (cleanupError) {
+      console.error("Pending 2026 lolmen mandu account cleanup will be retried", cleanupError instanceof Error ? cleanupError.message : "unknown error");
+    }
     try {
       const cleanup = await runPendingLolmen2026DeploymentCleanup();
       if (cleanup) {

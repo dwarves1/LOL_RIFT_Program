@@ -473,9 +473,9 @@ test("2026 롤멘 pre-registered players keep stats when Google signs up and ros
   const created = await createCompetition("2026 롤멘 대회", "league_only", 3);
   const preRegistered = await tournament.savePreRegisteredPlayer({
     tournamentId: created.tournamentId,
-    realName: "가입 전 선수",
-    gameName: "롤멘사전선수",
-    tagline: "LM26",
+    realName: "진희석",
+    gameName: "최하망",
+    tagline: "8724",
   }, actors.get("admin"));
   assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(preRegistered.userId).account_status, "provisional");
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_members WHERE tournament_id = ? AND user_id = ?").get(created.tournamentId, preRegistered.userId).count, 1);
@@ -494,20 +494,41 @@ test("2026 롤멘 pre-registered players keep stats when Google signs up and ros
   const orderedPlayers = positionOrder.map((position) => team.players.find((player) => player.position === position));
   await tournament.updateTournamentTeam({
     teamId: team.id,
-    name: "롤멘 수정 팀",
+    name: "벌꿀오소리(진희석)",
     members: orderedPlayers.map((player, index) => ({
-      riotAccountId: index === 4 ? preRegistered.accountId : player.riotAccountId,
+      riotAccountId: index === 0 ? preRegistered.accountId : player.riotAccountId,
       teamRole: index === 0 ? "captain" : index === 1 ? "vice_captain" : "member",
     })),
   }, actors.get("admin"));
   data = await dashboard(created.tournamentId);
   const editedTeam = data.teams.find((row) => row.id === team.id);
-  assert.equal(editedTeam.name, "롤멘 수정 팀");
-  assert.ok(editedTeam.players.some((player) => player.userId === preRegistered.userId && player.position === "SUP"));
+  assert.equal(editedTeam.name, "벌꿀오소리(진희석)");
+  assert.ok(editedTeam.players.some((player) => player.userId === preRegistered.userId && player.position === "TOP"));
 
   const firstMatch = data.matches[0];
-  sqlite.prepare("INSERT INTO player_match_stats (id, match_id, set_no, team_id, user_id, side, row_order, account_name_snapshot, champion_name, champion_level, lane, kills, deaths, assists, damage, gold, gold_per_minute, won) VALUES (?, ?, 1, ?, ?, 1, 1, ?, '가렌', 18, 'SUP', 2, 1, 8, 0, 12000, 0, 1)")
-    .run("stat_pre_registered_claim", firstMatch.id, team.id, preRegistered.userId, "롤멘사전선수");
+  const manduAliases = [
+    "몰만두만 고기만두반",
+    "물만두반 고기만두반",
+    "물만두판 고기만두판",
+    "롤만두밥 고기만두밥",
+    "물만두반 고기만두반",
+    "롤만두번 고기만두번",
+    "물만두란 고기만두란",
+  ];
+  const insertManduStat = sqlite.prepare("INSERT INTO player_match_stats (id, match_id, set_no, team_id, user_id, side, row_order, account_name_snapshot, champion_name, champion_level, lane, kills, deaths, assists, damage, gold, gold_per_minute, won) VALUES (?, ?, 1, ?, NULL, 1, ?, ?, '애쉬', 18, 'ADC', 2, 1, 8, 0, 12000, 0, 1)");
+  manduAliases.forEach((alias, index) => insertManduStat.run(`stat_mandu_${index + 1}`, firstMatch.id, team.id, index + 1, alias));
+
+  const accountCleanup = await tournament.runPendingLolmen2026ManduAccountCleanup();
+  assert.equal(accountCleanup.alreadyCompleted, false);
+  assert.equal(accountCleanup.updatedStats, 7);
+  assert.equal(accountCleanup.accountCreated, true);
+  const secondaryAccount = sqlite.prepare("SELECT user_id, game_name, tagline, is_primary FROM riot_accounts WHERE game_name_normalized = ? AND tagline_normalized = ?").get("물만두반 고기만두반", "만두만두");
+  assert.equal(secondaryAccount.user_id, preRegistered.userId);
+  assert.equal(secondaryAccount.game_name, "물만두반 고기만두반");
+  assert.equal(secondaryAccount.tagline, "만두만두");
+  assert.equal(secondaryAccount.is_primary, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM player_match_stats WHERE id LIKE 'stat_mandu_%' AND user_id = ? AND account_name_snapshot = ?").get(preRegistered.userId, "물만두반 고기만두반").count, 7);
+  assert.equal((await tournament.runPendingLolmen2026ManduAccountCleanup()).alreadyCompleted, true);
 
   const shellUserId = await tournament.resolveGoogleIdentityToUserId({
     provider: "google",
@@ -531,17 +552,23 @@ test("2026 롤멘 pre-registered players keep stats when Google signs up and ros
   };
   const linked = await tournament.updateUserProfile({
     realName: "실제 가입자",
-    riotGameName: "롤멘사전선수",
-    riotTagline: "LM26",
+    riotGameName: "최하망",
+    riotTagline: "8724",
+    riotAccounts: [
+      { gameName: "최하망", tagline: "8724", isPrimary: true },
+      { gameName: "물만두반 고기만두반", tagline: "만두만두", isPrimary: false },
+    ],
   }, shellActor);
   assert.equal(linked.linkedPreRegistered, true);
   assert.equal(linked.userId, preRegistered.userId);
   assert.equal(sqlite.prepare("SELECT user_id FROM auth_identities WHERE provider_subject = ?").get("google-subject-pre-registered").user_id, preRegistered.userId);
   assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(shellUserId).account_status, "merged");
   assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(preRegistered.userId).account_status, "active");
-  assert.equal(sqlite.prepare("SELECT user_id FROM player_match_stats WHERE id = ?").get("stat_pre_registered_claim").user_id, preRegistered.userId);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM riot_accounts WHERE user_id = ?").get(preRegistered.userId).count, 2);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM riot_accounts WHERE user_id = ? AND is_primary = 1").get(preRegistered.userId).count, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM player_match_stats WHERE id LIKE 'stat_mandu_%' AND user_id = ?").get(preRegistered.userId).count, 7);
 
-  const linkedActor = { ...shellActor, id: preRegistered.userId, displayName: "롤멘사전선수#LM26(실제 가입자)", realName: "실제 가입자", riotGameName: "롤멘사전선수", riotTagline: "LM26", profileComplete: true };
+  const linkedActor = { ...shellActor, id: preRegistered.userId, displayName: "최하망#8724(실제 가입자)", realName: "실제 가입자", riotGameName: "최하망", riotTagline: "8724", profileComplete: true };
   data = await tournament.getDashboard(created.tournamentId, linkedActor);
   assert.equal(data.preRegisteredPlayers.length, 0);
   assert.equal(data.viewer.pointsBalance, 1000);
