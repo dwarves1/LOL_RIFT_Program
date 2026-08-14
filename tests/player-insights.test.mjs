@@ -60,6 +60,51 @@ test("player insights calculate streak badges and teammate impact", () => {
   assert.deepEqual(player.badges.map((badge) => badge.label), ["🔥 3연승", "🔥 5연승"]);
 });
 
+test("player insights keep tournament matches separate and count BO sets as one match", () => {
+  const tournamentTeams = teams.slice(0, 2).map((team, index) => ({
+    ...team,
+    tournamentId: "tournament-1",
+    name: index === 0 ? "블루 팀" : "레드 팀",
+  }));
+  const tournamentMatches = [{
+    id: "tournament-match-1",
+    tournamentId: "tournament-1",
+    phase: "league",
+    roundLabel: "1차 리그",
+    scheduledAt: "2026-08-12T10:00:00.000Z",
+    completedAt: "2026-08-12T11:00:00.000Z",
+    status: "completed",
+    teamAId: "blue-1",
+    teamBId: "red-1",
+    winnerId: "blue-1",
+    seriesScoreA: 2,
+    seriesScoreB: 0,
+  }];
+  const tournamentStats = [
+    { matchId: "tournament-match-1", userId: "user-1", championName: "아리", lane: "MID", kills: 5, deaths: 2, assists: 7, gold: 12000, won: true },
+    { matchId: "tournament-match-1", userId: "user-1", championName: "오리아나", lane: "MID", kills: 3, deaths: 1, assists: 9, gold: 11800, won: true },
+  ];
+  const input = {
+    accounts,
+    teams: [...teams, ...tournamentTeams],
+    matches: [...matches, ...tournamentMatches],
+    stats: [...stats, ...tournamentStats],
+    competitions: [{ id: "tournament-1", name: "2026 롤멘 대회", competitionKind: "tournament", startAt: "2026-08-01T00:00:00.000Z" }],
+    reviewedAt: [{ matchId: "tournament-match-1", reviewedAt: "2026-08-12T11:05:00.000Z" }],
+  };
+  const tournament = buildPlayerInsights({ ...input, scope: "tournament" }).playerMap.get("user-1");
+  const scrim = buildPlayerInsights({ ...input, scope: "scrim" }).playerMap.get("user-1");
+
+  assert.equal(tournament.games, 1);
+  assert.equal(tournament.wins, 1);
+  assert.equal(tournament.analyzedGames, 2);
+  assert.equal(tournament.recentMatches[0].score, "2:0");
+  assert.equal(tournament.recentMatches[0].opponentName, "레드 팀");
+  assert.equal(tournament.competitions[0].tournamentName, "2026 롤멘 대회");
+  assert.equal(tournament.competitions[0].games, 1);
+  assert.equal(scrim.games, 2);
+});
+
 test("OP.GG search uses encoded Riot ID and KR region", () => {
   assert.equal(opggSearchUrl(accounts[0]), "https://op.gg/lol/summoners/search?q=Hide%20on%20bush%23KR1&region=kr");
 });

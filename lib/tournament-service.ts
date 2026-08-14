@@ -34,6 +34,7 @@ import {
   qaSandboxes,
 } from "../db/schema";
 import { currentSessionUserId, type GoogleIdentity } from "./google-auth";
+import { emptyPlayerHistory, getPlayerHistoryData } from "./player-history-service";
 
 export type UserRole = "viewer" | "operator" | "admin";
 export type AccountStatus = "active" | "provisional" | "merged";
@@ -3252,6 +3253,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       teamStats: [],
       playerStats: [],
       accounts: [],
+      playerHistory: emptyPlayerHistory,
       myRiotAccounts,
       rosterAccounts,
       supportsPreRegistration: false,
@@ -3389,6 +3391,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
           .orderBy(asc(tournamentMembers.role), asc(users.displayName))
       : Promise.resolve([]),
   ]);
+
+  const playerHistory = await getPlayerHistoryData(tournamentList);
 
   const userBets = requestUser
     ? await db.select().from(bets).where(and(eq(bets.userId, requestUser.id), eq(bets.tournamentId, selected.id))).orderBy(desc(bets.createdAt))
@@ -3589,6 +3593,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       isTest: account.userId.startsWith("test_"),
       testScope: account.userId.startsWith("test_scrim_") ? "scrim" : account.userId.startsWith("test_league_") ? "league" : null,
     })),
+    playerHistory,
     myRiotAccounts,
     rosterAccounts: rosterAccounts.map((account) => ({
       ...account,

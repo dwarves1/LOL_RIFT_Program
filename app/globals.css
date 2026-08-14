@@ -989,3 +989,33 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
 @media (max-width: 480px) {
   .match-actions > .schedule-editor { display: flex; grid-template-columns: none; }
 }
+
+/* Player tournament history and collision-free series score. */
+.schedule-teams { grid-template-columns: minmax(0,1fr) 96px minmax(0,1fr); }
+.schedule-score { display: grid; grid-template: min-content min-content / minmax(0,1fr); place-items: center; align-content: center; row-gap: 9px; min-width: 96px; min-height: 78px; padding-inline: 8px; }
+.schedule-score small, .schedule-score strong { display: block; line-height: 1; white-space: nowrap; }
+.player-scope-note { margin: 0 0 9px; color: var(--gold-2); font-size: 11px; font-weight: 900; }
+.player-record-summary { display: grid; gap: 5px; min-width: 154px; }
+.player-record-summary b { padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 10px; text-align: center; white-space: nowrap; }
+.player-record-summary .tournament { border-color: rgba(233,185,73,.32); color: var(--gold-2); }
+.player-record-summary .scrim { border-color: rgba(96,165,250,.3); color: #93c5fd; }
+.player-record-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.player-record-tabs button { min-height: 50px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.025); color: var(--muted); font-size: 13px; font-weight: 900; cursor: pointer; }
+.player-record-tabs button span { margin-left: 6px; color: #dce5f1; }
+.player-record-tabs button.active { border-color: rgba(233,185,73,.5); background: rgba(233,185,73,.09); color: var(--gold-2); box-shadow: inset 0 -2px 0 var(--gold); }
+.player-competition-list { display: grid; gap: 10px; margin-bottom: 12px; }
+.player-competition-card > header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+.player-competition-card h2 { margin: 4px 0; font-size: 18px; }.player-competition-card header span { color: var(--muted); font-size: 11px; }.player-competition-card header > strong { color: var(--gold-2); font-size: 13px; white-space: nowrap; }
+.player-competition-card > div { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 9px; padding-top: 13px; }
+.player-competition-card > div > span { padding: 10px; border: 1px solid var(--line); color: var(--muted); font-size: 9px; }.player-competition-card > div strong { display: block; margin-top: 6px; color: #eef3f9; font-size: 14px; }
+.player-empty-record { text-align: center; }.player-empty-record p { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
+.recent-player-matches > div:not(.section-heading) strong small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }.recent-player-matches > div:not(.section-heading) em { color: #e7edf5; font-size: 12px; font-style: normal; font-weight: 900; text-align: center; }
+.recent-player-matches.tournament > div:not(.section-heading) { grid-template-columns: 145px minmax(120px,.7fr) minmax(190px,1.4fr) 52px 48px; align-items: center; }.recent-player-matches.tournament > div:not(.section-heading) > span { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.recent-player-matches.scrim > div:not(.section-heading) { grid-template-columns: 150px minmax(0,1fr) 52px 48px; align-items: center; }
+
+@media (max-width: 800px) {
+  .schedule-teams { grid-template-columns: minmax(0,1fr) 66px minmax(0,1fr); }.schedule-score { min-width: 66px; padding-inline: 4px; row-gap: 7px; }
+  .player-directory > button { grid-template-columns: 42px minmax(0,1fr) auto; }.player-record-summary { grid-column: 2/-1; grid-template-columns: 1fr 1fr; width: 100%; }.player-directory em { display: none; }
+  .player-competition-card > header { align-items: flex-start; flex-direction: column; }.player-competition-card > div { grid-template-columns: 1fr 1fr; }
+  .recent-player-matches.tournament > div:not(.section-heading), .recent-player-matches.scrim > div:not(.section-heading) { grid-template-columns: minmax(0,1fr) 44px 40px; }.recent-player-matches > div:not(.section-heading) time { grid-column: 1/-1; }.recent-player-matches.tournament > div:not(.section-heading) > span { grid-column: 1/-1; }
+}

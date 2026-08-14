@@ -8,6 +8,8 @@ export type InsightAccount = {
 
 export type InsightTeam = {
   id: string;
+  tournamentId?: string;
+  name?: string;
   matchId: string | null;
   players: Array<{
     userId: string | null;
@@ -17,6 +19,7 @@ export type InsightTeam = {
 
 export type InsightMatch = {
   id: string;
+  tournamentId?: string;
   phase: string;
   roundLabel: string;
   scheduledAt: string;
@@ -25,6 +28,15 @@ export type InsightMatch = {
   teamAId: string | null;
   teamBId: string | null;
   winnerId: string | null;
+  seriesScoreA?: number;
+  seriesScoreB?: number;
+};
+
+export type InsightCompetition = {
+  id: string;
+  name: string;
+  competitionKind: "tournament" | "scrim_season";
+  startAt: string;
 };
 
 export type InsightStat = {
@@ -51,6 +63,39 @@ export type RelationshipRecord = {
   impact: number;
 };
 
+export type PlayerRecentMatch = {
+  matchId: string;
+  tournamentId: string | null;
+  tournamentName: string | null;
+  roundLabel: string;
+  scheduledAt: string;
+  phase: string;
+  teamName: string | null;
+  opponentName: string | null;
+  score: string | null;
+  won: boolean;
+};
+
+export type PlayerCompetitionRecord = {
+  tournamentId: string;
+  tournamentName: string;
+  startAt: string;
+  teamNames: string[];
+  games: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  analyzedGames: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  kda: number;
+  averageGold: number;
+  champions: Array<{ name: string; games: number; wins: number; losses: number; winRate: number }>;
+  lanes: Array<{ name: string; games: number; wins: number; losses: number; winRate: number }>;
+  recentMatches: PlayerRecentMatch[];
+};
+
 export type PlayerInsight = {
   userId: string;
   displayName: string;
@@ -73,7 +118,8 @@ export type PlayerInsight = {
   lanes: Array<{ name: string; games: number; wins: number; losses: number; winRate: number }>;
   teammates: RelationshipRecord[];
   opponents: RelationshipRecord[];
-  recentMatches: Array<{ matchId: string; roundLabel: string; scheduledAt: string; won: boolean }>;
+  recentMatches: PlayerRecentMatch[];
+  competitions: PlayerCompetitionRecord[];
 };
 
 export type PlayerFunStats = {
@@ -99,7 +145,9 @@ export function buildPlayerInsights(input: {
   teams: InsightTeam[];
   matches: InsightMatch[];
   stats: InsightStat[];
-  reviewedAt: string[];
+  reviewedAt: Array<string | { matchId: string; reviewedAt: string }>;
+  competitions?: InsightCompetition[];
+  scope?: "scrim" | "tournament" | "all";
 }) {
   const accountGroups = new Map<string, InsightAccount[]>();
   for (const account of input.accounts) {
@@ -109,9 +157,15 @@ export function buildPlayerInsights(input: {
   }
   const displayNames = new Map([...accountGroups].map(([userId, accounts]) => [userId, accounts[0]?.displayName ?? userId]));
   const teamMap = new Map(input.teams.map((team) => [team.id, team]));
+  const competitionMap = new Map((input.competitions ?? []).map((competition) => [competition.id, competition]));
+  const scope = input.scope ?? "scrim";
   const completed = input.matches
-    .filter((match) => match.phase === "scrim" && match.status === "completed" && match.winnerId && match.teamAId && match.teamBId)
+    .filter((match) => {
+      const matchesScope = scope === "all" || (scope === "scrim" ? match.phase === "scrim" : match.phase !== "scrim");
+      return matchesScope && match.status === "completed" && match.winnerId && match.teamAId && match.teamBId;
+    })
     .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+  const completedMap = new Map(completed.map((match) => [match.id, match]));
 
   function userIds(teamId: string | null) {
     return [...new Set((teamId ? teamMap.get(teamId)?.players : [])?.map((player) => player.userId).filter((id): id is string => Boolean(id)) ?? [])];
@@ -124,7 +178,7 @@ export function buildPlayerInsights(input: {
       const teamId = teamAUsers.includes(userId) ? match.teamAId : teamBUsers.includes(userId) ? match.teamBId : null;
       return teamId ? [{ match, teamId, won: match.winnerId === teamId }] : [];
     });
-    const statRows = input.stats.filter((row) => row.userId === userId && row.matchId && completed.some((match) => match.id === row.matchId));
+    const statRows = input.stats.filter((row) => row.userId === userId && row.matchId && completedMap.has(row.matchId));
     const wins = participations.filter((row) => row.won).length;
     let currentResult: "win" | "loss" | "none" = "none";
     let currentCount = 0;
@@ -156,6 +210,37 @@ export function buildPlayerInsights(input: {
     const kills = statRows.reduce((sum, row) => sum + row.kills, 0);
     const deaths = statRows.reduce((sum, row) => sum + row.deaths, 0);
     const assists = statRows.reduce((sum, row) => sum + row.assists, 0);
+    const recentMatches = [...participations].reverse().slice(0, 8).map(({ match, teamId, won }) => recentMatch(match, teamId, teamMap, competitionMap, won));
+    const competitionIds = [...new Set(participations.map(({ match }) => match.tournamentId).filter((id): id is string => Boolean(id)))];
+    const competitions = competitionIds.map((tournamentId) => {
+      const competition = competitionMap.get(tournamentId);
+      const rows = participations.filter(({ match }) => match.tournamentId === tournamentId);
+      const matchIds = new Set(rows.map(({ match }) => match.id));
+      const competitionStats = statRows.filter((row) => row.matchId && matchIds.has(row.matchId));
+      const competitionWins = rows.filter((row) => row.won).length;
+      const competitionKills = competitionStats.reduce((sum, row) => sum + row.kills, 0);
+      const competitionDeaths = competitionStats.reduce((sum, row) => sum + row.deaths, 0);
+      const competitionAssists = competitionStats.reduce((sum, row) => sum + row.assists, 0);
+      return {
+        tournamentId,
+        tournamentName: competition?.name ?? "대회",
+        startAt: competition?.startAt ?? rows[0]?.match.scheduledAt ?? "",
+        teamNames: [...new Set(rows.map((row) => teamMap.get(row.teamId)?.name).filter((name): name is string => Boolean(name)))],
+        games: rows.length,
+        wins: competitionWins,
+        losses: rows.length - competitionWins,
+        winRate: percent(competitionWins, rows.length),
+        analyzedGames: competitionStats.length,
+        kills: competitionKills,
+        deaths: competitionDeaths,
+        assists: competitionAssists,
+        kda: competitionStats.length ? (competitionKills + competitionAssists) / Math.max(1, competitionDeaths) : 0,
+        averageGold: average(competitionStats, (row) => row.gold),
+        champions: aggregateRecords(competitionStats, (row) => row.championName),
+        lanes: aggregateRecords(competitionStats, (row) => row.lane),
+        recentMatches: [...rows].reverse().map(({ match, teamId, won }) => recentMatch(match, teamId, teamMap, competitionMap, won)),
+      };
+    }).sort((a, b) => new Date(b.startAt).getTime() - new Date(a.startAt).getTime());
     return {
       userId,
       displayName: accounts[0]?.displayName ?? userId,
@@ -178,15 +263,42 @@ export function buildPlayerInsights(input: {
       lanes,
       teammates: relationshipRows(teammateMap, displayNames, participations.length, wins),
       opponents: relationshipRows(opponentMap, displayNames, participations.length, wins),
-      recentMatches: [...participations].reverse().slice(0, 8).map(({ match, won }) => ({ matchId: match.id, roundLabel: match.roundLabel, scheduledAt: match.scheduledAt, won })),
+      recentMatches,
+      competitions,
     };
   }).sort((a, b) => b.games - a.games || b.wins - a.wins || a.displayName.localeCompare(b.displayName, "ko"));
 
   const playerMap = new Map(players.map((player) => [player.userId, player]));
-  const lastUpdatedAt = [...completed.map((match) => match.completedAt ?? match.scheduledAt), ...input.reviewedAt]
+  const completedIds = new Set(completed.map((match) => match.id));
+  const reviewedAt = input.reviewedAt.flatMap((row) => typeof row === "string" ? [row] : completedIds.has(row.matchId) ? [row.reviewedAt] : []);
+  const lastUpdatedAt = [...completed.map((match) => match.completedAt ?? match.scheduledAt), ...reviewedAt]
     .filter(Boolean)
     .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null;
   return { players, playerMap, funStats: buildFunStats(players), lastUpdatedAt };
+}
+
+function recentMatch(
+  match: InsightMatch,
+  teamId: string,
+  teamMap: Map<string, InsightTeam>,
+  competitionMap: Map<string, InsightCompetition>,
+  won: boolean,
+): PlayerRecentMatch {
+  const opponentId = match.teamAId === teamId ? match.teamBId : match.teamAId;
+  const ownScore = teamId === match.teamAId ? match.seriesScoreA : match.seriesScoreB;
+  const opponentScore = teamId === match.teamAId ? match.seriesScoreB : match.seriesScoreA;
+  return {
+    matchId: match.id,
+    tournamentId: match.tournamentId ?? null,
+    tournamentName: match.tournamentId ? competitionMap.get(match.tournamentId)?.name ?? null : null,
+    roundLabel: match.roundLabel,
+    scheduledAt: match.scheduledAt,
+    phase: match.phase,
+    teamName: teamMap.get(teamId)?.name ?? null,
+    opponentName: opponentId ? teamMap.get(opponentId)?.name ?? null : null,
+    score: typeof ownScore === "number" && typeof opponentScore === "number" ? `${ownScore}:${opponentScore}` : null,
+    won,
+  };
 }
 
 function aggregateRecords(rows: InsightStat[], keyOf: (row: InsightStat) => string) {

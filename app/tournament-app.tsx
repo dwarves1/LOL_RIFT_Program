@@ -6,7 +6,7 @@ import { ProfileModal } from "./profile-modal";
 import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
 import { DraftView, MatchDraftCreator } from "./draft-view";
 import { positionLabel } from "../lib/positions";
-import { buildPlayerInsights, opggSearchUrl, type PlayerInsight, type RelationshipRecord } from "../lib/player-insights";
+import { buildPlayerInsights, opggSearchUrl, type PlayerCompetitionRecord, type PlayerInsight, type RelationshipRecord } from "../lib/player-insights";
 
 type Role = "viewer" | "operator" | "admin";
 type Tab = "home" | "schedule" | "standings" | "bracket" | "teams" | "stats" | "draft" | "players" | "points" | "admin";
@@ -170,6 +170,14 @@ type Dashboard = {
   teamStats: Array<{ matchId: string; setNo: number; side: number; teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
   playerStats: ResultPlayerStat[];
   accounts: Array<{ id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null; isPrimary: boolean; accountStatus: "active" | "provisional" | "merged"; isTest: boolean; testScope: "league" | "scrim" | null }>;
+  playerHistory: {
+    competitions: Array<{ id: string; name: string; competitionKind: "tournament" | "scrim_season"; startAt: string }>;
+    teams: Array<{ id: string; tournamentId: string; matchId: string | null; name: string; players: Array<{ userId: string | null; riotAccountId: string | null }> }>;
+    matches: Array<{ id: string; tournamentId: string; phase: "league" | "bracket" | "scrim"; roundLabel: string; scheduledAt: string; completedAt: string | null; status: "scheduled" | "completed"; teamAId: string | null; teamBId: string | null; winnerId: string | null; seriesScoreA: number; seriesScoreB: number }>;
+    stats: Array<{ matchId: string; userId: string | null; championName: string; lane: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
+    accounts: Array<{ id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null }>;
+    reviewedAt: Array<{ matchId: string; reviewedAt: string }>;
+  };
   myRiotAccounts: Array<{ id: string; gameName: string; tagline: string; isPrimary: boolean }>;
   rosterAccounts: Array<{ id: string; userId: string; gameName: string; tagline: string; isPrimary: boolean; displayName: string; accountStatus: "active" | "provisional" | "merged"; isTest?: boolean; testScope?: "league" | "scrim" | null }>;
   supportsPreRegistration: boolean;
@@ -1487,22 +1495,18 @@ function StatsView({ data, teamMap }: { data: Dashboard; teamMap: Map<string, Te
 
 function PlayerSearchView({ data, selectedPlayerId, onSelectPlayer }: { data: Dashboard; selectedPlayerId: string | null; onSelectPlayer: (userId: string | null) => void }) {
   const [query, setQuery] = useState("");
-  const insights = useMemo(() => buildPlayerInsights({
-    accounts: data.accounts,
-    teams: data.teams,
-    matches: data.matches,
-    stats: data.playerStats,
-    reviewedAt: data.resultImages.map((image) => image.reviewedAt),
-  }), [data]);
+  const scrimInsights = useMemo(() => buildPlayerInsights({ ...data.playerHistory, scope: "scrim" }), [data.playerHistory]);
+  const tournamentInsights = useMemo(() => buildPlayerInsights({ ...data.playerHistory, scope: "tournament" }), [data.playerHistory]);
   const normalized = query.trim().toLocaleLowerCase("ko");
-  const filtered = insights.players.filter((player) => !normalized || [player.displayName, ...player.accounts.flatMap((account) => [account.riotGameName ?? "", account.riotTagline ?? "", `${account.riotGameName ?? ""}#${account.riotTagline ?? ""}`])].some((value) => value.toLocaleLowerCase("ko").includes(normalized)));
-  const selected = selectedPlayerId ? insights.playerMap.get(selectedPlayerId) : null;
+  const filtered = tournamentInsights.players.filter((player) => !normalized || [player.displayName, ...player.accounts.flatMap((account) => [account.riotGameName ?? "", account.riotTagline ?? "", `${account.riotGameName ?? ""}#${account.riotTagline ?? ""}`])].some((value) => value.toLocaleLowerCase("ko").includes(normalized)));
+  const selectedTournamentPlayer = selectedPlayerId ? tournamentInsights.playerMap.get(selectedPlayerId) ?? null : null;
+  const selectedScrimPlayer = selectedPlayerId ? scrimInsights.playerMap.get(selectedPlayerId) ?? null : null;
   if (selectedPlayerId) {
-    return selected
-      ? <PlayerDetailView player={selected} tournamentId={data.tournament!.id} lastUpdatedAt={insights.lastUpdatedAt} onBack={() => onSelectPlayer(null)} onSelectPlayer={(userId) => onSelectPlayer(userId)} />
+    return selectedTournamentPlayer || selectedScrimPlayer
+      ? <PlayerDetailView tournamentPlayer={selectedTournamentPlayer} scrimPlayer={selectedScrimPlayer} tournamentId={data.tournament!.id} currentCompetitionKind={data.tournament!.competitionKind} tournamentUpdatedAt={tournamentInsights.lastUpdatedAt} scrimUpdatedAt={scrimInsights.lastUpdatedAt} onBack={() => onSelectPlayer(null)} onSelectPlayer={(userId) => onSelectPlayer(userId)} />
       : <section className="page-section"><PageTitle eyebrow="PLAYER DATABASE" title="플레이어를 찾을 수 없습니다" description="현재 시즌에 참가한 회원만 조회할 수 있습니다." /><button className="secondary-button" onClick={() => onSelectPlayer(null)}>검색으로 돌아가기</button></section>;
   }
-  const fun = insights.funStats;
+  const fun = scrimInsights.funStats;
   const cards = [
     fun.mostGames && { label: "최다 출전", value: `${fun.mostGames.games}경기`, player: fun.mostGames },
     fun.bestWinRate && { label: "최고 승률", value: `${fun.bestWinRate.winRate}%`, player: fun.bestWinRate },
@@ -1511,9 +1515,13 @@ function PlayerSearchView({ data, selectedPlayerId, onSelectPlayer }: { data: Da
     fun.longestLosingStreak && { label: "최다 연패", value: `${fun.longestLosingStreak.bestLossStreak}연패`, player: fun.longestLosingStreak },
     fun.championExplorer && { label: "챔피언 탐험가", value: `${fun.championExplorer.champions.length}종`, player: fun.championExplorer },
   ].filter((card): card is { label: string; value: string; player: PlayerInsight } => Boolean(card));
+  const latestUpdatedAt = [tournamentInsights.lastUpdatedAt, scrimInsights.lastUpdatedAt]
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null;
   return <section className="page-section player-search-page">
-    <PageTitle eyebrow="PLAYER DATABASE" title="플레이어 검색" description={`${data.tournament?.name}에 참가한 회원의 LOL RIFT 내전 기록만 표시합니다.`} />
-    <div className="player-data-time"><span>내전 데이터 기준</span><strong>{insights.lastUpdatedAt ? formatDate(insights.lastUpdatedAt) : "아직 확정된 내전 없음"}</strong><small>경기 결과 등록·정정 즉시 반영</small></div>
+    <PageTitle eyebrow="PLAYER DATABASE" title="플레이어 검색" description="참가한 정규 대회와 내전 기록을 구분해 한곳에서 확인합니다." />
+    <div className="player-data-time"><span>전체 기록 기준</span><strong>{latestUpdatedAt ? formatDate(latestUpdatedAt) : "아직 확정된 경기 없음"}</strong><small>경기 결과 등록·정정 즉시 반영</small></div>
+    {cards.length > 0 && <p className="player-scope-note">내전 기록 하이라이트</p>}
     {cards.length > 0 && <div className="fun-stat-grid">{cards.map((card) => <button type="button" key={card.label} onClick={() => onSelectPlayer(card.player.userId)}><span>{card.label}</span><strong>{card.value}</strong><b>{card.player.displayName}</b></button>)}</div>}
     {(fun.bestDuo || fun.comebackDuo || fun.topRivalry) && <div className="relationship-highlights">
       {fun.bestDuo && <article className="panel"><span>BEST DUO</span><strong>{fun.bestDuo.playerA.displayName} × {fun.bestDuo.playerB.displayName}</strong><p>{fun.bestDuo.games}경기 {fun.bestDuo.wins}승 · 승률 {fun.bestDuo.winRate}%</p></article>}
@@ -1522,24 +1530,39 @@ function PlayerSearchView({ data, selectedPlayerId, onSelectPlayer }: { data: Da
     </div>}
     {fun.laneLeaders.length > 0 && <article className="panel lane-leader-panel"><div className="section-heading"><div><p className="eyebrow">LANE LEADERS</p><h2>라인별 순위</h2></div><span>해당 라인 5경기 이상</span></div><div>{fun.laneLeaders.map((row) => <button type="button" key={row.lane} onClick={() => onSelectPlayer(row.player.userId)}><b>{positionLabel(row.lane, true)}</b><strong>{row.player.displayName}</strong><span>{row.games}경기 · {row.winRate}%</span></button>)}</div></article>}
     <div className="player-search-box"><label><span>롤 ID 또는 LOL RIFT 이름</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="홍길동#KR1" autoComplete="off" /></label><b>{filtered.length}명</b></div>
-    <div className="player-directory">{filtered.map((player) => <button type="button" key={player.userId} onClick={() => onSelectPlayer(player.userId)}><i>{player.displayName.slice(0, 1)}</i><span><strong>{player.displayName}</strong><small>{player.accounts.map(accountRiotId).join(" · ")}</small></span><b>{player.games ? `${player.games}경기 · ${player.winRate}%` : "내전 기록 없음"}</b><em>상세 보기 →</em></button>)}</div>
+    <div className="player-directory">{filtered.map((player) => {
+      const scrim = scrimInsights.playerMap.get(player.userId);
+      return <button type="button" key={player.userId} onClick={() => onSelectPlayer(player.userId)}><i>{player.displayName.slice(0, 1)}</i><span><strong>{player.displayName}</strong><small>{player.accounts.map(accountRiotId).join(" · ")}</small></span><span className="player-record-summary"><b className="tournament">대회 {player.games ? `${player.games}경기 · ${player.winRate}%` : "기록 없음"}</b><b className="scrim">내전 {scrim?.games ? `${scrim.games}경기 · ${scrim.winRate}%` : "기록 없음"}</b></span><em>상세 보기 →</em></button>;
+    })}</div>
     {!filtered.length && <EmptyState title="검색 결과가 없습니다" detail="현재 시즌 코드를 입력한 회원의 등록 롤 ID를 검색해 주세요." />}
   </section>;
 }
 
-function PlayerDetailView({ player, tournamentId, lastUpdatedAt, onBack, onSelectPlayer }: { player: PlayerInsight; tournamentId: string; lastUpdatedAt: string | null; onBack: () => void; onSelectPlayer: (userId: string) => void }) {
+function PlayerDetailView({ tournamentPlayer, scrimPlayer, tournamentId, currentCompetitionKind, tournamentUpdatedAt, scrimUpdatedAt, onBack, onSelectPlayer }: { tournamentPlayer: PlayerInsight | null; scrimPlayer: PlayerInsight | null; tournamentId: string; currentCompetitionKind: Tournament["competitionKind"]; tournamentUpdatedAt: string | null; scrimUpdatedAt: string | null; onBack: () => void; onSelectPlayer: (userId: string) => void }) {
+  const defaultScope = currentCompetitionKind === "tournament" && tournamentPlayer?.games ? "tournament" : scrimPlayer?.games ? "scrim" : "tournament";
+  const [recordScope, setRecordScope] = useState<"tournament" | "scrim">(defaultScope);
+  const player = (recordScope === "tournament" ? tournamentPlayer : scrimPlayer) ?? tournamentPlayer ?? scrimPlayer!;
+  const isTournament = recordScope === "tournament";
+  const lastUpdatedAt = isTournament ? tournamentUpdatedAt : scrimUpdatedAt;
   const statGames = Math.max(1, player.analyzedGames);
   const streakLabel = player.currentStreak.result === "win" ? `${player.currentStreak.count}연승` : player.currentStreak.result === "loss" ? `${player.currentStreak.count}연패` : "기록 없음";
   return <section className="page-section player-detail-page">
     <button type="button" className="player-back-button" onClick={onBack}>← 플레이어 검색</button>
-    <header className="player-profile-hero"><i>{player.displayName.slice(0, 1)}</i><div><p className="eyebrow">LOL RIFT PLAYER</p><h1>{player.displayName}</h1><span>{player.games}경기 · {player.wins}승 {player.losses}패 · 승률 {player.winRate}%</span><div className="player-badges">{player.badges.map((badge) => <StreakBadge key={`${badge.kind}-${badge.count}`} badge={badge} />)}</div></div><div className="profile-streak"><span>현재 흐름</span><strong className={player.currentStreak.result}>{streakLabel}</strong><small>최고 {player.bestWinStreak}연승 · {player.bestLossStreak}연패</small></div></header>
-    <div className="player-data-time"><span>내전 데이터 기준</span><strong>{lastUpdatedAt ? formatDate(lastUpdatedAt) : "아직 확정된 내전 없음"}</strong><small>외부 랭크 정보는 OP.GG에서 확인</small></div>
+    <header className="player-profile-hero"><i>{player.displayName.slice(0, 1)}</i><div><p className="eyebrow">LOL RIFT PLAYER</p><h1>{player.displayName}</h1><span>{isTournament ? "대회" : "내전"} {player.games}경기 · {player.wins}승 {player.losses}패 · 승률 {player.winRate}%</span><div className="player-badges">{!isTournament && player.badges.map((badge) => <StreakBadge key={`${badge.kind}-${badge.count}`} badge={badge} />)}</div></div><div className="profile-streak"><span>{isTournament ? "참가 대회" : "현재 흐름"}</span><strong className={isTournament ? "" : player.currentStreak.result}>{isTournament ? `${player.competitions.length}개` : streakLabel}</strong><small>{isTournament ? `분석 ${player.analyzedGames}세트` : `최고 ${player.bestWinStreak}연승 · ${player.bestLossStreak}연패`}</small></div></header>
+    <div className="player-record-tabs" role="tablist" aria-label="플레이어 기록 구분"><button type="button" className={recordScope === "tournament" ? "active" : ""} onClick={() => setRecordScope("tournament")} role="tab" aria-selected={recordScope === "tournament"}>대회 기록 <span>{tournamentPlayer?.games ?? 0}</span></button><button type="button" className={recordScope === "scrim" ? "active" : ""} onClick={() => setRecordScope("scrim")} role="tab" aria-selected={recordScope === "scrim"}>내전 기록 <span>{scrimPlayer?.games ?? 0}</span></button></div>
+    <div className="player-data-time"><span>{isTournament ? "대회" : "내전"} 데이터 기준</span><strong>{lastUpdatedAt ? formatDate(lastUpdatedAt) : `아직 확정된 ${isTournament ? "대회 경기" : "내전"} 없음`}</strong><small>외부 랭크 정보는 OP.GG에서 확인</small></div>
     <article className="panel player-account-panel"><div className="section-heading"><div><p className="eyebrow">REGISTERED RIOT IDS</p><h2>등록 롤 계정</h2></div></div><div>{player.accounts.map((account, index) => <div key={account.id}><span><strong>{accountRiotId(account)}</strong><small>{index === 0 ? "대표 계정" : "등록 계정"}</small></span><a href={opggSearchUrl(account)} target="_blank" rel="noopener noreferrer">OP.GG 전적 검색 ↗</a></div>)}</div></article>
-    <div className="player-metric-grid"><div><span>내전 승률</span><strong>{player.winRate}%</strong><small>{player.wins}승 {player.losses}패</small></div><div><span>평균 K / D / A</span><strong>{(player.kills / statGames).toFixed(1)} / {(player.deaths / statGames).toFixed(1)} / {(player.assists / statGames).toFixed(1)}</strong><small>분석 {player.analyzedGames}게임</small></div><div><span>KDA</span><strong>{player.kda.toFixed(2)}</strong><small>(킬+어시)/데스</small></div><div><span>평균 골드</span><strong>{player.averageGold.toLocaleString()}</strong><small>게임당</small></div></div>
+    <div className="player-metric-grid"><div><span>{isTournament ? "대회" : "내전"} 승률</span><strong>{player.games ? `${player.winRate}%` : "-"}</strong><small>{player.wins}승 {player.losses}패</small></div><div><span>평균 K / D / A</span><strong>{player.analyzedGames ? `${(player.kills / statGames).toFixed(1)} / ${(player.deaths / statGames).toFixed(1)} / ${(player.assists / statGames).toFixed(1)}` : "-"}</strong><small>{player.analyzedGames ? `분석 ${player.analyzedGames}세트` : "상세 분석 없음"}</small></div><div><span>KDA</span><strong>{player.analyzedGames ? player.kda.toFixed(2) : "-"}</strong><small>(킬+어시)/데스</small></div><div><span>평균 골드</span><strong>{player.analyzedGames ? player.averageGold.toLocaleString() : "-"}</strong><small>분석 세트당</small></div></div>
+    {isTournament && <div className="player-competition-list">{player.competitions.map((competition) => <CompetitionRecordCard key={competition.tournamentId} competition={competition} />)}{!player.competitions.length && <div className="panel player-empty-record"><strong>대회 기록이 없습니다</strong><p>해당 선수가 참가한 완료 대회 경기가 등록되면 표시됩니다.</p></div>}</div>}
     <div className="player-record-grid"><RecordPanel title="챔피언별 전적" rows={player.champions.map((row) => ({ label: row.name, value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /><RecordPanel title="라인별 전적" rows={player.lanes.map((row) => ({ label: positionLabel(row.name, true), value: `${row.games}전 ${row.wins}승 ${row.losses}패`, rate: row.winRate }))} /></div>
-    <div className="player-record-grid"><RelationshipPanel title="동료 전적" rows={player.teammates} tournamentId={tournamentId} onSelect={onSelectPlayer} /><RelationshipPanel title="상대 전적" rows={player.opponents} tournamentId={tournamentId} onSelect={onSelectPlayer} /></div>
-    <article className="panel recent-player-matches"><div className="section-heading"><div><p className="eyebrow">RECENT SCRIMS</p><h2>최근 내전</h2></div></div>{player.recentMatches.map((match) => <div key={match.matchId}><time>{formatDate(match.scheduledAt)}</time><strong>{match.roundLabel}</strong><b className={match.won ? "win" : "loss"}>{match.won ? "승리" : "패배"}</b></div>)}{!player.recentMatches.length && <p className="player-empty-copy">아직 확정된 내전 기록이 없습니다.</p>}</article>
+    {!isTournament && <div className="player-record-grid"><RelationshipPanel title="동료 전적" rows={player.teammates} tournamentId={tournamentId} onSelect={onSelectPlayer} /><RelationshipPanel title="상대 전적" rows={player.opponents} tournamentId={tournamentId} onSelect={onSelectPlayer} /></div>}
+    <article className={`panel recent-player-matches ${isTournament ? "tournament" : "scrim"}`}><div className="section-heading"><div><p className="eyebrow">{isTournament ? "RECENT TOURNAMENTS" : "RECENT SCRIMS"}</p><h2>최근 {isTournament ? "대회 경기" : "내전"}</h2></div></div>{player.recentMatches.map((match) => <div key={match.matchId}><time>{formatDate(match.scheduledAt)}</time>{isTournament && <span>{match.tournamentName}</span>}<strong>{match.teamName && match.opponentName ? `${match.teamName} vs ${match.opponentName}` : match.roundLabel}<small>{match.roundLabel}</small></strong><em>{match.score ?? "-"}</em><b className={match.won ? "win" : "loss"}>{match.won ? "승리" : "패배"}</b></div>)}{!player.recentMatches.length && <p className="player-empty-copy">아직 확정된 {isTournament ? "대회 경기" : "내전"} 기록이 없습니다.</p>}</article>
   </section>;
+}
+
+function CompetitionRecordCard({ competition }: { competition: PlayerCompetitionRecord }) {
+  const statGames = Math.max(1, competition.analyzedGames);
+  return <article className="panel player-competition-card"><header><div><p className="eyebrow">TOURNAMENT RECORD</p><h2>{competition.tournamentName}</h2><span>{competition.teamNames.join(" · ") || "소속팀 미확인"}</span></div><strong>{competition.games}경기 · {competition.wins}승 {competition.losses}패</strong></header><div><span>승률<strong>{competition.winRate}%</strong></span><span>분석 세트<strong>{competition.analyzedGames}</strong></span><span>평균 K/D/A<strong>{competition.analyzedGames ? `${(competition.kills / statGames).toFixed(1)} / ${(competition.deaths / statGames).toFixed(1)} / ${(competition.assists / statGames).toFixed(1)}` : "-"}</strong></span><span>KDA<strong>{competition.analyzedGames ? competition.kda.toFixed(2) : "-"}</strong></span></div></article>;
 }
 
 function RecordPanel({ title, rows }: { title: string; rows: Array<{ label: string; value: string; rate: number }> }) {
