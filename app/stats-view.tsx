@@ -10,7 +10,7 @@ type StatsTeam = { id: string; name: string; color: string; logoUrl: string | nu
 type StatsData = {
   accounts: Array<{ userId: string; displayName: string }>;
   matches: Array<{ id: string; scheduledAt: string; completedAt: string | null }>;
-  playerStats: Array<{ matchId?: string; userId: string | null; accountName: string; lane: StatsLane; kills: number; deaths: number; assists: number; gold: number; won?: boolean }>;
+  playerStats: Array<{ matchId?: string; teamId?: string; userId: string | null; accountName: string; lane: StatsLane; kills: number; deaths: number; assists: number; gold: number; won?: boolean }>;
   teams: StatsTeam[];
   teamStats: Array<{ teamId: string; kills: number; deaths: number; assists: number; gold: number; won: boolean }>;
   resultImages: Array<{ id: string }>;
@@ -39,9 +39,11 @@ function TeamMark({ team }: { team?: StatsTeam }) {
 
 export function StatsView({ data, teamMap, onOpenPlayer }: { data: StatsData; teamMap: Map<string, StatsTeam>; onOpenPlayer: (userId: string | null, accountName: string) => void }) {
   const [sort, setSort] = useState<{ key: StatsSortKey; direction: StatsSortDirection }>({ key: "games", direction: "desc" });
+  const showLeagueTeamColors = data.tournament?.competitionKind === "tournament";
   const basePlayerRows = useMemo(() => {
     const accountMap = new Map(data.accounts.map((account) => [account.userId, account.displayName]));
     const matchTimeMap = new Map(data.matches.map((match) => [match.id, new Date(match.completedAt ?? match.scheduledAt).getTime()]));
+    const statsTeamMap = new Map(data.teams.map((team) => [team.id, team]));
     const aggregated = data.playerStats.reduce((map, row) => {
       const key = row.userId ?? `snapshot:${row.accountName}`;
       const current = map.get(key) ?? {
@@ -55,6 +57,7 @@ export function StatsView({ data, teamMap, onOpenPlayer }: { data: StatsData; te
         assists: 0,
         gold: 0,
         lanes: new Map<StatsLane, { games: number; lastPlayedAt: number }>(),
+        teams: new Map<string, { games: number; lastPlayedAt: number }>(),
       };
       current.games += 1;
       current.wins += row.won ? 1 : 0;
@@ -63,15 +66,26 @@ export function StatsView({ data, teamMap, onOpenPlayer }: { data: StatsData; te
       current.assists += row.assists;
       current.gold += row.gold;
       const lane = current.lanes.get(row.lane) ?? { games: 0, lastPlayedAt: 0 };
-      current.lanes.set(row.lane, { games: lane.games + 1, lastPlayedAt: Math.max(lane.lastPlayedAt, row.matchId ? (matchTimeMap.get(row.matchId) ?? 0) : 0) });
+      const playedAt = row.matchId ? (matchTimeMap.get(row.matchId) ?? 0) : 0;
+      current.lanes.set(row.lane, { games: lane.games + 1, lastPlayedAt: Math.max(lane.lastPlayedAt, playedAt) });
+      if (row.teamId && statsTeamMap.has(row.teamId)) {
+        const team = current.teams.get(row.teamId) ?? { games: 0, lastPlayedAt: 0 };
+        current.teams.set(row.teamId, { games: team.games + 1, lastPlayedAt: Math.max(team.lastPlayedAt, playedAt) });
+      }
       map.set(key, current);
       return map;
-    }, new Map<string, { key: string; userId: string | null; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; gold: number; lanes: Map<StatsLane, { games: number; lastPlayedAt: number }> }>());
+    }, new Map<string, { key: string; userId: string | null; name: string; games: number; wins: number; kills: number; deaths: number; assists: number; gold: number; lanes: Map<StatsLane, { games: number; lastPlayedAt: number }>; teams: Map<string, { games: number; lastPlayedAt: number }> }>());
 
     return [...aggregated.values()].map((row) => {
       const rankedLanes = [...row.lanes.entries()].map(([lane, record]) => ({ lane, ...record })).sort((a, b) => b.games - a.games || b.lastPlayedAt - a.lastPlayedAt || LANE_ORDER.indexOf(a.lane) - LANE_ORDER.indexOf(b.lane));
+      const rowTeams = [...row.teams.entries()]
+        .sort(([, a], [, b]) => b.lastPlayedAt - a.lastPlayedAt || b.games - a.games)
+        .map(([teamId]) => statsTeamMap.get(teamId))
+        .filter((team): team is StatsTeam => Boolean(team));
       return {
         ...row,
+        rowTeams,
+        primaryTeam: rowTeams.length === 1 ? rowTeams[0] : null,
         losses: row.games - row.wins,
         winRate: row.games ? row.wins / row.games * 100 : 0,
         averageKills: row.games ? row.kills / row.games : 0,
@@ -83,7 +97,7 @@ export function StatsView({ data, teamMap, onOpenPlayer }: { data: StatsData; te
         secondaryLane: rankedLanes[1] ?? null,
       };
     });
-  }, [data.accounts, data.matches, data.playerStats]);
+  }, [data.accounts, data.matches, data.playerStats, data.teams]);
 
   const playerRows = useMemo(() => [...basePlayerRows].sort((a, b) => {
     const laneKey = sort.key === "mainLane" || sort.key === "secondaryLane" ? sort.key : null;
@@ -118,7 +132,12 @@ export function StatsView({ data, teamMap, onOpenPlayer }: { data: StatsData; te
   return <section className="page-section stats-page">
     <PageTitle eyebrow="ANALYTICS" title="경기 통계" description="등록된 결과 이미지를 기준으로 계산한 대회 누적 통계입니다." />
     <div className="stats-summary-grid"><div><span>분석 경기</span><strong>{new Set(data.playerStats.map((row) => row.matchId)).size}</strong></div><div><span>기록 계정</span><strong>{playerRows.length}</strong></div><div><span>총 킬</span><strong>{data.teamStats.reduce((sum, row) => sum + row.kills, 0)}</strong></div><div><span>등록 이미지</span><strong>{data.resultImages.length}</strong></div></div>
-    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div><span className="stats-sort-help">헤더를 누르면 정렬이 바뀝니다</span></div><div className="stats-table" role="table" aria-label="계정별 경기 통계"><div className="stats-table-head" role="row">{sortHeader("name", "계정")}{sortHeader("games", "경기(승-패)")}{sortHeader("winRate", "승률")}{sortHeader("averageKda", "평균 K/D/A")}{sortHeader("kda", "KDA")}{sortHeader("averageGold", "평균 골드")}{sortHeader("mainLane", "주라인")}{sortHeader("secondaryLane", "부라인")}</div>{playerRows.map((row) => <div className="stats-table-row" role="row" key={row.key}><button type="button" className={row.userId ? "stats-account-link" : "stats-account-link unlinked"} onClick={() => onOpenPlayer(row.userId, row.name)}><strong>{row.name}</strong>{!row.userId && <small>선수 미연동</small>}</button><span>{row.games} ({row.wins}-{row.losses})</span><span>{Math.round(row.winRate)}%</span><span>{row.averageKills.toFixed(1)} / {row.averageDeaths.toFixed(1)} / {row.averageAssists.toFixed(1)}</span><b>{row.kda.toFixed(2)}</b><span>{Math.round(row.averageGold).toLocaleString()}</span><span>{row.mainLane ? `${positionLabel(row.mainLane.lane, true)} · ${row.mainLane.games}경기` : "-"}</span><span>{row.secondaryLane ? `${positionLabel(row.secondaryLane.lane, true)} · ${row.secondaryLane.games}경기` : "-"}</span></div>)}</div></article>
+    <article className="panel stats-table-panel"><div className="section-heading"><div><p className="eyebrow">PLAYER LEADERBOARD</p><h2>계정별 기록</h2></div><span className="stats-sort-help">헤더를 누르면 정렬이 바뀝니다</span></div><div className="stats-table" role="table" aria-label="계정별 경기 통계"><div className="stats-table-head" role="row">{sortHeader("name", "계정")}{sortHeader("games", "경기(승-패)")}{sortHeader("winRate", "승률")}{sortHeader("averageKda", "평균 K/D/A")}{sortHeader("kda", "KDA")}{sortHeader("averageGold", "평균 골드")}{sortHeader("mainLane", "주라인")}{sortHeader("secondaryLane", "부라인")}</div>{playerRows.map((row) => {
+      const visibleTeams = showLeagueTeamColors ? row.rowTeams : [];
+      const primaryTeam = showLeagueTeamColors ? row.primaryTeam : null;
+      const accountClassName = `stats-account-link${row.userId ? "" : " unlinked"}${visibleTeams.length ? " with-team" : ""}`;
+      return <div className={`stats-table-row${primaryTeam ? " team-colored" : ""}${visibleTeams.length > 1 ? " multi-team" : ""}`} style={primaryTeam ? { "--stats-team-color": primaryTeam.color } as CSSProperties : undefined} role="row" key={row.key}><button type="button" className={accountClassName} onClick={() => onOpenPlayer(row.userId, row.name)}><span className="stats-account-identity"><strong>{row.name}</strong>{!row.userId && <small>선수 미연동</small>}</span>{visibleTeams.length > 0 && <span className="stats-account-teams">{visibleTeams.map((team) => <span className="stats-team-badge" style={{ "--stats-team-color": team.color } as CSSProperties} key={team.id}><i aria-hidden="true" />{team.name}</span>)}</span>}</button><span>{row.games} ({row.wins}-{row.losses})</span><span>{Math.round(row.winRate)}%</span><span>{row.averageKills.toFixed(1)} / {row.averageDeaths.toFixed(1)} / {row.averageAssists.toFixed(1)}</span><b>{row.kda.toFixed(2)}</b><span>{Math.round(row.averageGold).toLocaleString()}</span><span>{row.mainLane ? `${positionLabel(row.mainLane.lane, true)} · ${row.mainLane.games}경기` : "-"}</span><span>{row.secondaryLane ? `${positionLabel(row.secondaryLane.lane, true)} · ${row.secondaryLane.games}경기` : "-"}</span></div>;
+    })}</div></article>
     {data.tournament?.competitionKind !== "scrim_season" && <div className="team-stat-grid">{teamRows.map((row) => <article className="panel" key={row.team.id} style={{ "--team-color": row.team.color } as CSSProperties}><header><TeamMark team={teamMap.get(row.team.id)} /><div><span>{row.games}경기 · {row.wins}승</span><h3>{row.team.name}</h3></div><strong>{Math.round(row.wins / row.games * 100)}%</strong></header><div><span>평균 K/D/A</span><b>{(row.kills / row.games).toFixed(1)} / {(row.deaths / row.games).toFixed(1)} / {(row.assists / row.games).toFixed(1)}</b></div><div><span>평균 골드</span><b>{Math.round(row.gold / row.games).toLocaleString()}</b></div></article>)}</div>}
   </section>;
 }
