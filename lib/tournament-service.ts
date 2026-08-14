@@ -631,19 +631,13 @@ function isStaff(actor: RequestUser) {
   return actor.role === "admin" || actor.role === "operator" || actor.isLocalDemo;
 }
 
-async function isTeamLeader(actor: RequestUser, teamIds: Array<string | null>) {
-  const ids = teamIds.filter((id): id is string => Boolean(id));
-  if (!ids.length) return false;
-  const memberships = await getDb().select().from(players).where(and(eq(players.userId, actor.id), inArray(players.teamId, ids)));
-  return memberships.some((player) => player.teamRole === "captain" || player.teamRole === "vice_captain");
-}
-
 async function canManageMatch(actor: RequestUser, match: typeof matches.$inferSelect) {
   if (!(await hasTournamentAccess(actor, match.tournamentId))) return false;
   // A scrim is a community-run session: every signed-in season participant can
-  // register the result. Competition matches keep the captain/staff boundary.
+  // register the result. Competition matches are restricted to staff. Captain
+  // and vice-captain are roster labels only until their permissions are split.
   if (match.phase === "scrim") return true;
-  return isStaff(actor) || isTeamLeader(actor, [match.teamAId, match.teamBId]);
+  return isStaff(actor);
 }
 
 export async function getMatchImageAnalysisContext(matchId: string, actor: RequestUser) {
@@ -778,9 +772,9 @@ export async function setTeamLeaders(
       eq(tournamentMembers.userId, userId),
     )).limit(1);
     if (!membership) {
-      await db.insert(tournamentMembers).values({ tournamentId: team.tournamentId, userId, role: "team_rep", teamId: team.id });
+      await db.insert(tournamentMembers).values({ tournamentId: team.tournamentId, userId, role: "viewer", teamId: team.id });
     } else if (membership.role === "viewer" || membership.role === "team_rep") {
-      await db.update(tournamentMembers).set({ role: "team_rep", teamId: team.id }).where(and(
+      await db.update(tournamentMembers).set({ role: "viewer", teamId: team.id }).where(and(
         eq(tournamentMembers.tournamentId, team.tournamentId),
         eq(tournamentMembers.userId, userId),
       ));
@@ -1002,13 +996,12 @@ export async function updateTournamentTeam(input: UpdateTournamentTeamInput, act
   for (const member of input.members) {
     const account = accountMap.get(member.riotAccountId)!;
     const membership = membershipMap.get(account.userId);
-    const teamRole = member.teamRole === "member" ? "viewer" as const : "team_rep" as const;
     statements.push(membership
       ? db.update(tournamentMembers).set({
-          role: membership.role === "owner" || membership.role === "operator" ? membership.role : teamRole,
+          role: membership.role === "owner" || membership.role === "operator" ? membership.role : "viewer",
           teamId: team.id,
         }).where(and(eq(tournamentMembers.tournamentId, tournament.id), eq(tournamentMembers.userId, account.userId)))
-      : db.insert(tournamentMembers).values({ tournamentId: tournament.id, userId: account.userId, role: teamRole, teamId: team.id }));
+      : db.insert(tournamentMembers).values({ tournamentId: tournament.id, userId: account.userId, role: "viewer", teamId: team.id }));
   }
   statements.push(
     db.insert(auditLogs).values({
@@ -1174,6 +1167,148 @@ async function persistTournamentBackup(
 
 async function createAutomaticBackup(tournamentId: string, actor: RequestUser, reason: string) {
   return persistTournamentBackup(tournamentId, actor, "automatic", reason);
+}
+
+const LOLMEN_2026_RESET_ACTION = "lolmen_2026_test_data_reset";
+const LOLMEN_2026_ERRONEOUS_RESULT_IMAGE_IDS = [
+  "result_image_537ab99d-3ec5-47e6-9ae1-2959074726b4",
+  "result_image_6fbd4ca0-4fe1-4e0d-89a2-fe9d3aa7784d",
+] as const;
+
+/**
+ * One-time production cleanup requested for the 2026 롤멘 tournament.
+ *
+ * It deliberately preserves schedules, match winners and match_games. Only the
+ * two explicitly identified result uploads (and detail rows derived from those
+ * uploads) are removed. Tournament betting is reset to a clean 1,000P start,
+ * and legacy team representative memberships are demoted to ordinary viewers.
+ */
+export async function resetLolmen2026TestData(tournamentId: string, actor: RequestUser) {
+  const tournament = await requireLolmen2026Tournament(tournamentId, actor, true);
+  const db = getDb();
+  const [completed] = await db.select({ id: auditLogs.id, afterJson: auditLogs.afterJson }).from(auditLogs).where(and(
+    eq(auditLogs.tournamentId, tournament.id),
+    eq(auditLogs.action, LOLMEN_2026_RESET_ACTION),
+  )).limit(1);
+  if (completed) {
+    let imageObjectKeys: string[] = [];
+    try {
+      const after = JSON.parse(completed.afterJson ?? "{}") as { imageObjectKeys?: unknown };
+      if (Array.isArray(after.imageObjectKeys)) imageObjectKeys = after.imageObjectKeys.filter((key): key is string => typeof key === "string");
+    } catch {
+      // A cleanup retry remains safe even when an older audit row has no keys.
+    }
+    return {
+      alreadyCompleted: true,
+      imageObjectKeys,
+      deletedImages: 0,
+      deletedBets: 0,
+      resetEntries: 0,
+      demotedTeamRepresentatives: 0,
+    };
+  }
+
+  const [targetImages, entryRows, betCountRows, teamRepresentativeRows] = await Promise.all([
+    db.select({
+      id: matchResultImages.id,
+      matchId: matchResultImages.matchId,
+      setNo: matchResultImages.setNo,
+      objectKey: matchResultImages.objectKey,
+    }).from(matchResultImages)
+      .innerJoin(matches, eq(matches.id, matchResultImages.matchId))
+      .where(and(
+        eq(matches.tournamentId, tournament.id),
+        inArray(matchResultImages.id, [...LOLMEN_2026_ERRONEOUS_RESULT_IMAGE_IDS]),
+      )),
+    db.select({ userId: tournamentEntries.userId }).from(tournamentEntries).where(eq(tournamentEntries.tournamentId, tournament.id)),
+    db.select({ count: sql<number>`count(*)` }).from(bets).where(eq(bets.tournamentId, tournament.id)),
+    db.select({ userId: tournamentMembers.userId }).from(tournamentMembers).where(and(
+      eq(tournamentMembers.tournamentId, tournament.id),
+      eq(tournamentMembers.role, "team_rep"),
+    )),
+  ]);
+
+  const targetMatchIds = [...new Set(targetImages.map((image) => image.matchId))];
+  const revisionRows = targetMatchIds.length
+    ? (await db.select({ matchId: resultRevisions.matchId, setNo: resultRevisions.setNo, objectKey: resultRevisions.objectKey })
+      .from(resultRevisions)
+      .where(inArray(resultRevisions.matchId, targetMatchIds)))
+      .filter((revision) => targetImages.some((image) => image.matchId === revision.matchId && image.setNo === revision.setNo))
+    : [];
+
+  await createAutomaticBackup(tournament.id, actor, "2026 롤멘 테스트 포인트·잘못 등록된 결과 이미지 초기화 전 자동 백업");
+
+  const now = new Date().toISOString();
+  const statements: unknown[] = [];
+  for (const image of targetImages) {
+    statements.push(
+      db.delete(resultRevisions).where(and(eq(resultRevisions.matchId, image.matchId), eq(resultRevisions.setNo, image.setNo))),
+      db.delete(playerMatchStats).where(and(eq(playerMatchStats.matchId, image.matchId), eq(playerMatchStats.setNo, image.setNo))),
+      db.delete(matchTeamStats).where(and(eq(matchTeamStats.matchId, image.matchId), eq(matchTeamStats.setNo, image.setNo))),
+      db.delete(matchResultImages).where(eq(matchResultImages.id, image.id)),
+    );
+  }
+  statements.push(
+    db.delete(betSettlements).where(eq(betSettlements.tournamentId, tournament.id)),
+    db.delete(bets).where(eq(bets.tournamentId, tournament.id)),
+    db.delete(pointLedger).where(eq(pointLedger.tournamentId, tournament.id)),
+    db.update(tournamentEntries).set({ starterPointsAwarded: 1000, pointsBalance: 1000 }).where(eq(tournamentEntries.tournamentId, tournament.id)),
+    db.update(matches).set({
+      bettingStatus: "scheduled",
+      bettingOpenedAt: null,
+      bettingClosedAt: null,
+      predictionCountAClosed: null,
+      predictionCountBClosed: null,
+      settlementStatus: "not_required",
+      settlementUpdatedAt: null,
+    }).where(eq(matches.tournamentId, tournament.id)),
+    db.update(tournamentMembers).set({ role: "viewer" }).where(and(
+      eq(tournamentMembers.tournamentId, tournament.id),
+      eq(tournamentMembers.role, "team_rep"),
+    )),
+  );
+  for (const entry of entryRows) {
+    statements.push(db.insert(pointLedger).values({
+      id: uid("ledger"),
+      userId: entry.userId,
+      tournamentId: tournament.id,
+      betId: null,
+      settlementId: null,
+      type: "starter_grant",
+      amount: 1000,
+      balanceAfter: 1000,
+      description: "2026 롤멘 대회 초기 기본 포인트",
+      createdAt: now,
+    }));
+  }
+  const imageObjectKeys = [...targetImages.map((image) => image.objectKey), ...revisionRows.map((revision) => revision.objectKey)];
+  statements.push(db.insert(auditLogs).values({
+    id: uid("audit"),
+    tournamentId: tournament.id,
+    actorId: actor.id,
+    actorName: actor.displayName,
+    action: LOLMEN_2026_RESET_ACTION,
+    entityType: "tournament",
+    entityId: tournament.id,
+    beforeJson: JSON.stringify({
+      betCount: Number(betCountRows[0]?.count ?? 0),
+      imageIds: targetImages.map((image) => image.id),
+      entryCount: entryRows.length,
+      teamRepresentativeCount: teamRepresentativeRows.length,
+    }),
+    afterJson: JSON.stringify({ starterPoints: 1000, preservedMatchResults: true, imageObjectKeys }),
+    createdAt: now,
+  }));
+  await db.batch(statements as never);
+
+  return {
+    alreadyCompleted: false,
+    imageObjectKeys,
+    deletedImages: targetImages.length,
+    deletedBets: Number(betCountRows[0]?.count ?? 0),
+    resetEntries: entryRows.length,
+    demotedTeamRepresentatives: teamRepresentativeRows.length,
+  };
 }
 
 export async function getTournamentBackupPayload(backupId: string, actor: RequestUser) {
@@ -1914,7 +2049,7 @@ async function createTournamentInternal(
     await db.insert(tournamentMembers).values({
       tournamentId,
       userId: player.userId,
-      role: player.teamRole === "member" ? "viewer" : "team_rep",
+      role: "viewer",
       teamId: player.teamId,
     }).onConflictDoNothing();
   }
@@ -2416,7 +2551,6 @@ export async function setMatchWinner(
   matchId: string,
   winnerId: string,
   actor: RequestUser,
-  fromDetailedResult = false,
   skipAutomaticBackup = false,
 ) {
   const db = getDb();
@@ -2426,11 +2560,7 @@ export async function setMatchWinner(
     throw new Error("배팅을 종료한 뒤 내전 결과를 확정해 주세요.");
   }
   const hasAccess = await hasTournamentAccess(actor, match.tournamentId);
-  const maySetWinner = hasAccess && (
-    match.phase === "scrim"
-      || isStaff(actor)
-      || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]))
-  );
+  const maySetWinner = hasAccess && (match.phase === "scrim" || isStaff(actor));
   if (!maySetWinner) throw new Error("이 경기의 결과를 등록할 권한이 없습니다.");
   if (!match.teamAId || !match.teamBId || ![match.teamAId, match.teamBId].includes(winnerId)) {
     throw new Error("대진에 포함된 팀을 선택해 주세요.");
@@ -2694,7 +2824,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const winsNeeded = Math.ceil(match.bestOf / 2);
   await db.update(matches).set({ seriesScoreA: scoreA, seriesScoreB: scoreB }).where(eq(matches.id, match.id));
   if (scoreA >= winsNeeded || scoreB >= winsNeeded) {
-    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor, true, true);
+    await setMatchWinner(match.id, scoreA >= winsNeeded ? match.teamAId : match.teamBId, actor, true);
   } else if (match.status === "completed") {
     await rollbackBets(match.id, false, actor);
     await db.update(matches).set({
@@ -3076,6 +3206,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       myRiotAccounts,
       rosterAccounts,
       supportsPreRegistration: false,
+      lolmen2026ResetComplete: false,
       preRegisteredPlayers: [],
       leaderTeamIds: [],
       bets: [],
@@ -3094,6 +3225,12 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
   }
 
   const supportsPreRegistration = isLolmen2026Tournament(selected);
+  const lolmen2026ResetComplete = supportsPreRegistration && requestUser?.role === "admin"
+    ? Boolean((await db.select({ id: auditLogs.id }).from(auditLogs).where(and(
+      eq(auditLogs.tournamentId, selected.id),
+      eq(auditLogs.action, LOLMEN_2026_RESET_ACTION),
+    )).limit(1))[0])
+    : false;
 
   if (requestUser?.profileComplete && await hasTournamentAccess(requestUser, selected.id)) {
     const entry = await ensureTournamentEntry(requestUser.id, selected.id);
@@ -3290,9 +3427,9 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       : null,
     players: playerRows.filter((player) => player.teamId === team.id),
   }));
-  const leaderTeamIds = requestUser
-    ? playerRows.filter((player) => player.userId === requestUser.id && (player.teamRole === "captain" || player.teamRole === "vice_captain")).map((player) => player.teamId)
-    : [];
+  // Captain and vice-captain remain visible as roster titles, but currently do
+  // not receive any tournament operation privileges.
+  const leaderTeamIds: string[] = [];
   const finalMatch = bracketMatches.find((match) => match.matchNo === "F");
   const placements = [
     finalMatch?.winnerId ? { rank: 1, teamId: finalMatch.winnerId } : null,
@@ -3411,6 +3548,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       testScope: account.userId.startsWith("test_scrim_") ? "scrim" as const : account.userId.startsWith("test_league_") ? "league" as const : null,
     })),
     supportsPreRegistration,
+    lolmen2026ResetComplete,
     preRegisteredPlayers: supportsPreRegistration && requestUser?.role === "admin"
       ? accountRows.filter((account) => account.accountStatus === "provisional" && account.isPrimary).map((account) => {
           const rosterPlayer = playerRows.find((player) => player.userId === account.userId);

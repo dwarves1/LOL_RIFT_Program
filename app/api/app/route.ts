@@ -9,6 +9,7 @@ import {
   seedTestPlayers,
   createQaScrimSandbox,
   resetQaScrimSandboxes,
+  resetLolmen2026TestData,
   createTiebreakerMatch,
   getDashboard,
   getMatchImageAnalysisContext,
@@ -146,6 +147,11 @@ export async function POST(request: Request) {
       const reset = await resetQaScrimSandboxes(user);
       for (const objectKey of reset.imageObjectKeys) await env.RESULT_IMAGES.delete(objectKey);
       return Response.json({ ok: true, tournamentId: "", ...reset });
+    }
+    if (action === "reset_lolmen_2026_test_data") {
+      const reset = await resetLolmen2026TestData(String(payload.tournamentId ?? ""), user);
+      for (const objectKey of reset.imageObjectKeys) await env.RESULT_IMAGES.delete(objectKey);
+      return Response.json({ ok: true, ...reset, imageObjectKeys: undefined });
     }
     if (action === "set_scrim_betting") {
       const result = await setScrimBetting(

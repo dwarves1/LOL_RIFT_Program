@@ -98,8 +98,8 @@ export function DraftView({ data, teamMap, busy, command }: {
   const remaining = selected?.turnExpiresAt && clock ? Math.max(0, Math.ceil((new Date(selected.turnExpiresAt).getTime() - clock) / 1000)) : null;
   const isStaff = data.viewer?.role === "operator" || data.viewer?.role === "admin";
   const match = selected?.matchId ? data.matches.find((item) => item.id === selected.matchId) : null;
-  const canJoinBlue = isStaff || Boolean(selected?.blueTeamId && data.leaderTeamIds.includes(selected.blueTeamId));
-  const canJoinRed = isStaff || Boolean(selected?.redTeamId && data.leaderTeamIds.includes(selected.redTeamId));
+  const canJoinBlue = isStaff;
+  const canJoinRed = isStaff;
 
   return <section className="page-section draft-page">
     <header className="page-title"><p className="eyebrow">DRAFT LAB</p><h1>밴픽</h1><span>경기 대표 밴픽과 계정별 자유 밴픽을 같은 규칙으로 진행합니다.</span></header>

@@ -721,6 +721,29 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .result-review-body { overflow-y: auto; }.result-fields-panel { overflow: visible; }
 }
 
+/* Schedule polish: give initial marks breathing room and keep every minute digit visible. */
+.schedule-team { column-gap: 18px; }
+.schedule-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.schedule-editor-group { display: grid; align-items: center; gap: 6px; }
+.schedule-bo-editor { grid-template-columns: auto auto; }
+.schedule-time-editor { flex: 1 1 270px; grid-template-columns: minmax(210px, 1fr) auto; min-width: 270px; }
+.schedule-time-editor input,
+.admin-schedule-editor input { width: 100%; min-width: 210px; box-sizing: border-box; padding-inline: 12px 9px; color-scheme: dark; }
+.lolmen-reset-panel > button { min-height: 42px; margin-top: 12px; }
+
+@media (max-width: 800px) {
+  .match-actions > .schedule-editor { display: flex; }
+  .schedule-team { column-gap: 10px; }
+  .schedule-time-editor { flex-basis: 100%; min-width: 0; }
+  .schedule-time-editor input { min-width: 0; }
+}
+
+@media (max-width: 480px) {
+  .schedule-editor-group { width: 100%; }
+  .schedule-bo-editor { grid-template-columns: minmax(0, 1fr) auto; }
+  .schedule-time-editor { grid-template-columns: minmax(0, 1fr) auto; }
+}
+
 /* Unified blocking progress state */
 .operation-overlay {
   position: fixed;
@@ -956,4 +979,13 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
 
 @media (max-width: 700px) {
   .team-roster-slots .scrim-account-options { position: relative; top: auto; right: auto; width: 100%; margin-top: 5px; }
+}
+
+/* Keep the grouped schedule editor layout above earlier responsive rules. */
+@media (max-width: 800px) {
+  .match-actions > .schedule-editor { display: flex; grid-template-columns: none; }
+}
+
+@media (max-width: 480px) {
+  .match-actions > .schedule-editor { display: flex; grid-template-columns: none; }
 }

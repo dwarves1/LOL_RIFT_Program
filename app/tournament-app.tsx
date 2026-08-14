@@ -173,6 +173,7 @@ type Dashboard = {
   myRiotAccounts: Array<{ id: string; gameName: string; tagline: string; isPrimary: boolean }>;
   rosterAccounts: Array<{ id: string; userId: string; gameName: string; tagline: string; isPrimary: boolean; displayName: string; accountStatus: "active" | "provisional" | "merged"; isTest?: boolean; testScope?: "league" | "scrim" | null }>;
   supportsPreRegistration: boolean;
+  lolmen2026ResetComplete: boolean;
   preRegisteredPlayers: Array<{ userId: string; accountId: string; realName: string; gameName: string; tagline: string; teamId: string | null; teamName: string | null; status: "provisional" }>;
   leaderTeamIds: string[];
   bets: Bet[];
@@ -286,6 +287,7 @@ const AUDIT_LABEL: Record<string, string> = {
   tournament_member_removed: "대회 참가자를 강퇴했습니다",
   qa_scrim_sandbox_created: "QA 내전 시나리오를 생성했습니다",
   qa_scrim_sandboxes_reset: "QA 내전 시나리오를 초기화했습니다",
+  lolmen_2026_test_data_reset: "2026 롤멘 테스트 포인트와 잘못된 결과 이미지를 초기화했습니다",
 };
 
 const OPERATION_LABELS: Record<string, string> = {
@@ -294,6 +296,7 @@ const OPERATION_LABELS: Record<string, string> = {
   create_scrim_match: "내전 경기와 팀 구성을 저장하고 있습니다",
   create_qa_scrim_sandbox: "격리된 QA 내전 시나리오를 준비하고 있습니다",
   reset_qa_scrim_sandboxes: "QA 내전 시나리오와 테스트 데이터를 초기화하고 있습니다",
+  reset_lolmen_2026_test_data: "2026 롤멘 포인트와 잘못된 결과 이미지를 초기화하고 있습니다",
   rollback_scrim_match: "내전 결과와 배팅을 롤백하고 있습니다",
   delete_scrim_match: "내전 경기와 배팅 기록을 삭제하고 있습니다",
   remove_tournament_member: "대회 참가자의 권한을 해제하고 있습니다",
@@ -1072,7 +1075,7 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
       {groupMatches.length ? (
         <div className="schedule-list">
           {groupMatches.map((match) => (
-            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} leaderTeamIds={data.leaderTeamIds} predictionSummary={data.predictionSummaries.find((summary) => summary.matchId === match.id)} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
+            <ScheduleCard key={match.id} match={match} teamMap={teamMap} isStaff={isStaff} predictionSummary={data.predictionSummaries.find((summary) => summary.matchId === match.id)} busy={busy} command={command} draftSession={data.draftSessions.find((draft) => draft.matchId === match.id)} hasDetail={data.resultImages.some((image) => image.matchId === match.id)} openResultReview={openResultReview} openResultDetail={openResultDetail} />
           ))}
         </div>
       ) : (
@@ -1082,10 +1085,10 @@ function ScheduleGroup({ title, detail, matches: groupMatches, emptyDetail, team
   );
 }
 
-function ScheduleCard({ match, teamMap, isStaff, leaderTeamIds, predictionSummary, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; leaderTeamIds: string[]; predictionSummary?: PredictionSummary; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
+function ScheduleCard({ match, teamMap, isStaff, predictionSummary, busy, command, draftSession, hasDetail, openResultReview, openResultDetail }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; predictionSummary?: PredictionSummary; busy: boolean; command: SharedProps["command"]; draftSession?: DraftSession; hasDetail: boolean; openResultReview: (match: Match) => void; openResultDetail: (match: Match) => void }) {
   const teamA = match.teamAId ? teamMap.get(match.teamAId) : undefined;
   const teamB = match.teamBId ? teamMap.get(match.teamBId) : undefined;
-  const canManageMatch = isStaff || match.phase === "scrim" || Boolean((match.teamAId && leaderTeamIds.includes(match.teamAId)) || (match.teamBId && leaderTeamIds.includes(match.teamBId)));
+  const canManageMatch = isStaff || match.phase === "scrim";
   return (
     <article className={`schedule-card ${match.status}`}>
       <div className={`match-time ${match.phase === "league" ? "no-number" : ""}`}>
@@ -1181,22 +1184,24 @@ function MatchScheduleEditor({ match, busy, command, canSetBestOf }: { match: Ma
   const [bestOf, setBestOf] = useState(match.bestOf);
   return (
     <div className="schedule-editor">
-      {canSetBestOf && <><select value={bestOf} aria-label={`${match.matchNo} 세트 수`} onChange={(event) => setBestOf(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select><button disabled={busy || bestOf === match.bestOf} onClick={() => command({ action: "set_match_best_of", matchId: match.id, bestOf }, `BO${bestOf}로 변경했습니다.`)}>BO 저장</button></>}
-      <input
-        type="datetime-local"
-        value={scheduledAt}
-        aria-label={`${match.matchNo} 경기 일시`}
-        onChange={(event) => setScheduledAt(event.target.value)}
-      />
-      <button
-        disabled={busy || !scheduledAt}
-        onClick={() => command(
-          { action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() },
-          "경기 일정을 변경했습니다.",
-        )}
-      >
-        일정 저장
-      </button>
+      {canSetBestOf && <div className="schedule-editor-group schedule-bo-editor"><select value={bestOf} aria-label={`${match.matchNo} 세트 수`} onChange={(event) => setBestOf(Number(event.target.value))}>{[1, 3, 5].map((bo) => <option key={bo} value={bo}>BO{bo}</option>)}</select><button disabled={busy || bestOf === match.bestOf} onClick={() => command({ action: "set_match_best_of", matchId: match.id, bestOf }, `BO${bestOf}로 변경했습니다.`)}>BO 저장</button></div>}
+      <div className="schedule-editor-group schedule-time-editor">
+        <input
+          type="datetime-local"
+          value={scheduledAt}
+          aria-label={`${match.matchNo} 경기 일시`}
+          onChange={(event) => setScheduledAt(event.target.value)}
+        />
+        <button
+          disabled={busy || !scheduledAt}
+          onClick={() => command(
+            { action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() },
+            "경기 일정을 변경했습니다.",
+          )}
+        >
+          일정 저장
+        </button>
+      </div>
     </div>
   );
 }
@@ -1621,6 +1626,24 @@ function AdminView({ data, teamMap, isStaff, busy, command, openCreate, openCrea
         <div><span>내 권한</span><strong>{data.viewer ? ROLE_LABEL[data.viewer.role] : "-"}</strong></div><div><span>기록된 변경</span><strong>{data.audit.length}건</strong></div>
       </div>
       {data.supportsPreRegistration && data.viewer?.role === "admin" && <PreRegisteredPlayerPanel data={data} busy={busy} command={command} />}
+      {data.supportsPreRegistration && data.viewer?.role === "admin" && (
+        <article className="panel lolmen-reset-panel">
+          <div className="section-heading"><div><p className="eyebrow">ONE-TIME DATA CLEANUP</p><h2>2026 롤멘 테스트 데이터 정리</h2></div><span>{data.lolmen2026ResetComplete ? "정리 완료" : "관리자 전용"}</span></div>
+          <p className="admin-panel-help">모든 승리 예측·배팅·정산을 제거하고 참가자별 포인트를 기본 1,000P로 맞춥니다. 잘못 등록된 결과 이미지 2건과 해당 상세 통계만 삭제하며, 경기 일정·승패·세트 기록은 유지합니다. 실행 직전 자동 백업이 생성됩니다.</p>
+          <button
+            type="button"
+            className={data.lolmen2026ResetComplete ? "secondary-button" : "danger-button"}
+            disabled={busy || data.lolmen2026ResetComplete}
+            onClick={() => {
+              if (!window.confirm("2026 롤멘 대회의 테스트 배팅과 포인트를 초기화하고 잘못된 결과 이미지 2건을 삭제할까요?\n경기 일정·승패·세트 기록은 유지됩니다.")) return;
+              if (!window.confirm("최종 확인입니다. 참가자 포인트는 모두 1,000P가 되고 기존 승리 예측·배팅 이력은 삭제됩니다. 계속할까요?")) return;
+              void command({ action: "reset_lolmen_2026_test_data", tournamentId: data.tournament!.id }, "포인트를 1,000P로 초기화하고 잘못된 결과 이미지 2건을 삭제했습니다.");
+            }}
+          >
+            {data.lolmen2026ResetComplete ? "초기화 완료" : "백업 후 테스트 데이터 초기화"}
+          </button>
+        </article>
+      )}
       {data.supportsPreRegistration && <TeamRosterEditorPanel data={data} busy={busy} command={command} />}
       {isScrim && <><div className="operation-metric-grid"><article><span>배팅 대기</span><strong>{operations.scheduled}</strong></article><article className="live"><span>배팅 중</span><strong>{operations.open}</strong></article><article className="warning"><span>결과 대기</span><strong>{operations.resultPending}</strong></article><article><span>확정 완료</span><strong>{operations.completed}</strong></article></div><div className="operation-tools"><span>결과와 포인트를 정정하면 기존 정산을 취소하고 다시 계산합니다.</span>{isStaff && <a className="secondary-button" href={`/api/admin/backup?tournament=${encodeURIComponent(data.tournament!.id)}`}>CSV 백업 다운로드</a>}</div></>}
       {isStaff && <section className="operations-safety-grid">
@@ -1683,7 +1706,7 @@ function AdminView({ data, teamMap, isStaff, busy, command, openCreate, openCrea
       {!isScrim && !data.supportsPreRegistration && data.tournament?.rosterMode === "registered_accounts" && (
         <article className="panel team-leadership-panel">
           <div className="section-heading"><div><p className="eyebrow">TEAM LEADERSHIP</p><h2>팀장·부팀장 관리</h2></div><span>팀 명단에 등록된 회원만 선택</span></div>
-          <p className="admin-panel-help">팀장과 부팀장은 소속 팀 경기의 일정을 입력하고, 결과 이미지와 승패를 등록할 수 있습니다. 일정 확정과 잘못 등록된 결과의 정정은 운영자·관리자만 가능합니다.</p>
+          <p className="admin-panel-help">팀장과 부팀장은 현재 명단에 표시되는 역할명이며 권한은 일반 팀원과 같습니다. 경기 일정·결과·밴픽 운영은 운영자와 관리자만 가능합니다.</p>
           <div className="team-leadership-list">
             {data.teams.map((team) => <TeamLeadershipControl key={`${team.id}:${team.players.map((player) => player.teamRole).join(",")}`} team={team} busy={busy} command={command} />)}
           </div>

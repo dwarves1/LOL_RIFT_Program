@@ -336,7 +336,7 @@ test("automatic backups export a validated snapshot and restore a safe copy", as
   assert.ok(restored.accessCode.startsWith("RIFT-"));
 });
 
-test("tournament isolation, team leadership, result correction, and draft permissions", async () => {
+test("tournament isolation, staff-only operations, result correction, and draft permissions", async () => {
   const created = await createCompetition("QA 권한", "league_then_bracket");
   let data = await dashboard(created.tournamentId);
   const match = data.matches[0];
@@ -345,7 +345,8 @@ test("tournament isolation, team leadership, result correction, and draft permis
   const blueVice = actors.get(blueTeam.players.find((player) => player.teamRole === "vice_captain").userId);
   const redVice = actors.get(redTeam.players.find((player) => player.teamRole === "vice_captain").userId);
 
-  const imageAnalysisContext = await tournament.getMatchImageAnalysisContext(match.id, blueVice);
+  await assert.rejects(() => tournament.getMatchImageAnalysisContext(match.id, blueVice), /권한/);
+  const imageAnalysisContext = await tournament.getMatchImageAnalysisContext(match.id, actors.get("admin"));
   assert.equal(imageAnalysisContext.teamA.roster.length, 5);
   assert.equal(imageAnalysisContext.teamB.roster.length, 5);
   await assert.rejects(() => tournament.getMatchImageAnalysisContext(match.id, actors.get("outsider")), /분석할 권한/);
@@ -361,7 +362,8 @@ test("tournament isolation, team leadership, result correction, and draft permis
   assert.equal(outsiderData.tournament.id, created.tournamentId);
   assert.equal(outsiderData.viewer.pointsBalance, 1000);
   await assert.rejects(() => tournament.confirmMatchSchedule(match.id, blueVice), /운영 권한/);
-  await tournament.setMatchSchedule(match.id, "2026-09-03T09:00:00.000Z", blueVice);
+  await assert.rejects(() => tournament.setMatchSchedule(match.id, "2026-09-03T09:00:00.000Z", blueVice), /권한/);
+  await tournament.setMatchSchedule(match.id, "2026-09-03T09:00:00.000Z", actors.get("admin"));
   await tournament.confirmMatchSchedule(match.id, actors.get("admin"));
   await tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("outsider"));
   await tournament.createBet(created.tournamentId, match.id, match.teamAId, 500, blueVice);
@@ -397,17 +399,18 @@ test("tournament isolation, team leadership, result correction, and draft permis
   const draftBlueVice = actors.get(draftBlueTeam.players.find((player) => player.teamRole === "vice_captain").userId);
   const draftRedVice = actors.get(draftRedTeam.players.find((player) => player.teamRole === "vice_captain").userId);
   const matchDraftId = await draft.createDraft({ context: "match", matchId: draftMatch.id, mode: "fearless", bestOf: 3, timerMode: "unlimited", undoEnabled: true }, actors.get("admin"));
-  await draft.joinDraft(matchDraftId, "blue", draftBlueVice);
-  await draft.joinDraft(matchDraftId, "red", draftRedVice);
+  await assert.rejects(() => draft.joinDraft(matchDraftId, "blue", draftBlueVice), /운영자나 관리자/);
+  await assert.rejects(() => draft.joinDraft(matchDraftId, "red", draftRedVice), /운영자나 관리자/);
+  await draft.joinDraft(matchDraftId, "blue", actors.get("admin"));
+  await draft.joinDraft(matchDraftId, "red", actors.get("admin"));
   await draft.startDraft(matchDraftId, actors.get("admin"));
   for (let step = 0; step < draft.DRAFT_STEPS.length; step += 1) {
     const session = sqlite.prepare("SELECT version FROM draft_sessions WHERE id = ?").get(matchDraftId);
-    const actor = draft.DRAFT_STEPS[step].side === "blue" ? draftBlueVice : draftRedVice;
-    await draft.draftAction(matchDraftId, `champion_${step}`, session.version, actor);
+    await draft.draftAction(matchDraftId, `champion_${step}`, session.version, actors.get("admin"));
   }
   await draft.advanceDraftSet(matchDraftId, actors.get("admin"));
   const nextVersion = sqlite.prepare("SELECT version FROM draft_sessions WHERE id = ?").get(matchDraftId).version;
-  await assert.rejects(() => draft.draftAction(matchDraftId, "champion_6", nextVersion, draftBlueVice), /피어리스/);
+  await assert.rejects(() => draft.draftAction(matchDraftId, "champion_6", nextVersion, actors.get("admin")), /피어리스/);
 
   const playerStats = [...blueTeam.players, ...redTeam.players].map((player, index) => ({
     side: index < 5 ? 1 : 2,
@@ -437,13 +440,14 @@ test("tournament isolation, team leadership, result correction, and draft permis
     image: { objectKey: "qa/result-1.png", fileName: "result.png", contentType: "image/png", fileSize: 1000 },
     extraction: { source: "qa" },
   };
-  await tournament.saveMatchResult(resultInput, blueVice);
+  await assert.rejects(() => tournament.saveMatchResult(resultInput, blueVice), /권한/);
+  await tournament.saveMatchResult(resultInput, actors.get("admin"));
   data = await dashboard(created.tournamentId);
   assert.equal(data.matches.find((item) => item.id === match.id).winnerId, match.teamAId);
   outsiderData = await tournament.getDashboard(created.tournamentId, actors.get("outsider"));
   assert.equal(outsiderData.viewer.pointsBalance, 1100);
   assert.equal(outsiderData.bets.find((bet) => bet.matchId === match.id).status, "won");
-  await assert.rejects(() => tournament.saveMatchResult({ ...resultInput, image: { ...resultInput.image, objectKey: "qa/result-2.png" } }, redVice), /운영자나 관리자만 정정/);
+  await assert.rejects(() => tournament.saveMatchResult({ ...resultInput, image: { ...resultInput.image, objectKey: "qa/result-2.png" } }, redVice), /권한/);
   await tournament.saveMatchResult({ ...resultInput, winnerTeamId: match.teamBId, image: { ...resultInput.image, objectKey: "qa/result-3.png" } }, actors.get("admin"));
   data = await dashboard(created.tournamentId);
   assert.equal(data.matches.find((item) => item.id === match.id).winnerId, match.teamBId);
@@ -541,6 +545,60 @@ test("2026 롤멘 pre-registered players keep stats when Google signs up and ros
   data = await tournament.getDashboard(created.tournamentId, linkedActor);
   assert.equal(data.preRegisteredPlayers.length, 0);
   assert.equal(data.viewer.pointsBalance, 1000);
+});
+
+test("2026 lolmen cleanup resets points, removes only two bad uploads, and preserves match results", async () => {
+  const created = await createCompetition("2026 롤멘 정리 테스트", "league_only", 3);
+  let data = await dashboard(created.tournamentId);
+  const [firstMatch, secondMatch] = data.matches;
+
+  await tournament.getDashboard(created.tournamentId, actors.get("player1"));
+  await tournament.getDashboard(created.tournamentId, actors.get("player2"));
+  await tournament.confirmMatchSchedule(firstMatch.id, actors.get("admin"));
+  await tournament.createBet(created.tournamentId, firstMatch.id, firstMatch.teamAId, 100, actors.get("player1"));
+  await tournament.createBet(created.tournamentId, firstMatch.id, firstMatch.teamBId, 200, actors.get("player2"));
+  await tournament.setMatchWinner(firstMatch.id, firstMatch.teamAId, actors.get("admin"));
+  await tournament.setMatchWinner(secondMatch.id, secondMatch.teamBId, actors.get("admin"));
+
+  const imageRows = [
+    ["result_image_537ab99d-3ec5-47e6-9ae1-2959074726b4", firstMatch, "bad/result-1.png"],
+    ["result_image_6fbd4ca0-4fe1-4e0d-89a2-fe9d3aa7784d", secondMatch, "bad/result-2.png"],
+  ];
+  for (const [imageId, match, objectKey] of imageRows) {
+    sqlite.prepare("INSERT INTO match_result_images (id, match_id, set_no, object_key, file_name, content_type, file_size, created_by, reviewed_at) VALUES (?, ?, 1, ?, ?, 'image/png', 1000, 'admin', '2026-08-13T00:00:00.000Z')")
+      .run(imageId, match.id, objectKey, `${imageId}.png`);
+    sqlite.prepare("INSERT INTO match_team_stats (match_id, set_no, side, team_id, kills, deaths, assists, gold, won) VALUES (?, 1, 1, ?, 10, 5, 20, 50000, 1)")
+      .run(match.id, match.teamAId);
+    sqlite.prepare("INSERT INTO match_team_stats (match_id, set_no, side, team_id, kills, deaths, assists, gold, won) VALUES (?, 1, 2, ?, 5, 10, 10, 42000, 0)")
+      .run(match.id, match.teamBId);
+  }
+  sqlite.prepare("UPDATE tournament_members SET role = 'team_rep' WHERE tournament_id = ? AND user_id = 'player1'").run(created.tournamentId);
+
+  const winnersBefore = sqlite.prepare("SELECT id, winner_id FROM matches WHERE id IN (?, ?) ORDER BY id").all(firstMatch.id, secondMatch.id);
+  const gamesBefore = sqlite.prepare("SELECT COUNT(*) AS count FROM match_games WHERE match_id IN (?, ?)").get(firstMatch.id, secondMatch.id).count;
+  const reset = await tournament.resetLolmen2026TestData(created.tournamentId, actors.get("admin"));
+
+  assert.equal(reset.alreadyCompleted, false);
+  assert.equal(reset.deletedImages, 2);
+  assert.equal(reset.deletedBets, 2);
+  assert.equal(reset.demotedTeamRepresentatives, 1);
+  assert.deepEqual(new Set(reset.imageObjectKeys), new Set(["bad/result-1.png", "bad/result-2.png"]));
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM match_result_images WHERE id IN (?, ?)").get(imageRows[0][0], imageRows[1][0]).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM match_team_stats WHERE match_id IN (?, ?)").get(firstMatch.id, secondMatch.id).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM bets WHERE tournament_id = ?").get(created.tournamentId).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM bet_settlements WHERE tournament_id = ?").get(created.tournamentId).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_entries WHERE tournament_id = ? AND points_balance = 1000 AND starter_points_awarded = 1000").get(created.tournamentId).count, reset.resetEntries);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM point_ledger WHERE tournament_id = ? AND type = 'starter_grant' AND amount = 1000 AND balance_after = 1000").get(created.tournamentId).count, reset.resetEntries);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_members WHERE tournament_id = ? AND role = 'team_rep'").get(created.tournamentId).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_backups WHERE tournament_id = ? AND kind = 'automatic'").get(created.tournamentId).count > 0, true);
+  assert.deepEqual(sqlite.prepare("SELECT id, winner_id FROM matches WHERE id IN (?, ?) ORDER BY id").all(firstMatch.id, secondMatch.id), winnersBefore);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM match_games WHERE match_id IN (?, ?)").get(firstMatch.id, secondMatch.id).count, gamesBefore);
+
+  data = await dashboard(created.tournamentId);
+  assert.equal(data.lolmen2026ResetComplete, true);
+  assert.equal(data.resultImages.some((image) => imageRows.some(([id]) => image.id === id)), false);
+  const repeated = await tournament.resetLolmen2026TestData(created.tournamentId, actors.get("admin"));
+  assert.equal(repeated.alreadyCompleted, true);
 });
 
 test("QA scrim sandbox is isolated, opens sample betting, settles, and resets safely", async () => {
