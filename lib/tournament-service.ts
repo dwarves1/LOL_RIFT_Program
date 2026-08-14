@@ -1790,13 +1790,14 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
   const matchId = uid("scrim_match");
   const blueTeamId = uid("scrim_team");
   const redTeamId = uid("scrim_team");
+  const createdAt = new Date().toISOString();
+  const opensBetting = !input.historical;
   const accountMap = new Map(accounts.map((account) => [account.id, account]));
   const teamRows = [
     { id: blueTeamId, tournamentId: tournament.id, matchId, name: `${sequence}경기 블루팀`, color: "#3b82f6", seed: null },
     { id: redTeamId, tournamentId: tournament.id, matchId, name: `${sequence}경기 레드팀`, color: "#ef4444", seed: null },
   ];
-  await db.insert(teams).values(teamRows);
-  await db.insert(matches).values({
+  const matchRow = {
     id: matchId,
     tournamentId: tournament.id,
     phase: "scrim",
@@ -1808,10 +1809,14 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
     teamBId: redTeamId,
     scheduledAt: date.toISOString(),
     scheduleConfirmed: true,
-    bettingStatus: input.historical ? "closed" : "scheduled",
+    bettingStatus: input.historical ? "closed" : "open",
+    bettingOpenedAt: opensBetting ? createdAt : null,
+    bettingClosedAt: input.historical ? createdAt : null,
+    settlementStatus: "not_required",
+    settlementUpdatedAt: createdAt,
     status: "scheduled",
     sortOrder: sequence,
-  });
+  } as const;
   const playerRows = [
     ...input.blueAccountIds.map((accountId, index) => ({ accountId, teamId: blueTeamId, index })),
     ...input.redAccountIds.map((accountId, index) => ({ accountId, teamId: redTeamId, index })),
@@ -1827,15 +1832,28 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
       position: POSITIONS[index],
     };
   });
-  await db.insert(players).values(playerRows);
+  await db.batch([
+    db.insert(teams).values(teamRows),
+    db.insert(matches).values(matchRow),
+    db.insert(players).values(playerRows),
+  ] as never);
   await audit(actor, "scrim_match_created", "match", matchId, tournament.id, null, {
     sequence,
     scheduledAt: date.toISOString(),
     blueAccountIds: input.blueAccountIds,
     redAccountIds: input.redAccountIds,
     historical: Boolean(input.historical),
+    bettingStatus: input.historical ? "closed" : "open",
   });
-  return { matchId, sharePath: `/scrim/${encodeURIComponent(tournament.id)}/bet/${encodeURIComponent(matchId)}` };
+  if (opensBetting) {
+    await audit(actor, "scrim_betting_opened", "match", matchId, tournament.id, {
+      bettingStatus: "scheduled",
+    }, {
+      bettingStatus: "open",
+      openedWithMatchCreation: true,
+    });
+  }
+  return { matchId, sharePath: `/scrim/${encodeURIComponent(tournament.id)}/bet?match=${encodeURIComponent(matchId)}` };
 }
 
 function testPlayerDefinition(scope: "league" | "scrim", index: number) {
@@ -2113,7 +2131,7 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
     throw new Error("시즌 코드를 입력해 참가한 회원만 내전 배팅을 관리할 수 있습니다.");
   }
   if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) throw new Error("진행 전인 내전 경기만 배팅 상태를 변경할 수 있습니다.");
-  if (nextStatus === "open" && match.bettingStatus === "open") return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
+  if (nextStatus === "open" && match.bettingStatus === "open") return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet?match=${encodeURIComponent(match.id)}` };
   if (nextStatus === "closed" && match.bettingStatus !== "open") throw new Error("현재 배팅이 진행 중인 경기가 아닙니다.");
   await createAutomaticBackup(match.tournamentId, actor, nextStatus === "open" ? "배팅 시작 전 자동 백업" : "배팅 마감 전 자동 백업");
   const now = new Date().toISOString();
@@ -2136,7 +2154,7 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   }, {
     bettingStatus: nextStatus,
   });
-  return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
+  return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet?match=${encodeURIComponent(match.id)}` };
 }
 
 export async function rollbackScrimMatch(matchId: string, actor: RequestUser) {

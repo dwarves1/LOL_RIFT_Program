@@ -110,6 +110,42 @@ function parseDuration(value: string) {
   return matched ? Number(matched[1]) * 60 + Number(matched[2]) : 0;
 }
 
+function rosterPlayersForMatch(teams: ResultTeam[], accounts: ResultAccount[], match: ResultMatch): ResultPlayerStat[] {
+  const buildSide = (teamId: string | null, side: 1 | 2) => {
+    const roster = [...(teams.find((team) => team.id === teamId)?.players ?? [])].sort((a, b) => {
+      const aIndex = LANES.indexOf(a.position as ResultPlayerStat["lane"]);
+      const bIndex = LANES.indexOf(b.position as ResultPlayerStat["lane"]);
+      return (aIndex < 0 ? 99 : aIndex) - (bIndex < 0 ? 99 : bIndex);
+    });
+    return Array.from({ length: 5 }, (_, index) => {
+      const player = roster[index];
+      const account = accounts.find((item) => item.id === player?.riotAccountId)
+        ?? accounts.find((item) => item.userId === player?.userId);
+      const lane = player?.position && LANES.includes(player.position as ResultPlayerStat["lane"])
+        ? player.position as ResultPlayerStat["lane"]
+        : LANES[index];
+      return {
+        userId: player?.userId ?? account?.userId ?? null,
+        side,
+        rowOrder: (side - 1) * 5 + index + 1,
+        accountName: account?.riotGameName ?? player?.nickname?.split("#")[0] ?? "",
+        sourceAccountName: "",
+        championName: "",
+        championLevel: 0,
+        lane,
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        gold: 0,
+        confidence: 0,
+        fieldConfidence: player ? { accountName: 100 } : {},
+      } satisfies ResultPlayerStat;
+    });
+  };
+  const rows = [...buildSide(match.teamAId, 1), ...buildSide(match.teamBId, 2)];
+  return rows.some((row) => row.accountName) ? rows : emptyPlayers();
+}
+
 function loadImage(dataUrl: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const element = new Image();
@@ -162,7 +198,7 @@ export function ResultReviewModal({
   const [dataUrl, setDataUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
-  const [players, setPlayers] = useState<ResultPlayerStat[]>(emptyPlayers);
+  const [players, setPlayers] = useState<ResultPlayerStat[]>(() => rosterPlayersForMatch(teams, accounts, match));
   const [duration, setDuration] = useState("00:00");
   const [side1TeamId, setSide1TeamId] = useState(match.teamAId ?? "");
   const [side2TeamId, setSide2TeamId] = useState(match.teamBId ?? "");
@@ -210,8 +246,15 @@ export function ResultReviewModal({
     setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? {
       ...player,
       [field]: value,
-      ...(field === "accountName" ? { sourceAccountName: String(value) } : {}),
       fieldConfidence: { ...player.fieldConfidence, [field]: 100 },
+    } : player));
+  }
+
+  function patchSourceAccountName(index: number, value: string) {
+    setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? {
+      ...player,
+      sourceAccountName: value,
+      fieldConfidence: { ...player.fieldConfidence, accountName: 100 },
     } : player));
   }
 
@@ -222,26 +265,49 @@ export function ResultReviewModal({
     return accounts.filter((account) => exactAccountIds.has(account.id) || rosterUserIds.has(account.userId));
   }
 
-  function remapAccounts(rows: ResultPlayerStat[], firstTeamId: string, secondTeamId: string) {
+  function rebindRosterAccounts(rows: ResultPlayerStat[], firstTeamId: string, secondTeamId: string) {
+    const identities = rosterPlayersForMatch(teams, accounts, { ...match, teamAId: firstTeamId, teamBId: secondTeamId });
     return rows.map((row) => {
-      const candidates = teamAccountCandidates(row.side === 1 ? firstTeamId : secondTeamId);
-      const sourceName = row.sourceAccountName ?? row.accountName;
-      const knownNames = candidates.map((candidate) => candidate.riotGameName ?? "").filter(Boolean);
-      const accountMatch = findBestKnownLabel(sourceName, knownNames, 0.55);
-      const account = accountMatch
-        ? candidates.find((candidate) => candidate.riotGameName && normalize(candidate.riotGameName) === normalize(accountMatch.value))
-        : undefined;
-      return {
-        ...row,
-        sourceAccountName: sourceName,
-        accountName: account?.riotGameName ?? sourceName,
-        userId: account?.userId ?? null,
-        fieldConfidence: {
-          ...row.fieldConfidence,
-          accountName: accountMatch ? Math.round(accountMatch.score * 100) : row.fieldConfidence?.accountName,
-        },
-      };
+      const identity = identities.find((item) => item.rowOrder === row.rowOrder);
+      return identity ? { ...row, userId: identity.userId, accountName: identity.accountName } : row;
     });
+  }
+
+  function mergeAnalyzedStats(rows: ResultPlayerStat[], analyzed: ResultPlayerStat[]) {
+    return ([1, 2] as const).flatMap((side) => {
+      const roster = rows.filter((row) => row.side === side).sort((a, b) => a.rowOrder - b.rowOrder);
+      const detected = analyzed.filter((row) => row.side === side).sort((a, b) => a.rowOrder - b.rowOrder);
+      const unused = new Set(roster.map((_, index) => index));
+      const assignments = new Map<number, { row: ResultPlayerStat; confidence: number }>();
+      detected.forEach((detectedRow, detectedIndex) => {
+        const candidateIndexes = [...unused];
+        const candidateNames = candidateIndexes.map((index) => roster[index]?.accountName ?? "").filter(Boolean);
+        const accountMatch = findBestKnownLabel(detectedRow.accountName, candidateNames, 0.55);
+        let rosterIndex = accountMatch
+          ? candidateIndexes.find((index) => normalize(roster[index]?.accountName ?? "") === normalize(accountMatch.value))
+          : undefined;
+        if (rosterIndex === undefined) rosterIndex = candidateIndexes.includes(detectedIndex) ? detectedIndex : candidateIndexes[0];
+        if (rosterIndex === undefined) return;
+        unused.delete(rosterIndex);
+        assignments.set(rosterIndex, { row: detectedRow, confidence: accountMatch ? Math.round(accountMatch.score * 100) : 0 });
+      });
+      return roster.map((identity, index) => {
+        const assignment = assignments.get(index);
+        if (!assignment) return identity;
+        return {
+          ...assignment.row,
+          userId: identity.userId,
+          accountName: identity.accountName,
+          sourceAccountName: assignment.row.accountName,
+          side: identity.side,
+          rowOrder: identity.rowOrder,
+          fieldConfidence: {
+            ...assignment.row.fieldConfidence,
+            accountName: assignment.confidence,
+          },
+        };
+      });
+    }).sort((a, b) => a.rowOrder - b.rowOrder);
   }
 
   function correctedChampionName(value: string, options: ChampionOption[]) {
@@ -265,14 +331,8 @@ export function ResultReviewModal({
     const reliableTopColor = mapping.topSideColorConfidence >= 45 ? mapping.topSideColor : "unknown";
     const topTeamId = reliableTopTeam === "teamA" ? match.teamAId : reliableTopTeam === "teamB" ? match.teamBId : null;
     const otherTeamId = topTeamId === match.teamAId ? match.teamBId : topTeamId === match.teamBId ? match.teamAId : null;
-    let nextBlueTeamId = side1TeamId;
-    let nextRedTeamId = side2TeamId;
-    if (topTeamId && otherTeamId && reliableTopColor !== "unknown") {
-      nextBlueTeamId = reliableTopColor === "blue" ? topTeamId : otherTeamId;
-      nextRedTeamId = reliableTopColor === "red" ? topTeamId : otherTeamId;
-      setSide1TeamId(nextBlueTeamId);
-      setSide2TeamId(nextRedTeamId);
-    }
+    const nextBlueTeamId = side1TeamId;
+    const nextRedTeamId = side2TeamId;
     const topRowsAreRed = reliableTopColor === "red" || (reliableTopColor === "unknown" && topTeamId === nextRedTeamId);
     const sideCorrected = topRowsAreRed ? swapResultSides(rows) : rows;
     const championCorrected: ResultPlayerStat[] = sideCorrected.map((correctedRow) => {
@@ -288,8 +348,7 @@ export function ResultReviewModal({
         userId: null,
       };
     }).sort((a, b) => a.rowOrder - b.rowOrder);
-    const mapped = remapAccounts(championCorrected, nextBlueTeamId, nextRedTeamId);
-    setPlayers(mapped);
+    setPlayers((current) => mergeAnalyzedStats(current, championCorrected));
     const reliableOutcome = topOutcomeConfidence >= 50 ? topOutcome : "unknown";
     setDetectedOutcome({ value: reliableOutcome, confidence: topOutcomeConfidence });
     let nextWinnerSide: 1 | 2 | null = null;
@@ -426,6 +485,8 @@ export function ResultReviewModal({
     if (missingGold) issues.push(`골드가 0인 선수 ${missingGold}명의 수치를 확인해 주세요.`);
     const invalidChampions = players.filter((player) => !championOptions.some((champion) => champion.name === player.championName.trim())).length;
     if (championOptions.length && invalidChampions) issues.push(`한국어 정식 챔피언명이 아닌 항목 ${invalidChampions}개를 수정해 주세요.`);
+    const linkedUsers = players.map((player) => player.userId).filter((id): id is string => Boolean(id));
+    if (new Set(linkedUsers).size !== linkedUsers.length) issues.push("같은 등록 선수가 두 칸 이상 선택되었습니다. 10명의 계정을 다시 확인해 주세요.");
     return issues;
   }, [championOptions, players, teamTotals]);
 
@@ -435,14 +496,16 @@ export function ResultReviewModal({
   }
 
   const championsValid = championOptions.length > 0 && players.every((player) => isKoreanChampionName(player.championName) && championOptions.some((champion) => champion.name === player.championName.trim()));
-  const valid = dataUrl && winnerSide && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && championsValid && players.every((player) => player.accountName.trim());
+  const linkedUserIds = players.map((player) => player.userId).filter((id): id is string => Boolean(id));
+  const uniqueLinkedPlayers = new Set(linkedUserIds).size === linkedUserIds.length;
+  const valid = dataUrl && winnerSide && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && championsValid && uniqueLinkedPlayers && players.every((player) => player.accountName.trim());
 
   function swapBlueRed() {
     const nextBlueTeamId = side2TeamId;
     const nextRedTeamId = side1TeamId;
     setSide1TeamId(nextBlueTeamId);
     setSide2TeamId(nextRedTeamId);
-    setPlayers((current) => remapAccounts(swapResultSides(current), nextBlueTeamId, nextRedTeamId));
+    setPlayers((current) => swapResultSides(current));
     setWinnerSide((current) => current === 1 ? 2 : current === 2 ? 1 : null);
     setImageMapping((current) => ({
       ...current,
@@ -515,9 +578,9 @@ export function ResultReviewModal({
             <div className="result-meta-fields">
               <label><span>세트</span><select value={setNo} onChange={(event) => setSetNo(Number(event.target.value))}>{Array.from({ length: match.bestOf ?? 1 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}세트</option>)}</select></label>
               <label><span>경기 시간</span><input value={duration} onChange={(event) => setDuration(event.target.value)} placeholder="28:07" /></label>
-              <label><span>블루팀</span><select value={side1TeamId} onChange={(event) => { const next = event.target.value; setSide1TeamId(next); setPlayers((current) => remapAccounts(current, next, side2TeamId)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
+              <label><span>블루팀</span><select value={side1TeamId} onChange={(event) => { const next = event.target.value; setSide1TeamId(next); setPlayers((current) => rebindRosterAccounts(current, next, side2TeamId)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
               <button type="button" className="side-swap" aria-label="블루팀과 레드팀 위치 바꾸기" onClick={swapBlueRed}>블루 ↔ 레드 위치 바꾸기</button>
-              <label><span>레드팀</span><select value={side2TeamId} onChange={(event) => { const next = event.target.value; setSide2TeamId(next); setPlayers((current) => remapAccounts(current, side1TeamId, next)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
+              <label><span>레드팀</span><select value={side2TeamId} onChange={(event) => { const next = event.target.value; setSide2TeamId(next); setPlayers((current) => rebindRosterAccounts(current, side1TeamId, next)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
             </div>
             <div className="image-side-detection">
               <span>AI 이미지 진영 판독</span>
@@ -543,8 +606,8 @@ export function ResultReviewModal({
                   {rows.map(({ player, index }) => <article className="result-player-card" key={player.rowOrder}>
                   <div className="result-player-identity">
                     <label><span>라인</span><select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select></label>
-                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, sourceAccountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}{account.accountStatus === "provisional" ? " · 가입 전" : ""}</option>)}</select></label>
-                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>이미지 계정명</span><input value={player.accountName} onChange={(event) => patchPlayerField(index, "accountName", event.target.value)} /></label>
+                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}{account.accountStatus === "provisional" ? " · 가입 전" : ""}</option>)}</select></label>
+                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>이미지 계정명</span><input value={player.sourceAccountName ?? ""} placeholder="AI 판독 참고값" onChange={(event) => patchSourceAccountName(index, event.target.value)} /></label>
                     <label className={lowConfidence(player, "championName") ? "low-confidence-field" : ""}><span>챔피언</span><input list="official-korean-champions" value={player.championName} onChange={(event) => patchPlayerField(index, "championName", event.target.value)} onBlur={(event) => { const corrected = correctedChampionName(event.target.value, championOptions); if (corrected.confidence) patchPlayerField(index, "championName", corrected.value); }} /></label>
                   </div>
                   <div className="result-player-metrics">{EDITABLE_NUMBER_FIELDS.map((field) => <label className={lowConfidence(player, field) ? "low-confidence-field" : ""} key={field}><span>{FIELD_LABELS[field]}</span><input type="number" min="0" value={player[field]} onChange={(event) => patchPlayerField(index, field, Number(event.target.value))} /></label>)}</div>

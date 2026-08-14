@@ -1129,3 +1129,57 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .match-cancel-button { grid-column: 1/-1; }
   .schedule-score .cancelled-score { font-size: 11px; white-space: normal; }
 }
+
+/* Permanent scrim betting, co-leaders, and mobile result safety. */
+.next-prediction-link {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 10px;
+  border: 1px solid rgba(96,165,250,.32);
+  background: rgba(96,165,250,.07);
+  color: #bfdbfe;
+  cursor: pointer;
+  font-weight: 800;
+}
+.open-picks > div { scroll-margin-top: 90px; }
+.open-picks > div.focused-pick { border-color: rgba(233,185,73,.45); background: rgba(233,185,73,.035); }
+.mobile-scrim-create-notice { margin: 0 0 14px; padding: 12px 14px; border: 1px solid rgba(96,165,250,.3); background: rgba(96,165,250,.06); color: #bfdbfe; font-size: 12px; line-height: 1.65; }
+
+.fun-stat-grid > article { min-height: 132px; padding: 14px; border: 1px solid var(--line); background: linear-gradient(145deg,rgba(233,185,73,.06),rgba(255,255,255,.015)); }
+.fun-stat-grid > article > span { display: block; }
+.fun-stat-grid > article > strong { display: block; margin: 5px 0 10px; }
+.co-leader-list { display: grid; gap: 5px; }
+.co-leader-list > button, .co-leader-list details button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 34px; padding: 6px 8px; border: 1px solid rgba(148,163,184,.22); background: #0a1422; color: #e7edf5; text-align: left; cursor: pointer; }
+.co-leader-list button span { color: #e7edf5; font-size: 11px; font-weight: 800; }
+.co-leader-list button small { color: var(--muted); font-size: 9px; }
+.co-leader-list details { display: grid; gap: 5px; }
+.co-leader-list summary { padding: 6px 2px; color: #93c5fd; font-size: 10px; cursor: pointer; }
+.co-leader-list details[open] summary { margin-bottom: 5px; }
+.lane-leader-panel > div:last-child > section { display: grid; align-content: start; gap: 6px; min-width: 0; padding: 12px; border: 1px solid var(--line); background: #0a1422; }
+.lane-leader-panel > div:last-child > section > b { color: var(--gold); font-size: 11px; }
+.lane-leader-panel > div:last-child > section > strong { color: #f8fafc; font-size: 18px; }
+
+.result-detail-modal { min-height: 0; }
+.result-detail-modal > header, .result-detail-modal > footer { flex: 0 0 auto; }
+.result-detail-body { flex: 1 1 auto; min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.detail-team-groups > section { overflow-x: auto; }
+
+@media (max-width: 800px) {
+  .desktop-only-scrim-create { display: none !important; }
+  .mobile-confirm { display: flex !important; align-items: center; justify-content: center; }
+  .stake-row > .accent-button:not(.prediction-submit) { display: none; }
+  .result-detail-modal { height: 100dvh; max-height: 100dvh; }
+  .result-detail-body { padding: 14px 14px calc(28px + env(safe-area-inset-bottom)); overflow-y: auto; }
+  .result-detail-modal > header { position: sticky; top: 0; z-index: 4; background: #081421; }
+  .result-detail-modal > footer { padding-bottom: calc(16px + env(safe-area-inset-bottom)); background: #081421; }
+  .scrim-summary-card { padding: 14px; }
+  .scrim-summary-card > div { grid-template-columns: 1fr; }
+  .result-original img { max-height: 58dvh; }
+  .detail-stat-head, .detail-stat-row { min-width: 560px; }
+}
+
+@media (max-width: 480px) {
+  .fun-stat-grid { grid-template-columns: 1fr; }
+  .result-detail-modal > header { padding: 15px 14px; }
+  .result-detail-body { padding-inline: 10px; }
+}

@@ -123,12 +123,12 @@ export type PlayerInsight = {
 };
 
 export type PlayerFunStats = {
-  mostGames: PlayerInsight | null;
-  bestWinRate: PlayerInsight | null;
-  bestKda: PlayerInsight | null;
-  longestStreak: PlayerInsight | null;
-  longestLosingStreak: PlayerInsight | null;
-  championExplorer: PlayerInsight | null;
+  mostGames: PlayerInsight[];
+  bestWinRate: PlayerInsight[];
+  bestKda: PlayerInsight[];
+  longestStreak: PlayerInsight[];
+  longestLosingStreak: PlayerInsight[];
+  championExplorer: PlayerInsight[];
   bestDuo: { playerA: PlayerInsight; playerB: PlayerInsight; games: number; wins: number; winRate: number } | null;
   comebackDuo: { playerA: PlayerInsight; playerB: PlayerInsight; games: number; wins: number; winRate: number } | null;
   topRivalry: { playerA: PlayerInsight; playerB: PlayerInsight; games: number } | null;
@@ -355,17 +355,26 @@ function buildFunStats(players: PlayerInsight[]): PlayerFunStats {
   const duoMinimumGames = Math.min(5, Math.max(1, ...pairRows.map((pair) => pair.games)));
   const bestDuoRaw = pairRows.filter((pair) => pair.games >= duoMinimumGames).sort((a, b) => b.wins / b.games - a.wins / a.games || b.games - a.games)[0] ?? null;
   const comebackDuoRaw = pairRows.filter((pair) => pair.games >= duoMinimumGames).sort((a, b) => a.wins / a.games - b.wins / b.games || b.games - a.games)[0] ?? null;
+  const accountName = (player: PlayerInsight) => player.accounts.find((account) => account.riotGameName)?.riotGameName ?? player.displayName;
+  const accountOrder = (a: PlayerInsight, b: PlayerInsight) => accountName(a).localeCompare(accountName(b), "ko");
+  const tiedLeaders = (rows: PlayerInsight[], score: (player: PlayerInsight) => number) => {
+    const best = Math.max(...rows.map(score));
+    return Number.isFinite(best) ? rows.filter((row) => score(row) === best).sort(accountOrder) : [];
+  };
   const laneLeaders = ["TOP", "JGL", "MID", "ADC", "SUP"].flatMap((lane) => {
     const candidates = players.flatMap((player) => player.lanes.filter((record) => record.name === lane && record.games >= 5).map((record) => ({ lane, player, games: record.games, winRate: record.winRate })));
-    return candidates.sort((a, b) => b.winRate - a.winRate || b.games - a.games).slice(0, 1);
+    const best = Math.max(...candidates.map((candidate) => candidate.winRate));
+    return Number.isFinite(best)
+      ? candidates.filter((candidate) => candidate.winRate === best).sort((a, b) => accountOrder(a.player, b.player))
+      : [];
   });
   return {
-    mostGames: [...active].sort((a, b) => b.games - a.games || b.wins - a.wins)[0] ?? null,
-    bestWinRate: [...eligibleWinRate].sort((a, b) => b.winRate - a.winRate || b.games - a.games)[0] ?? null,
-    bestKda: [...eligibleKda].sort((a, b) => b.kda - a.kda || b.analyzedGames - a.analyzedGames)[0] ?? null,
-    longestStreak: [...active].sort((a, b) => b.bestWinStreak - a.bestWinStreak || b.games - a.games)[0] ?? null,
-    longestLosingStreak: [...active].sort((a, b) => b.bestLossStreak - a.bestLossStreak || b.games - a.games)[0] ?? null,
-    championExplorer: [...analyzed].sort((a, b) => b.champions.length - a.champions.length || b.analyzedGames - a.analyzedGames)[0] ?? null,
+    mostGames: tiedLeaders(active, (player) => player.games),
+    bestWinRate: tiedLeaders(eligibleWinRate, (player) => player.winRate),
+    bestKda: tiedLeaders(eligibleKda, (player) => Number(player.kda.toFixed(2))),
+    longestStreak: tiedLeaders(active, (player) => player.bestWinStreak),
+    longestLosingStreak: tiedLeaders(active, (player) => player.bestLossStreak),
+    championExplorer: tiedLeaders(analyzed, (player) => player.champions.length),
     bestDuo: bestDuoRaw ? { ...bestDuoRaw, winRate: percent(bestDuoRaw.wins, bestDuoRaw.games) } : null,
     comebackDuo: comebackDuoRaw ? { ...comebackDuoRaw, winRate: percent(comebackDuoRaw.wins, comebackDuoRaw.games) } : null,
     topRivalry: [...rivals.values()].sort((a, b) => b.games - a.games)[0] ?? null,

@@ -335,10 +335,11 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   assert.equal(data.tournament.competitionKind, "scrim_season");
   const match = data.matches.find((item) => item.id === matchCreated.matchId);
   assert.equal(match.phase, "scrim");
-  assert.equal(match.bettingStatus, "scheduled");
+  assert.equal(match.bettingStatus, "open");
+  assert.ok(match.bettingOpenedAt);
   assert.equal(data.teams.find((team) => team.id === match.teamAId).players.length, 5);
   assert.equal(data.teams.find((team) => team.id === match.teamBId).players.length, 5);
-  assert.match(matchCreated.sharePath, new RegExp(`/scrim/${created.tournamentId}/bet/`));
+  assert.equal(matchCreated.sharePath, `/scrim/${created.tournamentId}/bet?match=${matchCreated.matchId}`);
 
   sqlite.prepare("INSERT INTO riot_accounts (id, user_id, game_name, tagline, game_name_normalized, tagline_normalized, is_primary) VALUES (?, ?, ?, ?, ?, ?, 0)")
     .run("riot_player1_secondary", "player1", "player1부계", "KR2", "player1부계", "kr2");
@@ -352,11 +353,6 @@ test("scrim season supports ten registered players, free 100P, single picks, and
     /본계정만/,
   );
 
-  await assert.rejects(
-    () => tournament.createBet(created.tournamentId, match.id, match.teamAId, 100, actors.get("player1")),
-    /배팅이 열려 있는 내전 경기가 아닙니다/,
-  );
-  await tournament.setScrimBetting(match.id, "open", actors.get("admin"));
   await tournament.createBet(created.tournamentId, match.id, match.teamAId, 300, actors.get("player1"));
   sqlite.prepare("UPDATE tournament_entries SET points_balance = 0 WHERE tournament_id = ? AND user_id = ?").run(created.tournamentId, "player2");
   await tournament.createBet(created.tournamentId, match.id, match.teamBId, 100, actors.get("player2"));
@@ -735,7 +731,7 @@ test("2026 lolmen cleanup resets points, removes only two bad uploads, and prese
 test("QA scrim sandbox is isolated, opens sample betting, settles, and resets safely", async () => {
   await assert.rejects(() => tournament.createQaScrimSandbox(actors.get("player1")), /관리자만/);
   const created = await tournament.createQaScrimSandbox(actors.get("admin"));
-  assert.match(created.sharePath, new RegExp(`/scrim/${created.tournamentId}/bet/${created.matchId}`));
+  assert.equal(created.sharePath, `/scrim/${created.tournamentId}/bet?match=${created.matchId}`);
   assert.equal(created.virtualPlayers, 20);
   assert.equal(created.virtualBets, 10);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM qa_sandboxes WHERE tournament_id = ?").get(created.tournamentId).count, 1);
@@ -794,13 +790,17 @@ test("scrim members can run a match while operators can rollback, delete, and re
   }, actors.get("player11"));
   const context = await tournament.getMatchImageAnalysisContext(communityMatch.matchId, actors.get("player11"));
   assert.equal(context.teamA.roster.length, 5);
-  await tournament.setScrimBetting(communityMatch.matchId, "open", actors.get("player11"));
   let data = await dashboard(season.tournamentId);
   const match = data.matches.find((item) => item.id === communityMatch.matchId);
+  assert.equal(match.bettingStatus, "open");
+  assert.equal(communityMatch.sharePath, `/scrim/${season.tournamentId}/bet?match=${communityMatch.matchId}`);
   await tournament.createBet(season.tournamentId, match.id, match.teamAId, 300, actors.get("player1"));
   await tournament.setScrimBetting(communityMatch.matchId, "closed", actors.get("player11"));
   await tournament.setMatchWinner(communityMatch.matchId, match.teamAId, actors.get("player11"));
   assert.equal(sqlite.prepare("SELECT status FROM bets WHERE match_id = ?").get(communityMatch.matchId).status, "won");
+
+  await assert.rejects(() => tournament.rollbackScrimMatch(communityMatch.matchId, actors.get("player11")), /운영 권한/);
+  await assert.rejects(() => tournament.deleteScrimMatch(communityMatch.matchId, actors.get("player11")), /운영 권한/);
 
   await tournament.rollbackScrimMatch(communityMatch.matchId, actors.get("admin"));
   data = await dashboard(season.tournamentId);

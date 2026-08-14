@@ -40,6 +40,7 @@ test("player insights combine scrim results, OCR stats, streaks, and relationshi
   assert.deepEqual(player.teammates.map((row) => [row.userId, row.games, row.wins]), [["user-2", 1, 1], ["user-3", 1, 0]]);
   assert.deepEqual(player.opponents.map((row) => [row.userId, row.games, row.wins]), [["user-4", 2, 1], ["user-3", 1, 1], ["user-2", 1, 0]]);
   assert.equal(result.lastUpdatedAt, "2026-08-11T11:05:00.000Z");
+  assert.deepEqual(result.funStats.mostGames.map((row) => row.accounts[0].riotGameName), ["Hide on bush", "Player2", "Player3", "Player4"]);
 });
 
 test("player insights calculate streak badges and teammate impact", () => {
@@ -58,6 +59,28 @@ test("player insights calculate streak badges and teammate impact", () => {
   const player = result.playerMap.get("user-1");
   assert.equal(player.bestWinStreak, 5);
   assert.deepEqual(player.badges.map((badge) => badge.label), ["🔥 3연승", "🔥 5연승"]);
+});
+
+test("player insight leaders keep every tie in Korean account order", () => {
+  const tiedMatches = Array.from({ length: 5 }, (_, index) => ({
+    id: `tie-${index}`,
+    phase: "scrim",
+    roundLabel: `${index + 1}차 내전`,
+    scheduledAt: `2026-09-${String(index + 1).padStart(2, "0")}T10:00:00.000Z`,
+    completedAt: `2026-09-${String(index + 1).padStart(2, "0")}T11:00:00.000Z`,
+    status: "completed",
+    teamAId: "blue-1",
+    teamBId: "red-1",
+    winnerId: "blue-1",
+  }));
+  const tiedStats = tiedMatches.flatMap((match) => [
+    { matchId: match.id, userId: "user-1", championName: "아리", lane: "MID", kills: 3, deaths: 1, assists: 5, gold: 10000, won: true },
+    { matchId: match.id, userId: "user-2", championName: "오리아나", lane: "MID", kills: 3, deaths: 1, assists: 5, gold: 10000, won: true },
+  ]);
+  const result = buildPlayerInsights({ accounts, teams, matches: tiedMatches, stats: tiedStats, reviewedAt: [] });
+  const midLeaders = result.funStats.laneLeaders.filter((row) => row.lane === "MID");
+  assert.deepEqual(midLeaders.map((row) => row.player.accounts[0].riotGameName), ["Hide on bush", "Player2"]);
+  assert.equal(midLeaders.every((row) => row.winRate === 100), true);
 });
 
 test("player insights keep tournament matches separate and count BO sets as one match", () => {

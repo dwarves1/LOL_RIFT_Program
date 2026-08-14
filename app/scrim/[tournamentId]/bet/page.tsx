@@ -3,8 +3,9 @@ import { TournamentApp } from "../../../tournament-app";
 
 export const dynamic = "force-dynamic";
 
-export default async function ScrimBetPage({ params }: { params: Promise<{ tournamentId: string }> }) {
+export default async function ScrimBetPage({ params, searchParams }: { params: Promise<{ tournamentId: string }>; searchParams: Promise<{ match?: string }> }) {
   const { tournamentId } = await params;
-  const path = `/scrim/${encodeURIComponent(tournamentId)}/bet`;
-  return <TournamentApp signInPath={googleSignInPath(path)} initialTournamentId={tournamentId} initialTab="points" />;
+  const { match } = await searchParams;
+  const path = `/scrim/${encodeURIComponent(tournamentId)}/bet${match ? `?match=${encodeURIComponent(match)}` : ""}`;
+  return <TournamentApp signInPath={googleSignInPath(path)} initialTournamentId={tournamentId} initialMatchId={match ?? null} initialTab="points" />;
 }
