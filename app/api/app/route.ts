@@ -10,6 +10,8 @@ import {
   createQaScrimSandbox,
   resetQaScrimSandboxes,
   resetLolmen2026TestData,
+  runPendingLolmen2026DeploymentCleanup,
+  markLolmen2026ResultAssetsDeleted,
   createTiebreakerMatch,
   getDashboard,
   getMatchImageAnalysisContext,
@@ -70,6 +72,15 @@ function errorResponse(error: unknown) {
 
 export async function GET(request: Request) {
   try {
+    try {
+      const cleanup = await runPendingLolmen2026DeploymentCleanup();
+      if (cleanup) {
+        for (const objectKey of cleanup.imageObjectKeys) await env.RESULT_IMAGES.delete(objectKey);
+        await markLolmen2026ResultAssetsDeleted(cleanup.tournamentId);
+      }
+    } catch (cleanupError) {
+      console.error("Pending 2026 lolmen cleanup will be retried", cleanupError instanceof Error ? cleanupError.message : "unknown error");
+    }
     const url = new URL(request.url);
     const user = await getRequestUser(request);
     const data = await getDashboard(url.searchParams.get("tournament"), user);

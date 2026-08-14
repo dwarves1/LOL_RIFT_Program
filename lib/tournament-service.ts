@@ -1170,6 +1170,7 @@ async function createAutomaticBackup(tournamentId: string, actor: RequestUser, r
 }
 
 const LOLMEN_2026_RESET_ACTION = "lolmen_2026_test_data_reset";
+const LOLMEN_2026_ASSET_CLEANUP_ACTION = "lolmen_2026_result_assets_deleted";
 const LOLMEN_2026_ERRONEOUS_RESULT_IMAGE_IDS = [
   "result_image_537ab99d-3ec5-47e6-9ae1-2959074726b4",
   "result_image_6fbd4ca0-4fe1-4e0d-89a2-fe9d3aa7784d",
@@ -1309,6 +1310,54 @@ export async function resetLolmen2026TestData(tournamentId: string, actor: Reque
     resetEntries: entryRows.length,
     demotedTeamRepresentatives: teamRepresentativeRows.length,
   };
+}
+
+function lolmen2026MaintenanceActor(): RequestUser {
+  return {
+    id: "system_lolmen_2026_cleanup",
+    email: "system@lolrift.site",
+    displayName: "LOL RIFT 시스템",
+    authDisplayName: "LOL RIFT 시스템",
+    realName: null,
+    riotGameName: null,
+    riotTagline: null,
+    profileComplete: true,
+    role: "admin",
+    accountStatus: "active",
+    pointsBalance: 0,
+    isLocalDemo: false,
+  };
+}
+
+/** Runs the explicitly requested one-time production cleanup on first request. */
+export async function runPendingLolmen2026DeploymentCleanup() {
+  await ensureSchema();
+  const db = getDb();
+  const tournamentRows = await db.select().from(tournaments);
+  const target = tournamentRows.find((tournament) => (
+    tournament.competitionKind === "tournament"
+    && tournament.name.trim().normalize("NFKC") === "2026 롤멘 대회"
+  ));
+  if (!target) return null;
+  const [assetCleanupComplete] = await db.select({ id: auditLogs.id }).from(auditLogs).where(and(
+    eq(auditLogs.tournamentId, target.id),
+    eq(auditLogs.action, LOLMEN_2026_ASSET_CLEANUP_ACTION),
+  )).limit(1);
+  if (assetCleanupComplete) return null;
+  const reset = await resetLolmen2026TestData(target.id, lolmen2026MaintenanceActor());
+  return { tournamentId: target.id, imageObjectKeys: reset.imageObjectKeys };
+}
+
+export async function markLolmen2026ResultAssetsDeleted(tournamentId: string) {
+  const actor = lolmen2026MaintenanceActor();
+  const tournament = await requireLolmen2026Tournament(tournamentId, actor, true);
+  const [completed] = await getDb().select({ id: auditLogs.id }).from(auditLogs).where(and(
+    eq(auditLogs.tournamentId, tournament.id),
+    eq(auditLogs.action, LOLMEN_2026_ASSET_CLEANUP_ACTION),
+  )).limit(1);
+  if (!completed) {
+    await audit(actor, LOLMEN_2026_ASSET_CLEANUP_ACTION, "tournament", tournament.id, tournament.id, null, { completed: true });
+  }
 }
 
 export async function getTournamentBackupPayload(backupId: string, actor: RequestUser) {

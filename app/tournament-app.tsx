@@ -288,6 +288,7 @@ const AUDIT_LABEL: Record<string, string> = {
   qa_scrim_sandbox_created: "QA 내전 시나리오를 생성했습니다",
   qa_scrim_sandboxes_reset: "QA 내전 시나리오를 초기화했습니다",
   lolmen_2026_test_data_reset: "2026 롤멘 테스트 포인트와 잘못된 결과 이미지를 초기화했습니다",
+  lolmen_2026_result_assets_deleted: "잘못된 결과 이미지 파일 정리를 완료했습니다",
 };
 
 const OPERATION_LABELS: Record<string, string> = {

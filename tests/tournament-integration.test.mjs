@@ -545,6 +545,11 @@ test("2026 롤멘 pre-registered players keep stats when Google signs up and ros
   data = await tournament.getDashboard(created.tournamentId, linkedActor);
   assert.equal(data.preRegisteredPlayers.length, 0);
   assert.equal(data.viewer.pointsBalance, 1000);
+
+  const pendingCleanup = await tournament.runPendingLolmen2026DeploymentCleanup();
+  assert.equal(pendingCleanup.tournamentId, created.tournamentId);
+  await tournament.markLolmen2026ResultAssetsDeleted(created.tournamentId);
+  assert.equal(await tournament.runPendingLolmen2026DeploymentCleanup(), null);
 });
 
 test("2026 lolmen cleanup resets points, removes only two bad uploads, and preserves match results", async () => {
