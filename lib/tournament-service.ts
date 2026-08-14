@@ -31,6 +31,7 @@ import {
   resultRevisions,
   betSettlements,
   tournamentBackups,
+  qaSandboxes,
 } from "../db/schema";
 import { currentSessionUserId, type GoogleIdentity } from "./google-auth";
 
@@ -491,8 +492,11 @@ async function isTeamLeader(actor: RequestUser, teamIds: Array<string | null>) {
 }
 
 async function canManageMatch(actor: RequestUser, match: typeof matches.$inferSelect) {
-  return (isStaff(actor) && await hasTournamentAccess(actor, match.tournamentId))
-    || isTeamLeader(actor, [match.teamAId, match.teamBId]);
+  if (!(await hasTournamentAccess(actor, match.tournamentId))) return false;
+  // A scrim is a community-run session: every signed-in season participant can
+  // register the result. Competition matches keep the captain/staff boundary.
+  if (match.phase === "scrim") return true;
+  return isStaff(actor) || isTeamLeader(actor, [match.teamAId, match.teamBId]);
 }
 
 export async function getMatchImageAnalysisContext(matchId: string, actor: RequestUser) {
@@ -970,7 +974,6 @@ export async function createScrimSeason(input: CreateScrimSeasonInput, actor: Re
 }
 
 export async function createScrimMatch(input: CreateScrimMatchInput, actor: RequestUser) {
-  await requireTournamentOperator(actor, input.tournamentId);
   const date = new Date(input.scheduledAt);
   if (Number.isNaN(date.getTime())) throw new Error("경기 일시를 확인해 주세요.");
   if (input.blueAccountIds.length !== 5 || input.redAccountIds.length !== 5) {
@@ -984,6 +987,9 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
   const db = getDb();
   const [tournament] = await db.select().from(tournaments).where(eq(tournaments.id, input.tournamentId)).limit(1);
   if (!tournament || tournament.competitionKind !== "scrim_season") throw new Error("내전 시즌을 찾을 수 없습니다.");
+  if (!(await hasTournamentAccess(actor, tournament.id))) {
+    throw new Error("시즌 코드를 입력해 참가한 회원만 내전 경기를 만들 수 있습니다.");
+  }
   const accounts = await db.select().from(riotAccounts).where(inArray(riotAccounts.id, accountIds));
   if (accounts.length !== 10 || new Set(accounts.map((account) => account.userId)).size !== 10) {
     throw new Error("한 회원은 한 경기에서 하나의 롤 계정으로만 참가할 수 있습니다.");
@@ -1073,6 +1079,189 @@ function testPlayerDefinition(scope: "league" | "scrim", index: number) {
   };
 }
 
+const QA_SCRIM_USER_PREFIX = "qa_scrim_player_";
+
+function qaScrimPlayerDefinition(index: number) {
+  const number = String(index).padStart(2, "0");
+  const id = `${QA_SCRIM_USER_PREFIX}${number}`;
+  const gameName = `QA내전${number}`;
+  const tagline = `TEST${number}`;
+  return {
+    id,
+    accountId: `riot_${id}`,
+    email: `qa-scrim-${number}@lolrift.invalid`,
+    displayName: `${gameName}#${tagline}(QA 테스트 선수)`,
+    realName: `QA 테스트 선수 ${number}`,
+    gameName,
+    tagline,
+  };
+}
+
+function qaScrimPlayerActor(player: ReturnType<typeof qaScrimPlayerDefinition>): RequestUser {
+  return {
+    id: player.id,
+    email: player.email,
+    displayName: player.displayName,
+    authDisplayName: "QA 테스트 선수",
+    realName: player.realName,
+    riotGameName: player.gameName,
+    riotTagline: player.tagline,
+    profileComplete: true,
+    role: "viewer",
+    pointsBalance: 0,
+    isLocalDemo: false,
+  };
+}
+
+/**
+ * Creates an isolated, ready-to-run scrim scenario for operational QA. The
+ * virtual players have an impossible .invalid email domain and are registered
+ * only in this season, so real users and their tournament wallets are never
+ * used to exercise the flow.
+ */
+export async function createQaScrimSandbox(actor: RequestUser) {
+  if (actor.role !== "admin" && !actor.isLocalDemo) {
+    throw new Error("관리자만 QA 내전 시나리오를 만들 수 있습니다.");
+  }
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const created = await createScrimSeason({
+    name: `QA 내전 흐름 테스트 · ${new Intl.DateTimeFormat("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(now)}`,
+    startAt: nowIso,
+    starterPoints: 1_000,
+  }, actor);
+  const db = getDb();
+  const testPlayers = Array.from({ length: 20 }, (_, index) => qaScrimPlayerDefinition(index + 1));
+  const statements = testPlayers.flatMap((player) => [
+    db.insert(users).values({
+      id: player.id,
+      email: player.email,
+      displayName: player.displayName,
+      authDisplayName: "QA 테스트 선수",
+      realName: player.realName,
+      riotGameName: player.gameName,
+      riotTagline: player.tagline,
+      riotGameNameNormalized: normalizeIdentityPart(player.gameName),
+      riotTaglineNormalized: normalizeIdentityPart(player.tagline),
+      profileCompletedAt: nowIso,
+      profileUpdatedAt: nowIso,
+      role: "viewer",
+      pointsBalance: 0,
+    }).onConflictDoNothing(),
+    db.insert(riotAccounts).values({
+      id: player.accountId,
+      userId: player.id,
+      gameName: player.gameName,
+      tagline: player.tagline,
+      gameNameNormalized: normalizeIdentityPart(player.gameName),
+      taglineNormalized: normalizeIdentityPart(player.tagline),
+      isPrimary: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    }).onConflictDoNothing(),
+    db.insert(tournamentMembers).values({
+      tournamentId: created.tournamentId,
+      userId: player.id,
+      role: "viewer",
+    }).onConflictDoNothing(),
+  ]);
+  await db.batch(statements as never);
+
+  const match = await createScrimMatch({
+    tournamentId: created.tournamentId,
+    scheduledAt: nowIso,
+    blueAccountIds: testPlayers.slice(0, 5).map((player) => player.accountId),
+    redAccountIds: testPlayers.slice(5, 10).map((player) => player.accountId),
+  }, actor);
+  await setScrimBetting(match.matchId, "open", actor);
+
+  const [matchRow] = await db.select().from(matches).where(eq(matches.id, match.matchId)).limit(1);
+  if (!matchRow?.teamAId || !matchRow.teamBId) throw new Error("QA 내전 팀 구성을 준비하지 못했습니다.");
+  const sampleStakes = [100, 180, 300, 120, 450, 250, 100, 320, 150, 500];
+  for (const [index, player] of testPlayers.slice(10).entries()) {
+    await createBet(
+      created.tournamentId,
+      match.matchId,
+      index < 6 ? matchRow.teamAId : matchRow.teamBId,
+      sampleStakes[index],
+      qaScrimPlayerActor(player),
+    );
+  }
+  await db.insert(qaSandboxes).values({ tournamentId: created.tournamentId, createdBy: actor.id });
+  await audit(actor, "qa_scrim_sandbox_created", "qa_sandbox", created.tournamentId, created.tournamentId, null, {
+    matchId: match.matchId,
+    virtualPlayers: testPlayers.length,
+    virtualBets: sampleStakes.length,
+  });
+  return {
+    tournamentId: created.tournamentId,
+    matchId: match.matchId,
+    accessCode: created.accessCode,
+    sharePath: match.sharePath,
+    virtualPlayers: testPlayers.length,
+    virtualBets: sampleStakes.length,
+  };
+}
+
+export async function resetQaScrimSandboxes(actor: RequestUser) {
+  if (actor.role !== "admin" && !actor.isLocalDemo) {
+    throw new Error("관리자만 QA 내전 시나리오를 초기화할 수 있습니다.");
+  }
+  const db = getDb();
+  const sandboxes = await db.select().from(qaSandboxes);
+  const imageObjectKeys = new Set<string>();
+
+  for (const sandbox of sandboxes) {
+    const matchRows = await db.select({ id: matches.id }).from(matches).where(eq(matches.tournamentId, sandbox.tournamentId));
+    const teamRows = await db.select({ id: teams.id }).from(teams).where(eq(teams.tournamentId, sandbox.tournamentId));
+    const matchIds = matchRows.map((row) => row.id);
+    const teamIds = teamRows.map((row) => row.id);
+    if (matchIds.length) {
+      const images = await db.select({ objectKey: matchResultImages.objectKey }).from(matchResultImages).where(inArray(matchResultImages.matchId, matchIds));
+      const revisions = await db.select({ objectKey: resultRevisions.objectKey }).from(resultRevisions).where(inArray(resultRevisions.matchId, matchIds));
+      for (const image of [...images, ...revisions]) imageObjectKeys.add(image.objectKey);
+      await db.delete(resultRevisions).where(inArray(resultRevisions.matchId, matchIds));
+      await db.delete(matchResultImages).where(inArray(matchResultImages.matchId, matchIds));
+      await db.delete(matchTeamStats).where(inArray(matchTeamStats.matchId, matchIds));
+      await db.delete(playerMatchStats).where(inArray(playerMatchStats.matchId, matchIds));
+      await db.delete(matchGames).where(inArray(matchGames.matchId, matchIds));
+      await db.delete(bets).where(inArray(bets.matchId, matchIds));
+      await db.delete(betSettlements).where(inArray(betSettlements.matchId, matchIds));
+      await db.delete(draftSessions).where(inArray(draftSessions.matchId, matchIds));
+    }
+    if (teamIds.length) await db.delete(players).where(inArray(players.teamId, teamIds));
+    await db.delete(pointLedger).where(eq(pointLedger.tournamentId, sandbox.tournamentId));
+    await db.delete(tournamentBackups).where(eq(tournamentBackups.tournamentId, sandbox.tournamentId));
+    await db.delete(draftSessions).where(eq(draftSessions.tournamentId, sandbox.tournamentId));
+    await db.delete(auditLogs).where(eq(auditLogs.tournamentId, sandbox.tournamentId));
+    await db.delete(tournamentEntries).where(eq(tournamentEntries.tournamentId, sandbox.tournamentId));
+    await db.delete(tournamentMembers).where(eq(tournamentMembers.tournamentId, sandbox.tournamentId));
+    await db.delete(teams).where(eq(teams.tournamentId, sandbox.tournamentId));
+    await db.delete(matches).where(eq(matches.tournamentId, sandbox.tournamentId));
+    await db.delete(tournaments).where(eq(tournaments.id, sandbox.tournamentId));
+    await db.delete(qaSandboxes).where(eq(qaSandboxes.tournamentId, sandbox.tournamentId));
+  }
+
+  const qaUsers = await db.select({ id: users.id }).from(users).where(sql`substr(${users.id}, 1, ${QA_SCRIM_USER_PREFIX.length}) = ${QA_SCRIM_USER_PREFIX}`);
+  const qaUserIds = qaUsers.map((user) => user.id);
+  if (qaUserIds.length) {
+    await db.delete(authIdentities).where(inArray(authIdentities.userId, qaUserIds));
+    await db.delete(riotIdHistory).where(inArray(riotIdHistory.userId, qaUserIds));
+    await db.delete(riotAccounts).where(inArray(riotAccounts.userId, qaUserIds));
+    await db.delete(users).where(inArray(users.id, qaUserIds));
+  }
+  await audit(actor, "qa_scrim_sandboxes_reset", "qa_sandbox", "all", null, null, {
+    deletedTournaments: sandboxes.length,
+    deletedVirtualPlayers: qaUserIds.length,
+    deletedImages: imageObjectKeys.size,
+  });
+  return {
+    deletedTournaments: sandboxes.length,
+    deletedVirtualPlayers: qaUserIds.length,
+    imageObjectKeys: [...imageObjectKeys],
+  };
+}
+
 export async function seedTestPlayers(actor: RequestUser) {
   if (actor.role !== "admin" && !actor.isLocalDemo) throw new Error("관리자만 테스트 선수를 생성할 수 있습니다.");
   const db = getDb();
@@ -1143,7 +1332,9 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
-  await requireTournamentOperator(actor, match.tournamentId);
+  if (!(await hasTournamentAccess(actor, match.tournamentId))) {
+    throw new Error("시즌 코드를 입력해 참가한 회원만 내전 배팅을 관리할 수 있습니다.");
+  }
   if (match.status !== "scheduled" || !match.teamAId || !match.teamBId) throw new Error("진행 전인 내전 경기만 배팅 상태를 변경할 수 있습니다.");
   if (nextStatus === "open" && match.bettingStatus === "open") return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
   if (nextStatus === "closed" && match.bettingStatus !== "open") throw new Error("현재 배팅이 진행 중인 경기가 아닙니다.");
@@ -1169,6 +1360,75 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
     bettingStatus: nextStatus,
   });
   return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet/${encodeURIComponent(match.id)}` };
+}
+
+export async function rollbackScrimMatch(matchId: string, actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  if (!match.teamAId || !match.teamBId) throw new Error("대진 팀 정보가 없는 내전 경기입니다.");
+
+  await createAutomaticBackup(match.tournamentId, actor, "내전 경기 롤백 전 자동 백업");
+  const [images, revisions] = await Promise.all([
+    db.select({ objectKey: matchResultImages.objectKey }).from(matchResultImages).where(eq(matchResultImages.matchId, match.id)),
+    db.select({ objectKey: resultRevisions.objectKey }).from(resultRevisions).where(eq(resultRevisions.matchId, match.id)),
+  ]);
+  await rollbackBets(match.id, true, actor);
+  await db.batch([
+    db.delete(resultRevisions).where(eq(resultRevisions.matchId, match.id)),
+    db.delete(matchResultImages).where(eq(matchResultImages.matchId, match.id)),
+    db.delete(matchTeamStats).where(eq(matchTeamStats.matchId, match.id)),
+    db.delete(playerMatchStats).where(eq(playerMatchStats.matchId, match.id)),
+    db.delete(matchGames).where(eq(matchGames.matchId, match.id)),
+    db.update(matches).set({
+      status: "scheduled",
+      winnerId: null,
+      loserId: null,
+      seriesScoreA: 0,
+      seriesScoreB: 0,
+      completedAt: null,
+      bettingStatus: "scheduled",
+      bettingOpenedAt: null,
+      bettingClosedAt: null,
+      predictionCountAClosed: null,
+      predictionCountBClosed: null,
+      settlementStatus: "not_required",
+      settlementUpdatedAt: new Date().toISOString(),
+    }).where(eq(matches.id, match.id)),
+  ] as never);
+  await audit(actor, "scrim_match_rolled_back", "match", match.id, match.tournamentId, {
+    status: match.status,
+    bettingStatus: match.bettingStatus,
+    winnerId: match.winnerId,
+  }, {
+    status: "scheduled",
+    bettingStatus: "scheduled",
+    resultImagesDeleted: images.length,
+  });
+  return { imageObjectKeys: [...new Set([...images, ...revisions].map((item) => item.objectKey))] };
+}
+
+export async function deleteScrimMatch(matchId: string, actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  const teamIds = [match.teamAId, match.teamBId].filter((id): id is string => Boolean(id));
+  const rollback = await rollbackScrimMatch(match.id, actor);
+  await db.batch([
+    db.delete(bets).where(eq(bets.matchId, match.id)),
+    db.delete(betSettlements).where(eq(betSettlements.matchId, match.id)),
+    db.delete(draftSessions).where(eq(draftSessions.matchId, match.id)),
+    ...(teamIds.length ? [db.delete(players).where(inArray(players.teamId, teamIds))] : []),
+    db.delete(teams).where(eq(teams.matchId, match.id)),
+    db.delete(matches).where(eq(matches.id, match.id)),
+  ] as never);
+  await audit(actor, "scrim_match_deleted", "match", match.id, match.tournamentId, null, {
+    teamsDeleted: teamIds.length,
+    betsRemoved: true,
+  });
+  return rollback;
 }
 
 async function createTournamentInternal(
@@ -1782,8 +2042,12 @@ export async function setMatchWinner(
   if (match.phase === "scrim" && match.bettingStatus === "open") {
     throw new Error("배팅을 종료한 뒤 내전 결과를 확정해 주세요.");
   }
-  const maySetWinner = (isStaff(actor) && await hasTournamentAccess(actor, match.tournamentId))
-    || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]));
+  const hasAccess = await hasTournamentAccess(actor, match.tournamentId);
+  const maySetWinner = hasAccess && (
+    match.phase === "scrim"
+      || isStaff(actor)
+      || (fromDetailedResult && await isTeamLeader(actor, [match.teamAId, match.teamBId]))
+  );
   if (!maySetWinner) throw new Error("이 경기의 결과를 등록할 권한이 없습니다.");
   if (!match.teamAId || !match.teamBId || ![match.teamAId, match.teamBId].includes(winnerId)) {
     throw new Error("대진에 포함된 팀을 선택해 주세요.");
@@ -1895,6 +2159,9 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId)).limit(1);
   if (!match || !match.teamAId || !match.teamBId) throw new Error("결과를 등록할 경기를 찾을 수 없습니다.");
+  if (match.phase === "scrim" && match.bettingStatus === "open") {
+    throw new Error("배팅을 종료한 뒤 내전 결과 이미지를 등록해 주세요.");
+  }
   if (!(await canManageMatch(actor, match))) throw new Error("이 경기의 결과 이미지를 등록할 권한이 없습니다.");
   const setNo = Math.min(match.bestOf, Math.max(1, Math.floor(input.setNo ?? 1)));
   const matchTeams = new Set([match.teamAId, match.teamBId]);
@@ -2353,6 +2620,32 @@ export async function setUserRole(targetUserId: string, role: UserRole, actor: R
   await audit(actor, "user_role_changed", "user", targetUserId, null, { role: target.role }, { role });
 }
 
+export async function removeTournamentMember(tournamentId: string, targetUserId: string, actor: RequestUser) {
+  await requireTournamentOperator(actor, tournamentId);
+  const db = getDb();
+  const [tournament, membership] = await Promise.all([
+    db.select().from(tournaments).where(eq(tournaments.id, tournamentId)).limit(1).then((rows) => rows[0] ?? null),
+    db.select().from(tournamentMembers).where(and(eq(tournamentMembers.tournamentId, tournamentId), eq(tournamentMembers.userId, targetUserId))).limit(1).then((rows) => rows[0] ?? null),
+  ]);
+  if (!tournament || !membership) throw new Error("대회 참가자를 찾을 수 없습니다.");
+  if (membership.role === "owner" || targetUserId === tournament.createdBy) {
+    throw new Error("대회를 만든 소유자는 강퇴할 수 없습니다.");
+  }
+  if (actor.role !== "admin" && membership.role === "operator") {
+    throw new Error("운영자는 다른 운영자를 강퇴할 수 없습니다. 관리자가 처리해 주세요.");
+  }
+  const [target] = await db.select({ displayName: users.displayName }).from(users).where(eq(users.id, targetUserId)).limit(1);
+  await db.delete(tournamentMembers).where(and(
+    eq(tournamentMembers.tournamentId, tournamentId),
+    eq(tournamentMembers.userId, targetUserId),
+  ));
+  await audit(actor, "tournament_member_removed", "tournament_member", targetUserId, tournamentId, {
+    role: membership.role,
+    displayName: target?.displayName ?? targetUserId,
+  }, null);
+  return { displayName: target?.displayName ?? targetUserId };
+}
+
 export async function getDashboard(tournamentId: string | null, requestUser: RequestUser | null) {
   await ensureSchema();
   const db = getDb();
@@ -2409,6 +2702,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       leaderboard: [],
       audit: [],
       users: [],
+      members: [],
       summary: { leagueCompleted: 0, leagueTotal: 0, bracketCompleted: 0, bracketTotal: 0 },
     };
   }
@@ -2420,7 +2714,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     requestUser.pointsBalance = 0;
   }
 
-  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows, gameRows, tournamentDraftRows, predictionCountRows] = await Promise.all([
+  const [teamRows, playerRows, matchRows, leaderboardRows, auditRows, resultImageRows, teamStatRows, playerStatRows, accountRows, gameRows, tournamentDraftRows, predictionCountRows, memberRows] = await Promise.all([
     db.select().from(teams).where(eq(teams.tournamentId, selected.id)).orderBy(asc(teams.seed), asc(teams.name)),
     db.select().from(players),
     db.select().from(matches).where(eq(matches.tournamentId, selected.id)).orderBy(asc(matches.phase), asc(matches.sortOrder)),
@@ -2505,6 +2799,19 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     }).from(bets)
       .where(and(eq(bets.tournamentId, selected.id), ne(bets.status, "refunded")))
       .groupBy(bets.matchId, bets.teamId),
+    requestUser && isStaff(requestUser)
+      ? db.select({
+          userId: tournamentMembers.userId,
+          displayName: users.displayName,
+          email: users.email,
+          role: tournamentMembers.role,
+          teamId: tournamentMembers.teamId,
+          joinedAt: tournamentMembers.joinedAt,
+        }).from(tournamentMembers)
+          .innerJoin(users, eq(users.id, tournamentMembers.userId))
+          .where(eq(tournamentMembers.tournamentId, selected.id))
+          .orderBy(asc(tournamentMembers.role), asc(users.displayName))
+      : Promise.resolve([]),
   ]);
 
   const userBets = requestUser
@@ -2726,6 +3033,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     leaderboard: leaderboardRows,
     audit: auditRows,
     users: adminUsers,
+    members: memberRows,
     summary: {
       leagueCompleted: leagueMatches.filter((match) => match.status === "completed").length,
       leagueTotal: leagueMatches.length,
