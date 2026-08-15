@@ -307,11 +307,13 @@ async function claimPreRegisteredPlayer(
   }).from(tournamentMembers)
     .innerJoin(tournaments, eq(tournaments.id, tournamentMembers.tournamentId))
     .where(eq(tournamentMembers.userId, preRegisteredUser.id));
-  const targetTournament = memberships.find((membership) => isLolmen2026Tournament({
-    name: membership.tournamentName,
-    competitionKind: membership.competitionKind,
-  }));
-  if (!targetTournament) throw new Error("2026 롤멘 대회에 등록된 가입 전 선수만 자동 연동할 수 있습니다.");
+  const targetTournament = memberships.find((membership) => (
+    membership.competitionKind === "scrim_season" || isLolmen2026Tournament({
+      name: membership.tournamentName,
+      competitionKind: membership.competitionKind,
+    })
+  ));
+  if (!targetTournament) throw new Error("대회 또는 내전 시즌에 등록된 가입 전 선수만 자동 연동할 수 있습니다.");
 
   const [existingIdentity] = await db.select({ provider: authIdentities.provider })
     .from(authIdentities)
@@ -324,6 +326,12 @@ async function claimPreRegisteredPlayer(
   const displayName = publicDisplayName(primary.gameName, primary.tagline, realName);
   const mergedEmail = `merged-${shellUser.id.replace(/[^a-zA-Z0-9_-]/g, "")}@lolrift.invalid`;
   const preRegisteredAccounts = await db.select().from(riotAccounts).where(eq(riotAccounts.userId, preRegisteredUser.id));
+  const [shellMemberships, targetMemberships, shellEntries, targetEntries] = await Promise.all([
+    db.select().from(tournamentMembers).where(eq(tournamentMembers.userId, shellUser.id)),
+    db.select().from(tournamentMembers).where(eq(tournamentMembers.userId, preRegisteredUser.id)),
+    db.select().from(tournamentEntries).where(eq(tournamentEntries.userId, shellUser.id)),
+    db.select().from(tournamentEntries).where(eq(tournamentEntries.userId, preRegisteredUser.id)),
+  ]);
   const statements: unknown[] = [];
   statements.push(
     db.update(users).set({
@@ -353,6 +361,7 @@ async function claimPreRegisteredPlayer(
       tagline: primary.tagline,
       gameNameNormalized: primary.gameNameNormalized,
       taglineNormalized: primary.taglineNormalized,
+      identityStatus: "verified",
       isPrimary: true,
       updatedAt: changedAt,
     }).where(eq(riotAccounts.id, primaryAccount.id)),
@@ -362,6 +371,33 @@ async function claimPreRegisteredPlayer(
       email: actor.email,
       lastSeenAt: changedAt,
     }).where(eq(authIdentities.userId, shellUser.id)),
+  );
+  for (const membership of shellMemberships) {
+    const target = targetMemberships.find((row) => row.tournamentId === membership.tournamentId);
+    statements.push(target
+      ? db.delete(tournamentMembers).where(and(eq(tournamentMembers.tournamentId, membership.tournamentId), eq(tournamentMembers.userId, shellUser.id)))
+      : db.update(tournamentMembers).set({ userId: preRegisteredUser.id }).where(and(eq(tournamentMembers.tournamentId, membership.tournamentId), eq(tournamentMembers.userId, shellUser.id))));
+  }
+  for (const entry of shellEntries) {
+    const target = targetEntries.find((row) => row.tournamentId === entry.tournamentId);
+    if (!target) {
+      statements.push(db.update(tournamentEntries).set({ userId: preRegisteredUser.id }).where(and(eq(tournamentEntries.tournamentId, entry.tournamentId), eq(tournamentEntries.userId, shellUser.id))));
+      continue;
+    }
+    const starterPointsAwarded = Math.max(target.starterPointsAwarded, entry.starterPointsAwarded);
+    const pointsBalance = target.pointsBalance + entry.pointsBalance - Math.min(target.starterPointsAwarded, entry.starterPointsAwarded);
+    statements.push(
+      db.update(tournamentEntries).set({ starterPointsAwarded, pointsBalance }).where(and(eq(tournamentEntries.tournamentId, target.tournamentId), eq(tournamentEntries.userId, preRegisteredUser.id))),
+      db.delete(tournamentEntries).where(and(eq(tournamentEntries.tournamentId, entry.tournamentId), eq(tournamentEntries.userId, shellUser.id))),
+    );
+  }
+  statements.push(
+    db.update(bets).set({ userId: preRegisteredUser.id }).where(eq(bets.userId, shellUser.id)),
+    db.update(pointLedger).set({ userId: preRegisteredUser.id }).where(eq(pointLedger.userId, shellUser.id)),
+    db.update(draftSessions).set({ ownerUserId: preRegisteredUser.id }).where(eq(draftSessions.ownerUserId, shellUser.id)),
+    db.update(draftSessions).set({ blueUserId: preRegisteredUser.id }).where(eq(draftSessions.blueUserId, shellUser.id)),
+    db.update(draftSessions).set({ redUserId: preRegisteredUser.id }).where(eq(draftSessions.redUserId, shellUser.id)),
+    db.update(feedbackMessages).set({ userId: preRegisteredUser.id }).where(eq(feedbackMessages.userId, shellUser.id)),
   );
   for (const account of normalizedAccounts.filter((item) => !item.isPrimary)) {
     const existingAccount = preRegisteredAccounts.find((item) => (
@@ -487,6 +523,7 @@ export async function updateUserProfile(input: UpdateProfileInput, actor: Reques
       gameNameNormalized: account.gameNameNormalized,
       taglineNormalized: account.taglineNormalized,
       isPrimary: account.isPrimary,
+      identityStatus: "verified" as const,
       updatedAt: changedAt,
     };
     if (account.id && existingAccounts.some((item) => item.id === account.id)) {
@@ -896,7 +933,7 @@ export type PreRegisteredPlayerInput = {
   userId?: string;
   realName: string;
   gameName: string;
-  tagline: string;
+  tagline?: string;
 };
 
 function normalizedRiotIdentity(gameNameInput: string, taglineInput: string) {
@@ -921,19 +958,71 @@ async function requireLolmen2026Tournament(tournamentId: string, actor: RequestU
   return tournament;
 }
 
+function requireUnlockedMatch(match: typeof matches.$inferSelect) {
+  if (match.resultLockedAt) throw new Error("운영 잠금된 경기는 수정할 수 없습니다.");
+}
+
+async function requirePreRegistrationTournament(tournamentId: string, actor: RequestUser) {
+  if (actor.role !== "admin") throw new Error("관리자만 가입 전 선수를 관리할 수 있습니다.");
+  const [tournament] = await getDb().select().from(tournaments).where(eq(tournaments.id, tournamentId)).limit(1);
+  if (!tournament || !(isLolmen2026Tournament(tournament) || tournament.competitionKind === "scrim_season")) {
+    throw new Error("가입 전 선수 기능을 사용할 수 없는 대회입니다.");
+  }
+  if (!(await hasTournamentAccess(actor, tournament.id))) throw new Error("이 대회를 운영할 권한이 없습니다.");
+  return tournament;
+}
+
+function pendingRiotIdentity(gameNameInput: string, existingTagline?: string) {
+  const gameName = gameNameInput?.trim().normalize("NFKC");
+  if (!gameName || gameName.length > 32 || gameName.includes("#")) throw new Error("본계정 게임 이름을 확인해 주세요.");
+  const tagline = existingTagline || `PENDING${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+  return {
+    gameName,
+    tagline,
+    gameNameNormalized: normalizeIdentityPart(gameName),
+    taglineNormalized: normalizeIdentityPart(tagline),
+  };
+}
+
 export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, actor: RequestUser) {
-  const tournament = await requireLolmen2026Tournament(input.tournamentId, actor, true);
+  const tournament = await requirePreRegistrationTournament(input.tournamentId, actor);
   const realName = input.realName?.trim().normalize("NFKC");
   if (!realName || realName.length > 50) throw new Error("선수 이름을 확인해 주세요.");
-  const identity = normalizedRiotIdentity(input.gameName, input.tagline);
   const db = getDb();
+  const requestedTagline = input.tagline?.trim();
+  if (!requestedTagline && tournament.competitionKind !== "scrim_season") {
+    throw new Error("본계정은 게임 이름#태그 형식으로 정확하게 입력해 주세요.");
+  }
+  const pendingTag = !requestedTagline;
+  let existingAccount: typeof riotAccounts.$inferSelect | undefined;
+  if (input.userId) {
+    [existingAccount] = await db.select().from(riotAccounts).where(and(
+      eq(riotAccounts.userId, input.userId),
+      eq(riotAccounts.isPrimary, true),
+    )).limit(1);
+  }
+  const identity = pendingTag
+    ? pendingRiotIdentity(input.gameName, existingAccount?.identityStatus === "tag_required" ? existingAccount.tagline : undefined)
+    : normalizedRiotIdentity(input.gameName, requestedTagline!);
   const [duplicate] = await db.select().from(riotAccounts).where(and(
     eq(riotAccounts.gameNameNormalized, identity.gameNameNormalized),
     eq(riotAccounts.taglineNormalized, identity.taglineNormalized),
   )).limit(1);
-  if (duplicate && duplicate.userId !== input.userId) throw new Error("이미 등록된 본계정입니다.");
+  if (duplicate && duplicate.userId !== input.userId) {
+    const [duplicateUser] = await db.select().from(users).where(eq(users.id, duplicate.userId)).limit(1);
+    if (!input.userId && duplicateUser?.accountStatus === "provisional") {
+      await db.insert(tournamentMembers).values({ tournamentId: tournament.id, userId: duplicate.userId, role: "viewer" }).onConflictDoNothing();
+      await audit(actor, "pre_registered_player_reused", "user", duplicate.userId, tournament.id, null, {
+        realName: duplicateUser.realName,
+        gameName: duplicate.gameName,
+        tagline: duplicate.identityStatus === "verified" ? duplicate.tagline : null,
+      });
+      return { userId: duplicate.userId, accountId: duplicate.id };
+    }
+    throw new Error("이미 등록된 본계정입니다.");
+  }
   const changedAt = new Date().toISOString();
-  const displayName = publicDisplayName(identity.gameName, identity.tagline, realName);
+  const displayName = pendingTag ? `${identity.gameName}(${realName}) · 태그 필요` : publicDisplayName(identity.gameName, identity.tagline, realName);
 
   if (input.userId) {
     const [target] = await db.select().from(users).where(eq(users.id, input.userId)).limit(1);
@@ -949,7 +1038,7 @@ export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, a
     )).limit(1);
     if (!account) throw new Error("선수의 본계정을 찾을 수 없습니다.");
     const statements: unknown[] = [];
-    if (account.gameNameNormalized !== identity.gameNameNormalized || account.taglineNormalized !== identity.taglineNormalized) {
+    if (account.identityStatus === "verified" && (account.gameNameNormalized !== identity.gameNameNormalized || account.taglineNormalized !== identity.taglineNormalized)) {
       statements.push(db.insert(riotIdHistory).values({
           id: uid("riot_history"),
           userId: target.id,
@@ -965,13 +1054,13 @@ export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, a
         displayName,
         realName,
         riotGameName: identity.gameName,
-        riotTagline: identity.tagline,
+        riotTagline: pendingTag ? null : identity.tagline,
         riotGameNameNormalized: identity.gameNameNormalized,
-        riotTaglineNormalized: identity.taglineNormalized,
+        riotTaglineNormalized: pendingTag ? null : identity.taglineNormalized,
         profileUpdatedAt: changedAt,
       }).where(eq(users.id, target.id)),
-      db.update(riotAccounts).set({ ...identity, updatedAt: changedAt }).where(eq(riotAccounts.id, account.id)),
-      db.update(players).set({ nickname: `${identity.gameName}#${identity.tagline}` }).where(eq(players.riotAccountId, account.id)),
+      db.update(riotAccounts).set({ ...identity, identityStatus: pendingTag ? "tag_required" : "verified", updatedAt: changedAt }).where(eq(riotAccounts.id, account.id)),
+      db.update(players).set({ nickname: pendingTag ? identity.gameName : `${identity.gameName}#${identity.tagline}` }).where(eq(players.riotAccountId, account.id)),
       db.insert(auditLogs).values({
         id: uid("audit"),
         tournamentId: tournament.id,
@@ -981,7 +1070,7 @@ export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, a
         entityType: "user",
         entityId: target.id,
         beforeJson: JSON.stringify({ realName: target.realName, gameName: account.gameName, tagline: account.tagline }),
-        afterJson: JSON.stringify({ realName, gameName: identity.gameName, tagline: identity.tagline }),
+        afterJson: JSON.stringify({ realName, gameName: identity.gameName, tagline: pendingTag ? null : identity.tagline }),
       }),
     );
     await db.batch(statements as never);
@@ -998,9 +1087,9 @@ export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, a
       displayName,
       realName,
       riotGameName: identity.gameName,
-      riotTagline: identity.tagline,
+      riotTagline: pendingTag ? null : identity.tagline,
       riotGameNameNormalized: identity.gameNameNormalized,
-      riotTaglineNormalized: identity.taglineNormalized,
+      riotTaglineNormalized: pendingTag ? null : identity.taglineNormalized,
       profileCompletedAt: changedAt,
       profileUpdatedAt: changedAt,
       role: "viewer",
@@ -1011,6 +1100,7 @@ export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, a
       id: accountId,
       userId,
       ...identity,
+      identityStatus: pendingTag ? "tag_required" : "verified",
       isPrimary: true,
       createdAt: changedAt,
       updatedAt: changedAt,
@@ -1024,7 +1114,7 @@ export async function savePreRegisteredPlayer(input: PreRegisteredPlayerInput, a
       action: "pre_registered_player_created",
       entityType: "user",
       entityId: userId,
-      afterJson: JSON.stringify({ realName, gameName: identity.gameName, tagline: identity.tagline }),
+      afterJson: JSON.stringify({ realName, gameName: identity.gameName, tagline: pendingTag ? null : identity.tagline }),
     }),
   ] as never);
   return { userId, accountId };
@@ -1828,7 +1918,7 @@ export async function createScrimMatch(input: CreateScrimMatchInput, actor: Requ
       userId: account.userId,
       riotAccountId: account.id,
       teamRole: "member" as const,
-      nickname: `${account.gameName}#${account.tagline}`,
+      nickname: account.identityStatus === "tag_required" ? account.gameName : `${account.gameName}#${account.tagline}`,
       position: POSITIONS[index],
     };
   });
@@ -2127,6 +2217,7 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   if (!(await hasTournamentAccess(actor, match.tournamentId))) {
     throw new Error("시즌 코드를 입력해 참가한 회원만 내전 배팅을 관리할 수 있습니다.");
   }
@@ -2157,10 +2248,49 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet?match=${encodeURIComponent(match.id)}` };
 }
 
+export async function lockScrimMatch(matchId: string, actor: RequestUser) {
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  await requireTournamentOperator(actor, match.tournamentId);
+  if (match.resultLockedAt) return;
+  if (match.status !== "completed" || !match.winnerId) throw new Error("결과가 완료된 내전 경기만 잠글 수 있습니다.");
+  const [betCount] = await db.select({ count: sql<number>`count(*)` }).from(bets).where(and(
+    eq(bets.matchId, match.id),
+    ne(bets.status, "refunded"),
+  ));
+  if (Number(betCount?.count ?? 0) > 0 && match.settlementStatus !== "completed") {
+    throw new Error("배팅 정산이 완료된 뒤 경기를 잠가 주세요.");
+  }
+  const lockedAt = new Date().toISOString();
+  await db.update(matches).set({ resultLockedAt: lockedAt, resultLockedBy: actor.id }).where(eq(matches.id, match.id));
+  await audit(actor, "scrim_match_locked", "match", match.id, match.tournamentId, null, {
+    winnerId: match.winnerId,
+    seriesScoreA: match.seriesScoreA,
+    seriesScoreB: match.seriesScoreB,
+    lockedAt,
+  });
+}
+
+export async function unlockScrimMatch(matchId: string, actor: RequestUser) {
+  if (actor.role !== "admin" && !actor.isLocalDemo) throw new Error("관리자만 내전 경기 잠금을 해제할 수 있습니다.");
+  const db = getDb();
+  const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
+  if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  if (!(await hasTournamentAccess(actor, match.tournamentId))) throw new Error("이 내전 시즌을 관리할 권한이 없습니다.");
+  if (!match.resultLockedAt) return;
+  await db.update(matches).set({ resultLockedAt: null, resultLockedBy: null }).where(eq(matches.id, match.id));
+  await audit(actor, "scrim_match_unlocked", "match", match.id, match.tournamentId, {
+    lockedAt: match.resultLockedAt,
+    lockedBy: match.resultLockedBy,
+  }, { lockedAt: null });
+}
+
 export async function rollbackScrimMatch(matchId: string, actor: RequestUser) {
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match || match.phase !== "scrim") throw new Error("내전 경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   await requireTournamentOperator(actor, match.tournamentId);
   if (!match.teamAId || !match.teamBId) throw new Error("대진 팀 정보가 없는 내전 경기입니다.");
 
@@ -2840,6 +2970,7 @@ export async function setMatchWinner(
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   if (match.status === "cancelled") throw new Error("무효 처리된 경기에는 승리팀을 등록할 수 없습니다.");
   if (match.phase === "scrim" && match.bettingStatus === "open") {
     throw new Error("배팅을 종료한 뒤 내전 결과를 확정해 주세요.");
@@ -2957,6 +3088,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, input.matchId)).limit(1);
   if (!match || !match.teamAId || !match.teamBId) throw new Error("결과를 등록할 경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   if (match.status === "cancelled") throw new Error("무효 처리된 경기에는 결과 이미지를 등록할 수 없습니다.");
   if (match.phase === "scrim" && match.bettingStatus === "open") {
     throw new Error("배팅을 종료한 뒤 내전 결과 이미지를 등록해 주세요.");
@@ -3139,6 +3271,7 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   if (match.status === "cancelled") throw new Error("무효 처리된 경기의 일정은 변경할 수 없습니다.");
   if (!(await canManageMatch(actor, match))) throw new Error("이 경기의 일정을 입력할 권한이 없습니다.");
   if (match.scheduleConfirmed && !isStaff(actor)) throw new Error("확정된 일정은 운영자나 관리자만 변경할 수 있습니다.");
@@ -3178,6 +3311,7 @@ export async function setMatchBestOf(matchId: string, bestOf: number, actor: Req
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   await requireTournamentOperator(actor, match.tournamentId);
   if (match.status !== "scheduled") throw new Error("시작 전 경기만 세트 수를 변경할 수 있습니다.");
   const completedGames = await db.select().from(matchGames).where(and(eq(matchGames.matchId, matchId), eq(matchGames.status, "completed")));
@@ -3192,6 +3326,7 @@ export async function confirmMatchSchedule(matchId: string, actor: RequestUser) 
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   await requireTournamentOperator(actor, match.tournamentId);
   if (match.status !== "scheduled") throw new Error("진행 전 경기만 일정을 확정할 수 있습니다.");
   if (!match.teamAId || !match.teamBId) throw new Error("대진이 확정된 경기만 일정을 확정할 수 있습니다.");
@@ -3210,6 +3345,7 @@ export async function unconfirmMatchSchedule(matchId: string, actor: RequestUser
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
   if (!match) throw new Error("경기를 찾을 수 없습니다.");
+  requireUnlockedMatch(match);
   await requireTournamentOperator(actor, match.tournamentId);
   if (match.phase === "scrim") throw new Error("내전 경기는 배팅 관리 메뉴에서 상태를 변경해 주세요.");
   if (match.status !== "scheduled" || match.winnerId || match.settlementStatus === "completed") {
@@ -3643,7 +3779,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
     };
   }
 
-  const supportsPreRegistration = isLolmen2026Tournament(selected);
+  const supportsPreRegistration = isLolmen2026Tournament(selected) || selected.competitionKind === "scrim_season";
   const canViewDrafts = requestUser?.role === "admin" || Boolean(requestUser?.isLocalDemo);
   const lolmen2026ResetComplete = supportsPreRegistration && requestUser?.role === "admin"
     ? Boolean((await db.select({ id: auditLogs.id }).from(auditLogs).where(and(
@@ -3722,6 +3858,7 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       riotGameName: sql<string>`${riotAccounts.gameName}`.as("dashboard_game_name"),
       riotTagline: sql<string>`${riotAccounts.tagline}`.as("dashboard_tagline"),
       isPrimary: sql<boolean>`${riotAccounts.isPrimary}`.as("dashboard_is_primary"),
+      identityStatus: sql<"verified" | "tag_required">`${riotAccounts.identityStatus}`.as("dashboard_identity_status"),
       realName: sql<string | null>`${users.realName}`.as("dashboard_real_name"),
       accountStatus: sql<AccountStatus>`${users.accountStatus}`.as("dashboard_account_status"),
     }).from(tournamentMembers)
@@ -3982,8 +4119,10 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
       id: account.id,
       userId: account.userId,
       displayName: account.displayName,
+      realName: account.realName,
       riotGameName: account.riotGameName,
-      riotTagline: account.riotTagline,
+      riotTagline: account.identityStatus === "tag_required" ? null : account.riotTagline,
+      identityStatus: account.identityStatus,
       isPrimary: Boolean(account.isPrimary),
       accountStatus: account.accountStatus,
       isTest: account.userId.startsWith("test_"),
@@ -4008,7 +4147,8 @@ export async function getDashboard(tournamentId: string | null, requestUser: Req
             accountId: account.id,
             realName: account.realName ?? account.displayName,
             gameName: account.riotGameName ?? "",
-            tagline: account.riotTagline ?? "",
+            tagline: account.identityStatus === "tag_required" ? null : (account.riotTagline ?? ""),
+            identityStatus: account.identityStatus,
             teamId: assignedTeam?.id ?? null,
             teamName: assignedTeam?.name ?? null,
             status: "provisional" as const,

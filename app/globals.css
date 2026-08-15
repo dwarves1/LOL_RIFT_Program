@@ -1246,3 +1246,25 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
   .player-detail-page .player-record-panel > div:not(.section-heading) { min-height: 58px; }
   .player-record-name img { width: 38px; height: 38px; flex-basis: 38px; }
 }
+
+/* Scrim roster import, provisional identities, and immutable completed matches. */
+.scrim-roster-import { display: grid; gap: 12px; padding: 15px; border: 1px solid rgba(233,185,73,.28); background: rgba(233,185,73,.035); }
+.scrim-roster-import > div:first-child { display: grid; gap: 7px; }
+.scrim-roster-import label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.scrim-roster-import label strong { font-size: 13px; }.scrim-roster-import label small { color: var(--muted); font-size: 10px; }
+.scrim-roster-import textarea { width: 100%; min-height: 86px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line); background: #071320; color: #eef3f9; font: inherit; font-size: 12px; line-height: 1.65; }
+.scrim-import-actions { display: flex; align-items: center; gap: 8px; }
+.scrim-import-errors { padding: 9px 11px; border: 1px solid rgba(248,113,113,.35); background: rgba(248,113,113,.07); color: #fca5a5; }.scrim-import-errors p { margin: 3px 0; font-size: 11px; }
+.scrim-import-results { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }.scrim-import-results > div { display: grid; align-content: start; gap: 6px; }.scrim-import-results > div > b { color: #93c5fd; font-size: 10px; letter-spacing: .08em; }.scrim-import-results > div:last-child > b { color: #fda4af; }
+.scrim-import-results article { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 3px 8px; padding: 9px 10px; border: 1px solid var(--line); background: #091421; }.scrim-import-results article.matched { border-color: rgba(74,222,128,.38); }.scrim-import-results article.warning { border-color: rgba(250,204,21,.45); }.scrim-import-results article.ambiguous,.scrim-import-results article.unmatched { border-color: rgba(248,113,113,.42); }
+.scrim-import-results article span strong,.scrim-import-results article span small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.scrim-import-results article span strong { font-size: 11px; }.scrim-import-results article span small { margin-top: 2px; color: var(--muted); font-size: 9px; }.scrim-import-results article em { align-self: start; padding: 3px 5px; color: #86efac; font-size: 8px; font-style: normal; font-weight: 900; }.scrim-import-results article.warning em { color: #fde68a; }.scrim-import-results article:is(.ambiguous,.unmatched) em { color: #fca5a5; }.scrim-import-results article p { grid-column: 1/-1; margin: 2px 0 0; color: #aebccc; font-size: 9px; }.scrim-import-results article button { grid-column: 1/-1; justify-self: start; padding-left: 0; }
+.pre-register-list b.tag-required { border-color: rgba(248,113,113,.38); color: #fca5a5; }
+.result-locked { display: inline-flex; align-items: center; gap: 4px; padding: 5px 8px; border: 1px solid rgba(148,163,184,.32); background: rgba(148,163,184,.08); color: #cbd5e1; font-size: 10px; font-weight: 900; white-space: nowrap; }
+.scrim-match-control.locked { opacity: .92; }.scrim-match-control.locked .scrim-rosters { opacity: .78; }
+.lock-match-button { border-color: rgba(250,204,21,.35); background: rgba(250,204,21,.07); color: #fde68a; }.unlock-match-button { color: #fca5a5; }
+
+@media (max-width: 700px) {
+  .scrim-roster-import label { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .scrim-import-results { grid-template-columns: 1fr; }
+  .scrim-import-actions { align-items: stretch; flex-direction: column; }.scrim-import-actions button { width: 100%; }
+}

@@ -29,6 +29,8 @@ import {
   savePreRegisteredPlayer,
   updateTournamentTeam,
   setScrimBetting,
+  lockScrimMatch,
+  unlockScrimMatch,
   rollbackScrimMatch,
   deleteScrimMatch,
   removeTournamentMember,
@@ -264,6 +266,14 @@ export async function POST(request: Request) {
     if (action === "unconfirm_match_schedule") {
       const result = await unconfirmMatchSchedule(String(payload.matchId), user);
       return Response.json({ ok: true, ...result });
+    }
+    if (action === "lock_scrim_match") {
+      await lockScrimMatch(String(payload.matchId ?? ""), user);
+      return Response.json({ ok: true });
+    }
+    if (action === "unlock_scrim_match") {
+      await unlockScrimMatch(String(payload.matchId ?? ""), user);
+      return Response.json({ ok: true });
     }
     if (action === "cancel_tournament_match") {
       const result = await cancelTournamentMatch(String(payload.matchId), user);

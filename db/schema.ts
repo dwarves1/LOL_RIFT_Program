@@ -73,6 +73,9 @@ export const riotAccounts = sqliteTable(
     tagline: text("tagline").notNull(),
     gameNameNormalized: text("game_name_normalized").notNull(),
     taglineNormalized: text("tagline_normalized").notNull(),
+    identityStatus: text("identity_status", { enum: ["verified", "tag_required"] })
+      .notNull()
+      .default("verified"),
     isPrimary: integer("is_primary", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -332,6 +335,8 @@ export const matches = sqliteTable(
     completedAt: text("completed_at"),
     cancelledAt: text("cancelled_at"),
     cancelledBy: text("cancelled_by"),
+    resultLockedAt: text("result_locked_at"),
+    resultLockedBy: text("result_locked_by"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [

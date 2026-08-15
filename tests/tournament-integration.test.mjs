@@ -314,6 +314,82 @@ test("Google identity links the previous member without changing tournament data
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM auth_identities WHERE user_id = ?").get("admin").count, 1);
 });
 
+test("내전 가입 전 선수는 태그 없이 기록을 쌓고 정확한 본계정으로 Google 계정·포인트·배팅을 병합한다", async () => {
+  const season = await tournament.createScrimSeason({
+    name: "가입 전 선수 연결 내전",
+    startAt: "2026-08-12T10:00:00.000Z",
+    starterPoints: 1000,
+  }, actors.get("admin"));
+  for (let index = 1; index <= 9; index += 1) await tournament.joinTournamentByCode(season.accessCode, actors.get(`player${index}`));
+
+  const provisional = await tournament.savePreRegisteredPlayer({
+    tournamentId: season.tournamentId,
+    realName: "홍길동",
+    gameName: "미리쌓기",
+  }, actors.get("admin"));
+  let identity = sqlite.prepare("SELECT identity_status, tagline FROM riot_accounts WHERE id = ?").get(provisional.accountId);
+  assert.equal(identity.identity_status, "tag_required");
+  assert.match(identity.tagline, /^PENDING/);
+
+  await tournament.savePreRegisteredPlayer({
+    tournamentId: season.tournamentId,
+    userId: provisional.userId,
+    realName: "홍길동",
+    gameName: "미리쌓기",
+    tagline: "link1",
+  }, actors.get("admin"));
+  identity = sqlite.prepare("SELECT identity_status, tagline FROM riot_accounts WHERE id = ?").get(provisional.accountId);
+  assert.equal(identity.identity_status, "verified");
+  assert.equal(identity.tagline, "LINK1");
+
+  const created = await tournament.createScrimMatch({
+    tournamentId: season.tournamentId,
+    scheduledAt: "2026-08-12T11:00:00.000Z",
+    blueAccountIds: [provisional.accountId, ...accountIds.slice(0, 4)],
+    redAccountIds: accountIds.slice(4, 9),
+  }, actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM players WHERE user_id = ?").get(provisional.userId).count, 1);
+
+  const shellUserId = await tournament.resolveGoogleIdentityToUserId({
+    provider: "google",
+    subject: "google-subject-scrim-provisional",
+    email: "scrim-claim@example.com",
+    displayName: "내전 가입자",
+  });
+  sqlite.prepare("INSERT INTO tournament_members (tournament_id, user_id, role) VALUES (?, ?, 'viewer')").run(season.tournamentId, shellUserId);
+  sqlite.prepare("INSERT INTO tournament_entries (tournament_id, user_id, starter_points_awarded, points_balance) VALUES (?, ?, 1000, 900)").run(season.tournamentId, shellUserId);
+  sqlite.prepare("INSERT INTO bets (id, tournament_id, match_id, user_id, team_id, stake, free_stake, paid_stake, status) VALUES ('merge_scrim_bet', ?, ?, ?, (SELECT team_a_id FROM matches WHERE id = ?), 100, 100, 0, 'pending')").run(season.tournamentId, created.matchId, shellUserId, created.matchId);
+  sqlite.prepare("INSERT INTO point_ledger (id, user_id, tournament_id, bet_id, type, amount, balance_after, description) VALUES ('merge_scrim_ledger', ?, ?, 'merge_scrim_bet', 'bet_debit', -100, 900, '테스트')").run(shellUserId, season.tournamentId);
+  const shellActor = {
+    id: shellUserId,
+    email: "scrim-claim@example.com",
+    displayName: "내전 가입자",
+    authDisplayName: "내전 가입자",
+    realName: null,
+    riotGameName: null,
+    riotTagline: null,
+    profileComplete: false,
+    role: "viewer",
+    accountStatus: "active",
+    pointsBalance: 900,
+    isLocalDemo: false,
+  };
+  const linked = await tournament.updateUserProfile({
+    realName: "홍길동",
+    riotGameName: "미리쌓기",
+    riotTagline: "LINK1",
+  }, shellActor);
+  assert.equal(linked.linkedPreRegistered, true);
+  assert.equal(linked.userId, provisional.userId);
+  assert.equal(sqlite.prepare("SELECT user_id FROM auth_identities WHERE provider_subject = 'google-subject-scrim-provisional'").get().user_id, provisional.userId);
+  assert.equal(sqlite.prepare("SELECT account_status FROM users WHERE id = ?").get(shellUserId).account_status, "merged");
+  assert.equal(sqlite.prepare("SELECT user_id FROM bets WHERE id = 'merge_scrim_bet'").get().user_id, provisional.userId);
+  assert.equal(sqlite.prepare("SELECT user_id FROM point_ledger WHERE id = 'merge_scrim_ledger'").get().user_id, provisional.userId);
+  assert.equal(sqlite.prepare("SELECT points_balance FROM tournament_entries WHERE tournament_id = ? AND user_id = ?").get(season.tournamentId, provisional.userId).points_balance, 900);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_members WHERE tournament_id = ? AND user_id = ?").get(season.tournamentId, shellUserId).count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM players WHERE user_id = ?").get(provisional.userId).count, 1);
+});
+
 test("scrim season supports ten registered players, free 100P, single picks, and settlement", async () => {
   const created = await tournament.createScrimSeason({
     name: "2026 1시즌 내전",
@@ -384,6 +460,19 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   const operatorData = await tournament.getDashboard(created.tournamentId, actors.get("admin"));
   assert.ok(operatorData.backups.some((backup) => backup.kind === "automatic"));
   assert.equal(operatorData.settlementSummaries.find((row) => row.matchId === match.id).state, "completed");
+  await tournament.lockScrimMatch(match.id, actors.get("admin"));
+  assert.ok(sqlite.prepare("SELECT result_locked_at FROM matches WHERE id = ?").get(match.id).result_locked_at);
+  await assert.rejects(() => tournament.setMatchSchedule(match.id, "2026-08-12T15:00:00.000Z", actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.setMatchBestOf(match.id, 3, actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.setScrimBetting(match.id, "open", actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.setMatchWinner(match.id, match.teamBId, actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.saveMatchResult({ matchId: match.id }, actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.rollbackScrimMatch(match.id, actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.deleteScrimMatch(match.id, actors.get("admin")), /운영 잠금/);
+  await assert.rejects(() => tournament.unlockScrimMatch(match.id, actors.get("player1")), /관리자만/);
+  await tournament.unlockScrimMatch(match.id, actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT result_locked_at FROM matches WHERE id = ?").get(match.id).result_locked_at, null);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE entity_id = ? AND action IN ('scrim_match_locked', 'scrim_match_unlocked')").get(match.id).count, 2);
   const zeroBalancePlayer = await tournament.getDashboard(created.tournamentId, actors.get("player2"));
   assert.equal(zeroBalancePlayer.viewer.pointsBalance, 0);
   assert.equal(zeroBalancePlayer.bets[0].freeStake, 100);

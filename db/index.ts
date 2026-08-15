@@ -25,7 +25,7 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS riot_id_history (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_history_user ON riot_id_history(user_id, changed_at)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_history_lookup ON riot_id_history(game_name_normalized, tagline_normalized)`,
-  `CREATE TABLE IF NOT EXISTS riot_accounts (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS riot_accounts (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, game_name TEXT NOT NULL, tagline TEXT NOT NULL, game_name_normalized TEXT NOT NULL, tagline_normalized TEXT NOT NULL, identity_status TEXT NOT NULL DEFAULT 'verified', is_primary INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_riot_accounts_user ON riot_accounts(user_id, is_primary)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_riot_accounts_identity ON riot_accounts(game_name_normalized, tagline_normalized)`,
   `CREATE TABLE IF NOT EXISTS tournaments (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'league', start_at TEXT NOT NULL, matches_per_pair INTEGER NOT NULL DEFAULT 2, preliminary_format TEXT NOT NULL DEFAULT 'round_robin', bracket_format TEXT NOT NULL DEFAULT 'single_elimination', starter_points INTEGER NOT NULL DEFAULT 1000, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
@@ -36,7 +36,7 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY NOT NULL, team_id TEXT NOT NULL, user_id TEXT, nickname TEXT NOT NULL, position TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id)`,
   `CREATE INDEX IF NOT EXISTS idx_players_user ON players(user_id)`,
-  `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, schedule_confirmed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, cancelled_at TEXT, cancelled_by TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  `CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY NOT NULL, tournament_id TEXT NOT NULL, phase TEXT NOT NULL, match_no TEXT NOT NULL, round_label TEXT NOT NULL, team_a_id TEXT, team_b_id TEXT, source_a TEXT, source_b TEXT, scheduled_at TEXT NOT NULL, schedule_confirmed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', winner_id TEXT, loser_id TEXT, sort_order INTEGER NOT NULL, completed_at TEXT, cancelled_at TEXT, cancelled_by TEXT, result_locked_at TEXT, result_locked_by TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE INDEX IF NOT EXISTS idx_matches_tournament_phase_order ON matches(tournament_id, phase, sort_order)`,
   `CREATE INDEX IF NOT EXISTS idx_matches_tournament_status ON matches(tournament_id, status)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_tournament_number ON matches(tournament_id, phase, match_no)`,
@@ -332,6 +332,14 @@ async function migrateFeedbackMessages(raw: D1Database) {
   ]);
 }
 
+async function migrateScrimRosterLocking(raw: D1Database) {
+  const accountColumns = (await raw.prepare("PRAGMA table_info(riot_accounts)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "riot_accounts", accountColumns, "identity_status", "TEXT NOT NULL DEFAULT 'verified'");
+  const matchColumns = (await raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>()).results;
+  await addColumnIfMissing(raw, "matches", matchColumns, "result_locked_at", "TEXT");
+  await addColumnIfMissing(raw, "matches", matchColumns, "result_locked_by", "TEXT");
+}
+
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     const raw = getRawDb();
@@ -356,7 +364,18 @@ export function ensureSchema(): Promise<void> {
         // Sites applies the checked-in Drizzle migrations before serving traffic.
         // Avoid repeating PRAGMA/DDL migrations in every cold Worker isolate: those
         // concurrent writes can contend on D1 and hold the initial dashboard request.
-        if (Number(schemaState?.marker_count ?? 0) === 11) return;
+        if (Number(schemaState?.marker_count ?? 0) === 11) {
+          const [accountColumns, matchColumns] = await Promise.all([
+            raw.prepare("PRAGMA table_info(riot_accounts)").all<{ name: string }>(),
+            raw.prepare("PRAGMA table_info(matches)").all<{ name: string }>(),
+          ]);
+          const hasScrimLockingSchema = accountColumns.results.some((column) => column.name === "identity_status")
+            && matchColumns.results.some((column) => column.name === "result_locked_at")
+            && matchColumns.results.some((column) => column.name === "result_locked_by");
+          if (hasScrimLockingSchema) return;
+          await migrateScrimRosterLocking(raw);
+          return;
+        }
 
         const usersTable = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'users'")
@@ -378,6 +397,7 @@ export function ensureSchema(): Promise<void> {
         await migrateQaSandboxes(raw);
         await migrateMatchCancellations(raw);
         await migrateFeedbackMessages(raw);
+        await migrateScrimRosterLocking(raw);
         const balanceIndex = await raw
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_entries_tournament_balance'")
           .first<{ name: string }>();
