@@ -1225,7 +1225,7 @@ function ScheduleCard({ match, teamMap, isStaff, isAdmin, predictionSummary, bus
   );
 }
 
-function PredictionBalance({ summary }: { summary?: PredictionSummary }) {
+function PredictionBalance({ summary, showParticipantCount = true }: { summary?: PredictionSummary; showParticipantCount?: boolean }) {
   const teamAPercent = summary?.teamAPercent ?? 50;
   const teamBPercent = summary?.teamBPercent ?? 50;
   const totalCount = summary?.totalCount ?? 0;
@@ -1233,7 +1233,7 @@ function PredictionBalance({ summary }: { summary?: PredictionSummary }) {
     <div className="schedule-prediction" aria-label={`승리 예측 왼쪽 ${teamAPercent}%, 오른쪽 ${teamBPercent}%`}>
       <div className="schedule-prediction-labels">
         <span><b>{teamAPercent}%</b> 승리 예측</span>
-        <small>{totalCount ? `총 ${totalCount}명 참여` : "아직 예측 없음"}</small>
+        <small>{totalCount ? (showParticipantCount ? `총 ${totalCount}명 참여` : "현재 예측 현황") : "아직 예측 없음"}</small>
         <span>승리 예측 <b>{teamBPercent}%</b></span>
       </div>
       <div className="schedule-prediction-bar" aria-hidden="true">
@@ -1639,7 +1639,7 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming, focuse
         <article className="panel">
           <div className="section-heading"><div><p className="eyebrow">OPEN PICKS</p><h2>예측 가능한 경기</h2></div>{visibleMatches.length > 0 && <span>{visibleMatches.length}경기 배팅 중</span>}</div>
           <div className="open-picks" data-open-match-count={visibleMatches.length}>
-            {visibleMatches.map((match) => <div key={match.id} id={`bet-${match.id}`} className={match.id === focusedMatchId ? "focused-pick" : ""}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><MatchVersus match={match} teamMap={teamMap} /><MatchPlayerRosters match={match} teamMap={teamMap} tournamentId={data.tournament!.id} playerInsightMap={playerInsightMap} openPlayer={openPlayer} isScrim={isScrim} /><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
+            {visibleMatches.map((match) => <div key={match.id} id={`bet-${match.id}`} className={match.id === focusedMatchId ? "focused-pick" : ""}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><MatchVersus match={match} teamMap={teamMap} /><PredictionBalance summary={data.predictionSummaries.find((summary) => summary.matchId === match.id)} showParticipantCount={false} /><MatchPlayerRosters match={match} teamMap={teamMap} tournamentId={data.tournament!.id} playerInsightMap={playerInsightMap} openPlayer={openPlayer} isScrim={isScrim} /><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
             {!visibleMatches.length && <EmptyState title="예측 가능한 경기가 없습니다" detail={isScrim ? "운영자가 배팅 시작 버튼을 누르면 이곳에 경기가 표시됩니다." : "운영자가 일정을 확정하고 경기 시작까지 1시간 이상 남으면 예측이 열립니다."} />}
           </div>
         </article>
