@@ -1843,10 +1843,13 @@ const TEAM_EDITOR_POSITIONS = ["TOP", "JGL", "MID", "ADC", "SUP"];
 
 function TeamRosterEditorPanel({ data, busy, command }: { data: Dashboard; busy: boolean; command: SharedProps["command"] }) {
   const primaryAccounts = data.accounts.filter((account) => account.isPrimary && account.accountStatus !== "merged");
+  const [open, setOpen] = useState(false);
   return <article className="panel team-roster-editor-panel">
-    <div className="section-heading"><div><p className="eyebrow">TEAM & ROSTER EDITOR</p><h2>팀 및 선수 수정</h2></div><span>관리자·운영자 · 본계정만 선택</span></div>
-    <p className="admin-panel-help">팀명과 포지션별 선수를 변경합니다. 이전 경기 기록은 기존 선수에게 유지되고, 변경된 명단은 다음 경기부터 이미지 분석 후보에 반영됩니다.</p>
-    <div className="team-roster-editor-list">{data.teams.map((team) => <TeamRosterEditor key={`${team.id}:${team.name}:${team.players.map((player) => `${player.riotAccountId}:${player.teamRole}`).join("|")}`} team={team} teams={data.teams} accounts={primaryAccounts} busy={busy} command={command} />)}</div>
+    <div className="section-heading team-roster-panel-heading"><div><p className="eyebrow">TEAM & ROSTER EDITOR</p><h2>팀 및 선수 수정</h2></div><button type="button" className="team-roster-panel-toggle" aria-expanded={open} aria-controls="team-roster-editor-content" onClick={() => setOpen((current) => !current)}><span>{data.teams.length}개 팀</span><b>{open ? "전체 접기" : "팀 목록 열기"}</b><i aria-hidden="true" /></button></div>
+    {open && <div id="team-roster-editor-content" className="team-roster-editor-content">
+      <p className="admin-panel-help">팀명과 포지션별 선수를 변경합니다. 이전 경기 기록은 기존 선수에게 유지되고, 변경된 명단은 다음 경기부터 이미지 분석 후보에 반영됩니다.</p>
+      <div className="team-roster-editor-list">{data.teams.map((team) => <TeamRosterEditor key={team.id} team={team} teams={data.teams} accounts={primaryAccounts} busy={busy} command={command} />)}</div>
+    </div>}
   </article>;
 }
 
@@ -1858,6 +1861,7 @@ function TeamRosterEditor({ team, teams, accounts, busy, command }: { team: Team
   }));
   const [name, setName] = useState(team.name);
   const [members, setMembers] = useState(initialMembers);
+  const [open, setOpen] = useState(false);
   const accountMap = new Map(accounts.map((account) => [account.id, account]));
   const otherTeamUserIds = new Set(teams.filter((item) => item.id !== team.id).flatMap((item) => item.players.map((player) => player.userId).filter((id): id is string => Boolean(id))));
   const changed = name.trim() !== team.name || JSON.stringify(members) !== JSON.stringify(initialMembers);
@@ -1873,13 +1877,16 @@ function TeamRosterEditor({ team, teams, accounts, busy, command }: { team: Team
     if (!window.confirm(`${team.name}의 팀명과 선수 명단을 변경할까요?\n이전 경기의 선수 통계는 변경되지 않습니다.`)) return;
     await command({ action: "update_tournament_team", input: { teamId: team.id, name, members } }, `${name.trim()} 팀 명단을 변경했습니다.`);
   }
-  return <section className="team-roster-editor-card">
-    <header><TeamMark team={team} small /><label><span>팀명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label><button type="button" className="primary-button compact" disabled={busy || !changed || !name.trim() || members.some((member) => !member.riotAccountId) || members.filter((member) => member.teamRole === "captain").length !== 1} onClick={() => void save()}>팀 저장</button></header>
+  const registeredCount = members.filter((member) => member.riotAccountId).length;
+  const captain = team.players.find((player) => player.teamRole === "captain");
+  return <section className={`team-roster-editor-card ${open ? "open" : ""}`}>
+    <button type="button" className="team-roster-card-toggle" aria-expanded={open} aria-controls={`team-roster-${team.id}`} onClick={() => setOpen((current) => !current)}><TeamMark team={team} small /><span><strong>{team.name}</strong><small>선수 {registeredCount}/5{captain ? ` · 팀장 ${captain.nickname}` : ""}</small></span><b>{open ? "접기" : "수정 열기"}</b><i aria-hidden="true" /></button>
+    {open && <div id={`team-roster-${team.id}`} className="team-roster-card-body"><header><label><span>팀명</span><input value={name} onChange={(event) => setName(event.target.value)} /></label><button type="button" className="primary-button compact" disabled={busy || !changed || !name.trim() || members.some((member) => !member.riotAccountId) || members.filter((member) => member.teamRole === "captain").length !== 1} onClick={() => void save()}>팀 저장</button></header>
     <div className="team-roster-slots">{members.map((member, index) => {
       const sameTeamOtherUsers = new Set(members.filter((_, memberIndex) => memberIndex !== index).map((item) => accountMap.get(item.riotAccountId)?.userId).filter((id): id is string => Boolean(id)));
       const unavailable = new Set([...otherTeamUserIds, ...sameTeamOtherUsers]);
       return <div key={TEAM_EDITOR_POSITIONS[index]}><span>{TEAM_EDITOR_POSITIONS[index]}</span><ScrimAccountPicker value={member.riotAccountId} accounts={accounts} unavailableUserIds={unavailable} onChange={(riotAccountId) => updateMember(index, { riotAccountId })} /><select aria-label={`${TEAM_EDITOR_POSITIONS[index]} 팀 역할`} value={member.teamRole} onChange={(event) => updateMember(index, { teamRole: event.target.value as TeamRole })}><option value="member">팀원</option><option value="captain">팀장</option><option value="vice_captain">부팀장</option></select></div>;
-    })}</div>
+    })}</div></div>}
   </section>;
 }
 
