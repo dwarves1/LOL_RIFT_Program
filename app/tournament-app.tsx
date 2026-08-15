@@ -810,6 +810,7 @@ export function TournamentApp({
             completedMatches={completedMatches}
             totalMatches={totalMatches}
             setActiveTab={setActiveTab}
+            openPlayer={(userId) => { setSelectedPlayerId(userId); setActiveTab("players"); }}
           />
         )}
         {activeTab === "schedule" && <ScheduleView {...shared} leagueMatches={leagueMatches} bracketMatches={bracketMatches} />}
@@ -929,6 +930,7 @@ function HomeView({
   completedMatches,
   totalMatches,
   setActiveTab,
+  openPlayer,
 }: SharedProps & {
   upcoming: Match[];
   openPredictionCount: number;
@@ -936,8 +938,10 @@ function HomeView({
   completedMatches: number;
   totalMatches: number;
   setActiveTab: (tab: Tab) => void;
+  openPlayer: (userId: string) => void;
 }) {
   const isScrim = data.tournament?.competitionKind === "scrim_season";
+  const playerInsightMap = useMemo(() => buildPlayerInsights({ accounts: data.accounts, teams: data.teams, matches: data.matches, stats: data.playerStats, reviewedAt: data.resultImages.map((image) => image.reviewedAt) }).playerMap, [data]);
   const nextMatch = upcoming[0];
   const lastResults = data.matches.filter((match) => match.status === "completed").slice(-3).reverse();
   const teamCount = data.teams.length;
@@ -975,6 +979,7 @@ function HomeView({
           {nextMatch ? (
             <>
               <MatchVersus match={nextMatch} teamMap={teamMap} />
+              <MatchPlayerRosters match={nextMatch} teamMap={teamMap} tournamentId={data.tournament!.id} playerInsightMap={playerInsightMap} openPlayer={openPlayer} isScrim={isScrim} />
               <PredictionBox match={nextMatch} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} />
               {openPredictionCount > 1 && <button type="button" className="next-prediction-link" onClick={() => setActiveTab("points")}>예측 가능한 경기 {openPredictionCount}개 모두 보기 →</button>}
             </>
@@ -1634,7 +1639,7 @@ function PointsView({ data, teamMap, busy, command, signInPath, upcoming, focuse
         <article className="panel">
           <div className="section-heading"><div><p className="eyebrow">OPEN PICKS</p><h2>예측 가능한 경기</h2></div>{visibleMatches.length > 0 && <span>{visibleMatches.length}경기 배팅 중</span>}</div>
           <div className="open-picks" data-open-match-count={visibleMatches.length}>
-            {visibleMatches.map((match) => <div key={match.id} id={`bet-${match.id}`} className={match.id === focusedMatchId ? "focused-pick" : ""}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><MatchVersus match={match} teamMap={teamMap} />{isScrim && <BetPlayerRosters match={match} teamMap={teamMap} tournamentId={data.tournament!.id} playerInsightMap={playerInsightMap} openPlayer={openPlayer} />}<PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
+            {visibleMatches.map((match) => <div key={match.id} id={`bet-${match.id}`} className={match.id === focusedMatchId ? "focused-pick" : ""}><div className="pick-title"><span>{formatDate(match.scheduledAt)}</span><strong>{match.roundLabel}</strong></div><MatchVersus match={match} teamMap={teamMap} /><MatchPlayerRosters match={match} teamMap={teamMap} tournamentId={data.tournament!.id} playerInsightMap={playerInsightMap} openPlayer={openPlayer} isScrim={isScrim} /><PredictionBox match={match} data={data} teamMap={teamMap} busy={busy} command={command} signInPath={signInPath} /></div>)}
             {!visibleMatches.length && <EmptyState title="예측 가능한 경기가 없습니다" detail={isScrim ? "운영자가 배팅 시작 버튼을 누르면 이곳에 경기가 표시됩니다." : "운영자가 일정을 확정하고 경기 시작까지 1시간 이상 남으면 예측이 열립니다."} />}
           </div>
         </article>
@@ -2011,13 +2016,23 @@ function PlayerProfileLink({ userId, tournamentId, children, onOpen }: { userId:
   return <a className="player-profile-link" href={href} onClick={(event) => { if (!onOpen || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); onOpen(userId); }}>{children}</a>;
 }
 
-function BetPlayerRosters({ match, teamMap, tournamentId, playerInsightMap, openPlayer }: { match: Match; teamMap: Map<string, Team>; tournamentId: string; playerInsightMap: Map<string, PlayerInsight>; openPlayer: (userId: string) => void }) {
+const MATCH_ROSTER_POSITION_ORDER = ["TOP", "JGL", "MID", "ADC", "SUP"];
+
+function MatchPlayerRosters({ match, teamMap, tournamentId, playerInsightMap, openPlayer, isScrim }: { match: Match; teamMap: Map<string, Team>; tournamentId: string; playerInsightMap: Map<string, PlayerInsight>; openPlayer: (userId: string) => void; isScrim: boolean }) {
   const sides = [match.teamAId ? teamMap.get(match.teamAId) : undefined, match.teamBId ? teamMap.get(match.teamBId) : undefined];
-  return <div className="bet-player-rosters">{sides.map((team, index) => <div key={team?.id ?? index} className={index ? "red" : "blue"}><b>{index ? "RED TEAM" : "BLUE TEAM"}</b><div>{team?.players.map((player) => {
+  return <div className="bet-player-rosters match-player-rosters">{sides.map((team, index) => {
+    const roster = [...(team?.players ?? [])].sort((a, b) => {
+      const orderA = MATCH_ROSTER_POSITION_ORDER.indexOf(a.position);
+      const orderB = MATCH_ROSTER_POSITION_ORDER.indexOf(b.position);
+      return (orderA < 0 ? 99 : orderA) - (orderB < 0 ? 99 : orderB) || a.nickname.localeCompare(b.nickname, "ko");
+    });
+    return <div key={team?.id ?? index} className={index ? "red" : "blue"}><b>{isScrim ? (index ? "RED TEAM" : "BLUE TEAM") : (team?.name ?? (index ? "오른쪽 팀" : "왼쪽 팀"))}<small>{roster.length}/5</small></b><div>{roster.map((player) => {
     const insight = player.userId ? playerInsightMap.get(player.userId) : null;
     const currentBadge = insight && insight.currentStreak.count >= 3 ? { kind: insight.currentStreak.result as "win" | "loss", count: insight.currentStreak.count, label: `${insight.currentStreak.result === "win" ? "🔥" : "🌧"} ${insight.currentStreak.count}연${insight.currentStreak.result === "win" ? "승" : "패"}` } : null;
-    return player.userId ? <PlayerProfileLink key={player.id} userId={player.userId} tournamentId={tournamentId} onOpen={openPlayer}>{player.nickname}{currentBadge && <StreakBadge badge={currentBadge} />}</PlayerProfileLink> : <span key={player.id}>{player.nickname}</span>;
-  })}</div></div>)}</div>;
+    const playerLabel = <><small>{positionLabel(player.position, true)}</small><span>{player.nickname}</span>{currentBadge && <StreakBadge badge={currentBadge} />}</>;
+    return player.userId ? <PlayerProfileLink key={player.id} userId={player.userId} tournamentId={tournamentId} onOpen={openPlayer}>{playerLabel}</PlayerProfileLink> : <span className="unlinked-player" key={player.id}>{playerLabel}</span>;
+  })}{!roster.length && <span className="roster-empty">명단 미등록</span>}</div></div>;
+  })}</div>;
 }
 
 function ScrimMatchControl({ match, teamA, teamB, tournamentId, canCorrect, busy, command }: {
