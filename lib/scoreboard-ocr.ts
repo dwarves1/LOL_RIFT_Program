@@ -17,7 +17,9 @@ export type ExtractedScoreboardPlayer = {
   accountName: string;
   championName: string;
   championLevel: number;
-  lane: "TOP" | "JGL" | "MID" | "ADC" | "SUP";
+  // The post-game scoreboard is viewer-relative, so its row order cannot identify a lane.
+  // Legacy OCR may still provide this placeholder; result review must bind the lane from the match roster.
+  lane?: "TOP" | "JGL" | "MID" | "ADC" | "SUP";
   kills: number;
   deaths: number;
   assists: number;

@@ -866,6 +866,12 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
 .image-side-detection { display: grid; grid-template-columns: 120px minmax(0,1fr) auto; align-items: center; gap: 8px; margin: 6px 0; padding: 6px 10px; border: 1px solid rgba(96,165,250,.35); background: rgba(96,165,250,.055); }
 .image-side-detection span, .image-side-detection small { color: var(--muted); font-size: 11px; }
 .image-side-detection strong { color: #bfdbfe; font-size: 12px; }
+.result-meta-fields.scrim-result-meta { grid-template-columns: 88px 112px minmax(240px,1fr) minmax(240px,1fr); }
+.identity-match-field small { display: block; min-height: 12px; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; font-weight: 800; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.identity-match-field.identity-exact small, .identity-match-field.identity-manual small { color: #6ee7b7; }
+.identity-match-field.identity-fuzzy small, .identity-match-field.identity-inferred small { color: #fde047; }
+.identity-match-field.identity-unmatched small { color: #fda4af; }
+.identity-match-field.identity-unmatched select { border-color: rgba(244,63,94,.7); background: rgba(244,63,94,.08); box-shadow: inset 2px 0 #f43f5e; }
 .analysis-recovery-actions { display: flex; flex-wrap: wrap; gap: 7px; grid-column: 1 / -1; }
 .analysis-recovery-actions button { min-height: 32px; padding: 5px 10px; }
 .result-player-columns, .result-player-card { grid-template-columns: 72px minmax(170px,1.4fr) minmax(145px,1.2fr) minmax(135px,1fr) 58px repeat(3,54px) minmax(88px,.75fr); }
@@ -911,6 +917,7 @@ body :is(.desktop-nav button, .account-chip strong, .signin-button, .tournament-
 
 @media (max-width: 800px) {
   .result-meta-fields { grid-template-columns: 1fr 1fr; }
+  .result-meta-fields.scrim-result-meta { grid-template-columns: 1fr 1fr; }
   .result-meta-fields label:first-child, .result-meta-fields label:nth-child(2) { grid-column: auto; }
   .result-meta-fields label:nth-of-type(3), .result-meta-fields label:nth-of-type(4), .result-meta-fields .side-swap { grid-column: 1 / -1; }
   .side-swap { width: 100%; }

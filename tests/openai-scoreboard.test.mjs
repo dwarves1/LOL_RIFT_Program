@@ -21,17 +21,12 @@ function analysisPayload() {
     durationSeconds: 1687,
     topOutcome: "win",
     topOutcomeConfidence: 98,
-    topTeam: "teamB",
-    topTeamConfidence: 94,
-    topSideColor: "red",
-    topSideColorConfidence: 91,
     players: Array.from({ length: 10 }, (_, index) => ({
       side: index < 5 ? 1 : 2,
       rowOrder: index + 1,
       accountName: `player-${index + 1}`,
       championName: `champion-${index + 1}`,
       championLevel: 15,
-      lane: ["TOP", "JGL", "MID", "ADC", "SUP"][index % 5],
       kills: index,
       deaths: 2,
       assists: 5,
@@ -51,9 +46,7 @@ test("AI scoreboard normalization enforces ten ordered players", () => {
   const normalized = normalizeOpenAIScoreboard(analysisPayload());
   assert.equal(normalized.players.length, 10);
   assert.deepEqual(normalized.players.map((player) => player.side), [1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
-  assert.deepEqual(normalized.players.map((player) => player.lane), ["TOP", "JGL", "MID", "ADC", "SUP", "TOP", "JGL", "MID", "ADC", "SUP"]);
-  assert.equal(normalized.topTeam, "teamB");
-  assert.equal(normalized.topSideColor, "red");
+  assert.ok(normalized.players.every((player) => player.lane === undefined));
   assert.throws(() => normalizeOpenAIScoreboard({ ...analysisPayload(), players: [] }), /10명/);
 });
 
@@ -80,6 +73,8 @@ test("AI analysis sends a latency-optimized image request and strict schema", as
   assert.equal(requestBody.max_output_tokens, 2500);
   assert.equal(requestBody.input[0].content[1].detail, "high");
   assert.equal(requestBody.text.format.strict, true);
+  assert.match(requestBody.input[0].content[0].text, /첫 행은 조회자/);
+  assert.doesNotMatch(requestBody.input[0].content[0].text, /위에서부터 TOP/);
   assert.equal(result.durationSeconds, 1687);
 });
 

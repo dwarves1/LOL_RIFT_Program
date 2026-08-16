@@ -10,6 +10,7 @@ import {
 } from "../lib/scoreboard-ocr";
 import { PLAYER_POSITIONS, positionLabel } from "../lib/positions";
 import { isKoreanChampionName, officialKoreanChampionName } from "../lib/champion-catalog";
+import { matchScoreboardRoster, type ScoreboardIdentityMatch } from "../lib/scoreboard-roster-match";
 
 type ResultTeam = {
   id: string;
@@ -18,7 +19,7 @@ type ResultTeam = {
   logoUrl?: string | null;
   players?: Array<{ id: string; nickname: string; position: string; userId: string | null; riotAccountId: string | null }>;
 };
-type ResultMatch = { id: string; matchNo: string; roundLabel: string; teamAId: string | null; teamBId: string | null; bestOf?: number };
+type ResultMatch = { id: string; matchNo: string; roundLabel: string; phase?: "league" | "bracket" | "scrim"; teamAId: string | null; teamBId: string | null; bestOf?: number };
 type ResultAccount = { id: string; userId: string; displayName: string; riotGameName: string | null; riotTagline: string | null; accountStatus?: "active" | "provisional" | "merged" };
 export type ResultPlayerStat = {
   id?: string;
@@ -40,6 +41,12 @@ export type ResultPlayerStat = {
   confidence?: number;
   fieldConfidence?: OcrFieldConfidence;
   sourceAccountName?: string;
+  riotAccountId?: string | null;
+  accountTagline?: string | null;
+  identityMatch?: ScoreboardIdentityMatch["status"] | "manual";
+  identityConfidence?: number;
+  imageSide?: 1 | 2;
+  imageRowOrder?: number;
 };
 
 const LANES = PLAYER_POSITIONS;
@@ -110,6 +117,14 @@ function parseDuration(value: string) {
   return matched ? Number(matched[1]) * 60 + Number(matched[2]) : 0;
 }
 
+function identityMatchLabel(player: ResultPlayerStat) {
+  if (player.identityMatch === "manual") return "직접 확인";
+  if (player.identityMatch === "exact") return "ID 정확히 일치";
+  if (player.identityMatch === "fuzzy") return `ID 유사 일치 ${player.identityConfidence ?? 0}%`;
+  if (player.identityMatch === "inferred") return "나머지 명단으로 추정";
+  return "선수 선택 필요";
+}
+
 function rosterPlayersForMatch(teams: ResultTeam[], accounts: ResultAccount[], match: ResultMatch): ResultPlayerStat[] {
   const buildSide = (teamId: string | null, side: 1 | 2) => {
     const roster = [...(teams.find((team) => team.id === teamId)?.players ?? [])].sort((a, b) => {
@@ -126,9 +141,11 @@ function rosterPlayersForMatch(teams: ResultTeam[], accounts: ResultAccount[], m
         : LANES[index];
       return {
         userId: player?.userId ?? account?.userId ?? null,
+        riotAccountId: player?.riotAccountId ?? account?.id ?? null,
         side,
         rowOrder: (side - 1) * 5 + index + 1,
         accountName: account?.riotGameName ?? player?.nickname?.split("#")[0] ?? "",
+        accountTagline: account?.riotTagline ?? player?.nickname?.split("#")[1] ?? null,
         sourceAccountName: "",
         championName: "",
         championLevel: 0,
@@ -139,6 +156,8 @@ function rosterPlayersForMatch(teams: ResultTeam[], accounts: ResultAccount[], m
         gold: 0,
         confidence: 0,
         fieldConfidence: player ? { accountName: 100 } : {},
+        identityMatch: player ? "exact" : "unmatched",
+        identityConfidence: player ? 100 : 0,
       } satisfies ResultPlayerStat;
     });
   };
@@ -195,6 +214,7 @@ export function ResultReviewModal({
   onSubmit: (input: Record<string, unknown>) => Promise<boolean>;
 }) {
   const availableTeams = teams.filter((team) => team.id === match.teamAId || team.id === match.teamBId);
+  const isScrim = match.phase === "scrim";
   const [dataUrl, setDataUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -237,6 +257,11 @@ export function ResultReviewModal({
       gold: rows.reduce((sum, player) => sum + player.gold, 0),
     };
   }), [players]);
+  const identitySummary = useMemo(() => ({
+    exact: players.filter((player) => player.identityMatch === "exact" || player.identityMatch === "manual").length,
+    review: players.filter((player) => player.identityMatch === "fuzzy" || player.identityMatch === "inferred").length,
+    unmatched: players.filter((player) => !player.userId || player.identityMatch === "unmatched").length,
+  }), [players]);
 
   function patchPlayer(index: number, patch: Partial<ResultPlayerStat>) {
     setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? { ...player, ...patch } : player));
@@ -262,7 +287,10 @@ export function ResultReviewModal({
     const roster = teams.find((team) => team.id === teamId)?.players ?? [];
     const exactAccountIds = new Set(roster.map((player) => player.riotAccountId).filter(Boolean));
     const rosterUserIds = new Set(roster.map((player) => player.userId).filter(Boolean));
-    return accounts.filter((account) => exactAccountIds.has(account.id) || rosterUserIds.has(account.userId));
+    const candidates = accounts.filter((account) => exactAccountIds.has(account.id) || rosterUserIds.has(account.userId));
+    return [...new Map(candidates
+      .sort((left, right) => Number(exactAccountIds.has(right.id)) - Number(exactAccountIds.has(left.id)))
+      .map((account) => [account.userId, account])).values()];
   }
 
   function rebindRosterAccounts(rows: ResultPlayerStat[], firstTeamId: string, secondTeamId: string) {
@@ -274,40 +302,81 @@ export function ResultReviewModal({
   }
 
   function mergeAnalyzedStats(rows: ResultPlayerStat[], analyzed: ResultPlayerStat[]) {
-    return ([1, 2] as const).flatMap((side) => {
-      const roster = rows.filter((row) => row.side === side).sort((a, b) => a.rowOrder - b.rowOrder);
-      const detected = analyzed.filter((row) => row.side === side).sort((a, b) => a.rowOrder - b.rowOrder);
-      const unused = new Set(roster.map((_, index) => index));
-      const assignments = new Map<number, { row: ResultPlayerStat; confidence: number }>();
-      detected.forEach((detectedRow, detectedIndex) => {
-        const candidateIndexes = [...unused];
-        const candidateNames = candidateIndexes.map((index) => roster[index]?.accountName ?? "").filter(Boolean);
-        const accountMatch = findBestKnownLabel(detectedRow.accountName, candidateNames, 0.55);
-        let rosterIndex = accountMatch
-          ? candidateIndexes.find((index) => normalize(roster[index]?.accountName ?? "") === normalize(accountMatch.value))
-          : undefined;
-        if (rosterIndex === undefined) rosterIndex = candidateIndexes.includes(detectedIndex) ? detectedIndex : candidateIndexes[0];
-        if (rosterIndex === undefined) return;
-        unused.delete(rosterIndex);
-        assignments.set(rosterIndex, { row: detectedRow, confidence: accountMatch ? Math.round(accountMatch.score * 100) : 0 });
-      });
-      return roster.map((identity, index) => {
-        const assignment = assignments.get(index);
-        if (!assignment) return identity;
-        return {
-          ...assignment.row,
-          userId: identity.userId,
-          accountName: identity.accountName,
-          sourceAccountName: assignment.row.accountName,
-          side: identity.side,
-          rowOrder: identity.rowOrder,
-          fieldConfidence: {
-            ...assignment.row.fieldConfidence,
-            accountName: assignment.confidence,
-          },
-        };
-      });
-    }).sort((a, b) => a.rowOrder - b.rowOrder);
+    const roster = [...rows].sort((a, b) => a.rowOrder - b.rowOrder);
+    const candidates = roster.map((identity, index) => {
+      const aliases = accounts.filter((account) => account.userId === identity.userId);
+      const labels = new Set<string>([
+        identity.accountName,
+        identity.accountTagline ? `${identity.accountName}#${identity.accountTagline}` : "",
+        ...aliases.flatMap((account) => account.riotGameName ? [
+          account.riotGameName,
+          account.riotTagline ? `${account.riotGameName}#${account.riotTagline}` : "",
+        ] : []),
+      ].filter(Boolean));
+      return { id: identity.userId ?? `roster-${index}`, teamSide: identity.side as 1 | 2, labels: [...labels] };
+    });
+    const detected = [...analyzed].sort((a, b) => a.rowOrder - b.rowOrder);
+    const matching = matchScoreboardRoster(
+      detected.map((row) => ({ imageSide: row.side as 1 | 2, imageRow: row.rowOrder, accountName: row.accountName })),
+      candidates,
+    );
+    const usedRoster = new Set(matching.assignments.flatMap((assignment) => assignment.rosterIndex === null ? [] : [assignment.rosterIndex]));
+    const unresolvedBySide = new Map<1 | 2, number[]>();
+    for (const side of [1, 2] as const) {
+      unresolvedBySide.set(side, roster.map((identity, index) => ({ identity, index }))
+        .filter(({ identity, index }) => identity.side === side && !usedRoster.has(index))
+        .map(({ index }) => index));
+    }
+    const merged = matching.assignments.map((assignment) => {
+      const detectedRow = detected[assignment.detectedIndex];
+      let rosterIndex = assignment.rosterIndex;
+      const mappedSide = matching.topTeamSide
+        ? (detectedRow.side === 1 ? matching.topTeamSide : matching.topTeamSide === 1 ? 2 : 1)
+        : detectedRow.side as 1 | 2;
+      if (rosterIndex === null) rosterIndex = unresolvedBySide.get(mappedSide)?.shift() ?? null;
+      const identity = rosterIndex === null ? null : roster[rosterIndex];
+      return {
+        ...detectedRow,
+        userId: assignment.rosterIndex === null ? null : identity?.userId ?? null,
+        riotAccountId: assignment.rosterIndex === null ? null : identity?.riotAccountId ?? null,
+        accountName: assignment.rosterIndex === null ? "" : identity?.accountName ?? "",
+        accountTagline: assignment.rosterIndex === null ? null : identity?.accountTagline ?? null,
+        sourceAccountName: detectedRow.accountName,
+        side: identity?.side ?? mappedSide,
+        rowOrder: identity?.rowOrder ?? detectedRow.rowOrder,
+        lane: identity?.lane ?? LANES[(detectedRow.rowOrder - 1) % 5],
+        identityMatch: assignment.status,
+        identityConfidence: assignment.confidence,
+        imageSide: detectedRow.side as 1 | 2,
+        imageRowOrder: detectedRow.rowOrder,
+        fieldConfidence: {
+          ...detectedRow.fieldConfidence,
+          accountName: assignment.confidence,
+        },
+      } satisfies ResultPlayerStat;
+    });
+    return {
+      players: merged.sort((a, b) => a.side - b.side || LANES.indexOf(a.lane) - LANES.indexOf(b.lane)),
+      topTeamSide: matching.topTeamSide,
+      teamMappingConfidence: matching.teamMappingConfidence,
+    };
+  }
+
+  function selectRosterAccount(index: number, teamId: string, userId: string) {
+    const identity = rosterPlayersForMatch(teams, accounts, match)
+      .find((player) => player.userId === userId && player.side === (teamId === side1TeamId ? 1 : 2));
+    setPlayers((current) => current.map((player, playerIndex) => playerIndex === index ? {
+      ...player,
+      userId: identity?.userId ?? null,
+      riotAccountId: identity?.riotAccountId ?? null,
+      accountName: identity?.accountName ?? "",
+      accountTagline: identity?.accountTagline ?? null,
+      lane: identity?.lane ?? player.lane,
+      rowOrder: identity?.rowOrder ?? player.rowOrder,
+      identityMatch: identity ? "manual" as const : "unmatched" as const,
+      identityConfidence: identity ? 100 : 0,
+      fieldConfidence: { ...player.fieldConfidence, accountName: identity ? 100 : 0 },
+    } : player).sort((a, b) => a.side - b.side || LANES.indexOf(a.lane) - LANES.indexOf(b.lane)));
   }
 
   function correctedChampionName(value: string, options: ChampionOption[]) {
@@ -325,20 +394,12 @@ export function ResultReviewModal({
     topOutcome: "win" | "loss" | "unknown",
     topOutcomeConfidence: number,
     champions: ChampionOption[],
-    mapping: ImageMapping,
   ) {
-    const reliableTopTeam = mapping.topTeamConfidence >= 45 ? mapping.topTeam : "unknown";
-    const reliableTopColor = mapping.topSideColorConfidence >= 45 ? mapping.topSideColor : "unknown";
-    const topTeamId = reliableTopTeam === "teamA" ? match.teamAId : reliableTopTeam === "teamB" ? match.teamBId : null;
-    const otherTeamId = topTeamId === match.teamAId ? match.teamBId : topTeamId === match.teamBId ? match.teamAId : null;
-    const nextBlueTeamId = side1TeamId;
-    const nextRedTeamId = side2TeamId;
-    const topRowsAreRed = reliableTopColor === "red" || (reliableTopColor === "unknown" && topTeamId === nextRedTeamId);
-    const sideCorrected = topRowsAreRed ? swapResultSides(rows) : rows;
-    const championCorrected: ResultPlayerStat[] = sideCorrected.map((correctedRow) => {
+    const championCorrected: ResultPlayerStat[] = rows.map((correctedRow) => {
       const championMatch = correctedChampionName(correctedRow.championName, champions);
       return {
         ...correctedRow,
+        lane: correctedRow.lane ?? LANES[(correctedRow.rowOrder - 1) % 5],
         sourceAccountName: correctedRow.accountName,
         championName: championMatch.value,
         fieldConfidence: {
@@ -348,17 +409,23 @@ export function ResultReviewModal({
         userId: null,
       };
     }).sort((a, b) => a.rowOrder - b.rowOrder);
-    setPlayers((current) => mergeAnalyzedStats(current, championCorrected));
+    const merged = mergeAnalyzedStats(rosterPlayersForMatch(teams, accounts, match), championCorrected);
+    setPlayers(merged.players);
+    const topTeam = merged.topTeamSide === 1 ? "teamA" : merged.topTeamSide === 2 ? "teamB" : "unknown";
+    const topSideColor = match.phase === "scrim" && merged.topTeamSide
+      ? (merged.topTeamSide === 1 ? "blue" : "red")
+      : "unknown";
+    const mapping: ImageMapping = {
+      topTeam,
+      topTeamConfidence: merged.teamMappingConfidence,
+      topSideColor,
+      topSideColorConfidence: topSideColor === "unknown" ? 0 : merged.teamMappingConfidence,
+    };
     const reliableOutcome = topOutcomeConfidence >= 50 ? topOutcome : "unknown";
     setDetectedOutcome({ value: reliableOutcome, confidence: topOutcomeConfidence });
     let nextWinnerSide: 1 | 2 | null = null;
-    if (reliableOutcome !== "unknown") {
-      const winningTeamId = topTeamId && otherTeamId ? (reliableOutcome === "win" ? topTeamId : otherTeamId) : null;
-      if (winningTeamId) nextWinnerSide = winningTeamId === nextBlueTeamId ? 1 : 2;
-      else if (reliableTopColor !== "unknown") {
-        const topSide = reliableTopColor === "blue" ? 1 : 2;
-        nextWinnerSide = reliableOutcome === "win" ? topSide : topSide === 1 ? 2 : 1;
-      }
+    if (reliableOutcome !== "unknown" && merged.topTeamSide) {
+      nextWinnerSide = reliableOutcome === "win" ? merged.topTeamSide : merged.topTeamSide === 1 ? 2 : 1;
     }
     setWinnerSide(nextWinnerSide);
     setImageMapping(mapping);
@@ -378,13 +445,12 @@ export function ResultReviewModal({
       const champions = await loadChampionNames();
       if (source === "ocr") {
         const ocr = await extractFixedLolScoreboard(image, (value, detail) => setProgress({ value, detail: `OCR · ${detail}` }));
-        const unknownMapping: ImageMapping = { topTeam: "unknown", topTeamConfidence: 0, topSideColor: "unknown", topSideColorConfidence: 0 };
-        applyExtractedRows(ocr.players, ocr.topOutcome, ocr.topOutcomeConfidence, champions, unknownMapping);
+        applyExtractedRows(ocr.players, ocr.topOutcome, ocr.topOutcomeConfidence, champions);
         setDuration(durationLabel(ocr.durationSeconds));
         setRawExtraction(ocr.rawText);
         setAnalysisSource("ocr");
         setAnalysisModel("");
-        setAnalysisNotice("기존 OCR 결과입니다. 블루·레드 진영과 챔피언명을 직접 확인해 주세요.");
+        setAnalysisNotice("기존 OCR 결과입니다. 계정 연결과 챔피언명을 직접 확인해 주세요.");
       } else {
         const optimized = analysisImageDataUrl(image);
         const response = await fetch("/api/app", {
@@ -401,26 +467,15 @@ export function ResultReviewModal({
             durationSeconds?: number;
             topOutcome?: "win" | "loss" | "unknown";
             topOutcomeConfidence?: number;
-            topTeam?: "teamA" | "teamB" | "unknown";
-            topTeamConfidence?: number;
-            topSideColor?: "blue" | "red" | "unknown";
-            topSideColorConfidence?: number;
             rawText?: string;
           };
         };
         if (!response.ok || !payload.analysis?.players?.length) throw new Error(payload.error ?? "AI 이미지 분석에 실패했습니다.");
-        const mapping: ImageMapping = {
-          topTeam: payload.analysis.topTeam ?? "unknown",
-          topTeamConfidence: Number(payload.analysis.topTeamConfidence ?? 0),
-          topSideColor: payload.analysis.topSideColor ?? "unknown",
-          topSideColorConfidence: Number(payload.analysis.topSideColorConfidence ?? 0),
-        };
         applyExtractedRows(
           payload.analysis.players,
           payload.analysis.topOutcome ?? "unknown",
           Number(payload.analysis.topOutcomeConfidence ?? 0),
           champions,
-          mapping,
         );
         setDuration(durationLabel(Number(payload.analysis.durationSeconds ?? 0)));
         setRawExtraction(payload.analysis.rawText ?? "");
@@ -485,10 +540,18 @@ export function ResultReviewModal({
     if (missingGold) issues.push(`골드가 0인 선수 ${missingGold}명의 수치를 확인해 주세요.`);
     const invalidChampions = players.filter((player) => !championOptions.some((champion) => champion.name === player.championName.trim())).length;
     if (championOptions.length && invalidChampions) issues.push(`한국어 정식 챔피언명이 아닌 항목 ${invalidChampions}개를 수정해 주세요.`);
+    if (identitySummary.unmatched) issues.push(`등록 계정과 연결되지 않은 선수 ${identitySummary.unmatched}명을 직접 선택해 주세요.`);
+    if (identitySummary.review) issues.push(`유사 계정명 또는 나머지 명단으로 연결한 선수 ${identitySummary.review}명을 원본과 비교해 주세요.`);
     const linkedUsers = players.map((player) => player.userId).filter((id): id is string => Boolean(id));
     if (new Set(linkedUsers).size !== linkedUsers.length) issues.push("같은 등록 선수가 두 칸 이상 선택되었습니다. 10명의 계정을 다시 확인해 주세요.");
+    for (const side of [1, 2] as const) {
+      const sideRows = players.filter((player) => player.side === side);
+      if (sideRows.length !== 5 || new Set(sideRows.map((player) => player.lane)).size !== 5) {
+        issues.push(`${side === 1 ? "블루" : "레드"}팀의 생성 당시 5개 라인 연결을 확인해 주세요.`);
+      }
+    }
     return issues;
-  }, [championOptions, players, teamTotals]);
+  }, [championOptions, identitySummary, players, teamTotals]);
 
   function lowConfidence(player: ResultPlayerStat, field: OcrPlayerField) {
     const confidence = player.fieldConfidence?.[field];
@@ -497,8 +560,12 @@ export function ResultReviewModal({
 
   const championsValid = championOptions.length > 0 && players.every((player) => isKoreanChampionName(player.championName) && championOptions.some((champion) => champion.name === player.championName.trim()));
   const linkedUserIds = players.map((player) => player.userId).filter((id): id is string => Boolean(id));
-  const uniqueLinkedPlayers = new Set(linkedUserIds).size === linkedUserIds.length;
-  const valid = dataUrl && winnerSide && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && championsValid && uniqueLinkedPlayers && players.every((player) => player.accountName.trim());
+  const uniqueLinkedPlayers = linkedUserIds.length === 10 && new Set(linkedUserIds).size === 10;
+  const canonicalLineupsValid = ([1, 2] as const).every((side) => {
+    const sideRows = players.filter((player) => player.side === side);
+    return sideRows.length === 5 && new Set(sideRows.map((player) => player.lane)).size === 5;
+  });
+  const valid = dataUrl && winnerSide && side1TeamId && side2TeamId && side1TeamId !== side2TeamId && parseDuration(duration) > 0 && championsValid && uniqueLinkedPlayers && canonicalLineupsValid && players.every((player) => player.accountName.trim());
 
   function swapBlueRed() {
     const nextBlueTeamId = side2TeamId;
@@ -568,24 +635,24 @@ export function ResultReviewModal({
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={dataUrl} alt="업로드한 경기 결과 원본 미리보기" /><span>원본 보기</span>
             </a>}
-            <div className="result-source-summary"><strong>{fileName || "전체 점수판 이미지를 선택하세요"}</strong><span>{dataUrl ? `${dimensions.width} × ${dimensions.height} · 원본은 보관하고 분석용 이미지만 최적화합니다.` : "AI가 이미지 위·아래 팀과 블루·레드 진영을 함께 판독합니다."}</span></div>
+            <div className="result-source-summary"><strong>{fileName || "전체 점수판 이미지를 선택하세요"}</strong><span>{dataUrl ? `${dimensions.width} × ${dimensions.height} · 생성 당시 라인과 Riot ID를 기준으로 연결합니다.` : "이미지 행 순서 대신 생성 당시 라인과 Riot ID로 선수를 찾습니다."}</span></div>
             {analyzing && <div className="ocr-progress"><div><span style={{ width: `${progress.value}%` }} /></div><strong>{progress.detail}</strong><small>30초를 넘기면 다시 시도하거나 기존 OCR을 선택할 수 있습니다.</small></div>}
             {analysisError && <p className="form-error">{analysisError}</p>}
             {analysisNotice && <p className="analysis-notice">{analysisNotice}</p>}
             {analysisNeedsChoice && dataUrl && <div className="analysis-recovery-actions"><button type="button" className="accent-button" onClick={() => void analyzeDataUrl(dataUrl, "ai")}>AI 다시 시도</button><button type="button" className="secondary-button" onClick={() => void analyzeDataUrl(dataUrl, "ocr")}>기존 OCR 사용</button><button type="button" className="text-button" onClick={() => { setAnalysisNeedsChoice(false); setAnalysisError("직접 입력 모드입니다. 모든 항목과 진영을 확인해 주세요."); }}>직접 입력</button></div>}
           </div>
           <div className="result-fields-panel">
-            <div className="result-meta-fields">
+            <div className={`result-meta-fields ${isScrim ? "scrim-result-meta" : ""}`}>
               <label><span>세트</span><select value={setNo} onChange={(event) => setSetNo(Number(event.target.value))}>{Array.from({ length: match.bestOf ?? 1 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}세트</option>)}</select></label>
               <label><span>경기 시간</span><input value={duration} onChange={(event) => setDuration(event.target.value)} placeholder="28:07" /></label>
-              <label><span>블루팀</span><select value={side1TeamId} onChange={(event) => { const next = event.target.value; setSide1TeamId(next); setPlayers((current) => rebindRosterAccounts(current, next, side2TeamId)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
-              <button type="button" className="side-swap" aria-label="블루팀과 레드팀 위치 바꾸기" onClick={swapBlueRed}>블루 ↔ 레드 위치 바꾸기</button>
-              <label><span>레드팀</span><select value={side2TeamId} onChange={(event) => { const next = event.target.value; setSide2TeamId(next); setPlayers((current) => rebindRosterAccounts(current, side1TeamId, next)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
+              <label><span>블루팀{isScrim ? " · 생성 기준" : ""}</span><select disabled={isScrim} value={side1TeamId} onChange={(event) => { const next = event.target.value; setSide1TeamId(next); setPlayers((current) => rebindRosterAccounts(current, next, side2TeamId)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
+              {!isScrim && <button type="button" className="side-swap" aria-label="블루팀과 레드팀 위치 바꾸기" onClick={swapBlueRed}>블루 ↔ 레드 위치 바꾸기</button>}
+              <label><span>레드팀{isScrim ? " · 생성 기준" : ""}</span><select disabled={isScrim} value={side2TeamId} onChange={(event) => { const next = event.target.value; setSide2TeamId(next); setPlayers((current) => rebindRosterAccounts(current, side1TeamId, next)); }}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>
             </div>
             <div className="image-side-detection">
-              <span>AI 이미지 진영 판독</span>
-              <strong>위쪽: {imageMapping.topTeam === "teamA" ? availableTeams.find((team) => team.id === match.teamAId)?.name : imageMapping.topTeam === "teamB" ? availableTeams.find((team) => team.id === match.teamBId)?.name : "팀 확인 필요"} · {imageMapping.topSideColor === "blue" ? "BLUE" : imageMapping.topSideColor === "red" ? "RED" : "진영 확인 필요"}</strong>
-              <small>팀 {imageMapping.topTeamConfidence}% · 진영 {imageMapping.topSideColorConfidence}%</small>
+              <span>Riot ID·라인 기준 연결</span>
+              <strong>이미지 1팀: {imageMapping.topTeam === "teamA" ? availableTeams.find((team) => team.id === match.teamAId)?.name : imageMapping.topTeam === "teamB" ? availableTeams.find((team) => team.id === match.teamBId)?.name : "팀 확인 필요"}{imageMapping.topSideColor !== "unknown" ? ` · ${imageMapping.topSideColor.toUpperCase()}` : ""}</strong>
+              <small>정확 {identitySummary.exact} · 검토 {identitySummary.review} · 미연결 {identitySummary.unmatched}{imageMapping.topTeamConfidence ? ` · 팀 ${imageMapping.topTeamConfidence}%` : ""}</small>
             </div>
             <div className={`outcome-detection ${detectedOutcome.value}`}>
               <span>이미지 위쪽 결과</span>
@@ -603,10 +670,10 @@ export function ResultReviewModal({
                 <header><div><span>{side === 1 ? "BLUE TEAM" : "RED TEAM"}</span><strong>{team?.name ?? (side === 1 ? "블루팀" : "레드팀")}</strong></div><small>{teamTotals[side - 1].kills}/{teamTotals[side - 1].deaths}/{teamTotals[side - 1].assists} · {teamTotals[side - 1].gold.toLocaleString()}G</small></header>
                 <div className="result-team-players">
                   <div className="result-player-columns" aria-hidden="true"><span>라인</span><span>등록 계정</span><span>이미지 계정명</span><span>챔피언(한국어)</span><span>레벨</span><span>K</span><span>D</span><span>A</span><span>골드</span></div>
-                  {rows.map(({ player, index }) => <article className="result-player-card" key={player.rowOrder}>
+                  {rows.map(({ player, index }) => <article className="result-player-card" key={`${player.side}-${player.imageRowOrder ?? player.rowOrder}-${index}`}>
                   <div className="result-player-identity">
-                    <label><span>라인</span><select value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select></label>
-                    <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => { const account = sideAccounts.find((item) => item.userId === event.target.value); patchPlayer(index, { userId: event.target.value || null, ...(account?.riotGameName ? { accountName: account.riotGameName, fieldConfidence: { ...player.fieldConfidence, accountName: 100 } } : {}) }); }}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}{account.accountStatus === "provisional" ? " · 가입 전" : ""}</option>)}</select></label>
+                    <label><span>라인</span><select disabled={isScrim} value={player.lane} onChange={(event) => patchPlayer(index, { lane: event.target.value as ResultPlayerStat["lane"] })}>{LANES.map((lane) => <option key={lane} value={lane}>{positionLabel(lane)}</option>)}</select></label>
+                    <label className={`identity-match-field identity-${player.identityMatch ?? "unmatched"} ${lowConfidence(player, "accountName") ? "low-confidence-field" : ""}`}><span>등록 계정</span><select value={player.userId ?? ""} onChange={(event) => selectRosterAccount(index, teamId, event.target.value)}><option value="">미연결</option>{sideAccounts.map((account) => <option key={account.id} value={account.userId}>{account.riotGameName}#{account.riotTagline}{account.accountStatus === "provisional" ? " · 가입 전" : ""}</option>)}</select><small>{identityMatchLabel(player)}</small></label>
                     <label className={lowConfidence(player, "accountName") ? "low-confidence-field" : ""}><span>이미지 계정명</span><input value={player.sourceAccountName ?? ""} placeholder="AI 판독 참고값" onChange={(event) => patchSourceAccountName(index, event.target.value)} /></label>
                     <label className={lowConfidence(player, "championName") ? "low-confidence-field" : ""}><span>챔피언</span><input list="official-korean-champions" value={player.championName} onChange={(event) => patchPlayerField(index, "championName", event.target.value)} onBlur={(event) => { const corrected = correctedChampionName(event.target.value, championOptions); if (corrected.confidence) patchPlayerField(index, "championName", corrected.value); }} /></label>
                   </div>
@@ -617,7 +684,7 @@ export function ResultReviewModal({
             })}</div>
             <datalist id="official-korean-champions">{championOptions.map((champion) => <option value={champion.name} key={champion.id} />)}</datalist>
             {validationIssues.length > 0 && <div className="ocr-validation" role="status"><strong>자동 검증 확인 필요</strong>{validationIssues.map((issue) => <span key={issue}>{issue}</span>)}</div>}
-            <p className="review-help">노란 항목은 OCR 신뢰도가 낮습니다. 원본과 비교해 수정하면 해당 항목은 확인 완료로 처리됩니다.</p>
+            <p className="review-help">라인과 블루·레드는 내전 생성 명단에서 가져옵니다. 노란 계정은 유사 매칭, 빨간 계정은 미연결 상태이므로 원본과 비교해 확인해 주세요.</p>
           </div>
         </div>
         <footer><button type="button" className="secondary-button" onClick={onClose}>취소</button><button type="button" className="primary-button" disabled={busy || analyzing || submitting || !valid} onClick={() => setConfirming(true)}>{busy || submitting ? "등록 중…" : "검토 완료 및 결과 등록"}</button></footer>

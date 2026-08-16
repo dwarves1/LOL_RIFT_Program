@@ -3117,6 +3117,52 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     throw new Error("결과 이미지를 확인해 주세요.");
   }
 
+  let normalizedSide1TeamId = input.side1TeamId;
+  let normalizedSide2TeamId = input.side2TeamId;
+  let normalizedPlayers = input.players;
+  let normalizedTeams = input.teams;
+  if (match.phase === "scrim") {
+    const rosterRows = await db.select({
+      teamId: players.teamId,
+      userId: players.userId,
+      position: players.position,
+    }).from(players).where(inArray(players.teamId, [match.teamAId, match.teamBId]));
+    const canonicalRoster = new Map(rosterRows.flatMap((player) => player.userId ? [[player.userId, player] as const] : []));
+    const submittedUserIds = input.players.flatMap((player) => player.userId ? [player.userId] : []);
+    if (
+      canonicalRoster.size !== 10 ||
+      submittedUserIds.length !== 10 ||
+      new Set(submittedUserIds).size !== 10 ||
+      submittedUserIds.some((userId) => !canonicalRoster.has(userId))
+    ) {
+      throw new Error("내전 생성 당시 등록한 선수 10명과 결과의 Riot ID 연결을 확인해 주세요.");
+    }
+    normalizedSide1TeamId = match.teamAId;
+    normalizedSide2TeamId = match.teamBId;
+    normalizedPlayers = input.players.map((player) => {
+      const identity = canonicalRoster.get(player.userId!)!;
+      const side = identity.teamId === match.teamAId ? 1 : 2;
+      const laneIndex = POSITIONS.indexOf(identity.position ?? "");
+      if (laneIndex < 0) throw new Error("내전 생성 당시 선수 라인을 확인해 주세요.");
+      return {
+        ...player,
+        side: side as 1 | 2,
+        rowOrder: (side - 1) * 5 + laneIndex + 1,
+        lane: POSITIONS[laneIndex] as ResultPlayerInput["lane"],
+      };
+    });
+    normalizedTeams = ([1, 2] as const).map((side) => {
+      const sidePlayers = normalizedPlayers.filter((player) => player.side === side);
+      return {
+        side,
+        kills: sidePlayers.reduce((sum, player) => sum + statInteger(player.kills), 0),
+        deaths: sidePlayers.reduce((sum, player) => sum + statInteger(player.deaths), 0),
+        assists: sidePlayers.reduce((sum, player) => sum + statInteger(player.assists), 0),
+        gold: sidePlayers.reduce((sum, player) => sum + statInteger(player.gold), 0),
+      };
+    });
+  }
+
   const [previousImage] = await db
     .select()
     .from(matchResultImages)
@@ -3155,8 +3201,8 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
   const previousPlayerStats = previousImage
     ? await db.select().from(playerMatchStats).where(and(eq(playerMatchStats.matchId, match.id), eq(playerMatchStats.setNo, setNo)))
     : [];
-  const sideTeam = new Map<number, string>([[1, input.side1TeamId], [2, input.side2TeamId]]);
-  const teamStatValues = input.teams.map((team) => ({
+  const sideTeam = new Map<number, string>([[1, normalizedSide1TeamId], [2, normalizedSide2TeamId]]);
+  const teamStatValues = normalizedTeams.map((team) => ({
     matchId: match.id,
     setNo,
     side: team.side,
@@ -3167,7 +3213,7 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
     gold: statInteger(team.gold),
     won: sideTeam.get(team.side) === input.winnerTeamId,
   }));
-  const playerStatValues = input.players.map((player, index) => ({
+  const playerStatValues = normalizedPlayers.map((player, index) => ({
     id: uid("player_stat"),
     matchId: match.id,
     setNo,
@@ -3192,8 +3238,8 @@ export async function saveMatchResult(input: SaveMatchResultInput, actor: Reques
 
   const [existingGame] = await db.select().from(matchGames).where(and(eq(matchGames.matchId, match.id), eq(matchGames.setNo, setNo))).limit(1);
   const gameValues = {
-    blueTeamId: input.side1TeamId,
-    redTeamId: input.side2TeamId,
+    blueTeamId: normalizedSide1TeamId,
+    redTeamId: normalizedSide2TeamId,
     winnerTeamId: input.winnerTeamId,
     status: "completed" as const,
     completedAt: reviewedAt,

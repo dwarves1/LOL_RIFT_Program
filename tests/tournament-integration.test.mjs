@@ -486,6 +486,74 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   );
 });
 
+test("scrim result storage restores blue, red, and lane from the created Riot ID roster", async () => {
+  const created = await tournament.createScrimSeason({
+    name: "Viewer-relative scoreboard QA",
+    startAt: "2026-08-14T12:00:00.000Z",
+    starterPoints: 1000,
+  }, actors.get("admin"));
+  for (let index = 1; index <= 10; index += 1) {
+    await tournament.joinTournamentByCode(created.accessCode, actors.get(`player${index}`));
+  }
+  const createdMatch = await tournament.createScrimMatch({
+    tournamentId: created.tournamentId,
+    scheduledAt: "2026-08-14T13:00:00.000Z",
+    blueAccountIds: accountIds.slice(0, 5),
+    redAccountIds: accountIds.slice(5, 10),
+  }, actors.get("admin"));
+  const data = await dashboard(created.tournamentId);
+  const match = data.matches.find((item) => item.id === createdMatch.matchId);
+  const bluePlayers = data.teams.find((team) => team.id === match.teamAId).players;
+  const redPlayers = data.teams.find((team) => team.id === match.teamBId).players;
+  await tournament.setScrimBetting(match.id, "closed", actors.get("admin"));
+
+  const submitted = [...redPlayers, ...bluePlayers].map((player, index) => ({
+    side: index < 5 ? 1 : 2,
+    rowOrder: index + 1,
+    userId: player.userId,
+    accountName: player.nickname,
+    championName: "가렌",
+    championLevel: 18,
+    lane: "TOP",
+    kills: index,
+    deaths: 1,
+    assists: 2,
+    gold: 10000 + index,
+  }));
+  await tournament.saveMatchResult({
+    matchId: match.id,
+    setNo: 1,
+    winnerTeamId: match.teamBId,
+    side1TeamId: match.teamBId,
+    side2TeamId: match.teamAId,
+    durationSeconds: 1500,
+    teams: [
+      { side: 1, kills: 999, deaths: 999, assists: 999, gold: 999 },
+      { side: 2, kills: 999, deaths: 999, assists: 999, gold: 999 },
+    ],
+    players: submitted,
+    image: { objectKey: "qa/viewer-relative.png", imageHash: "viewer-relative", fileName: "result.png", contentType: "image/png", fileSize: 1000 },
+    extraction: { source: "qa" },
+  }, actors.get("admin"));
+
+  const game = sqlite.prepare("SELECT blue_team_id, red_team_id FROM match_games WHERE match_id = ?").get(match.id);
+  assert.equal(game.blue_team_id, match.teamAId);
+  assert.equal(game.red_team_id, match.teamBId);
+  const savedBlue = sqlite.prepare("SELECT team_id, side, lane, row_order FROM player_match_stats WHERE match_id = ? AND user_id = 'player1'").get(match.id);
+  const savedRed = sqlite.prepare("SELECT team_id, side, lane, row_order FROM player_match_stats WHERE match_id = ? AND user_id = 'player10'").get(match.id);
+  assert.equal(savedBlue.team_id, match.teamAId);
+  assert.equal(savedBlue.side, 1);
+  assert.equal(savedBlue.lane, "TOP");
+  assert.equal(savedBlue.row_order, 1);
+  assert.equal(savedRed.team_id, match.teamBId);
+  assert.equal(savedRed.side, 2);
+  assert.equal(savedRed.lane, "SUP");
+  assert.equal(savedRed.row_order, 10);
+  const savedBlueTotals = sqlite.prepare("SELECT kills, gold FROM match_team_stats WHERE match_id = ? AND side = 1").get(match.id);
+  assert.notEqual(savedBlueTotals.kills, 999);
+  assert.notEqual(savedBlueTotals.gold, 999);
+});
+
 test("automatic backups export a validated snapshot and restore a safe copy", async () => {
   const created = await tournament.createScrimSeason({
     name: "Backup QA season",
