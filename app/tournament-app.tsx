@@ -2071,18 +2071,29 @@ function ScrimMatchControl({ match, teamA, teamB, tournamentId, canCorrect, isAd
   const matchPath = `${permanentPath}?match=${encodeURIComponent(match.id)}`;
   const names = (team?: Team) => team?.players.map((player) => player.nickname).join(" · ") ?? "";
   const isLocked = Boolean(match.resultLockedAt);
+  const canEditSchedule = match.status === "scheduled" || match.status === "completed";
+  const bettingEnded = match.bettingStatus === "closed" || match.bettingStatus === "settled";
+  const settlementCompleted = match.settlementStatus === "completed";
+  const canLock = bettingEnded && settlementCompleted;
+  const bettingLabel = match.bettingStatus === "open"
+    ? "배팅 중"
+    : match.bettingStatus === "closed"
+      ? "배팅 종료"
+      : match.bettingStatus === "settled"
+        ? "배팅 정산 완료"
+        : "배팅 대기";
   return <div className={`scrim-match-control ${isLocked ? "locked" : ""}`}>
-    <header><div><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><span>{match.roundLabel} · {formatDate(match.scheduledAt)}</span></div>{isLocked ? <b className="result-locked">🔒 운영 잠금</b> : <b className={`betting-state ${match.bettingStatus}`}>{match.bettingStatus === "open" ? "배팅 중" : match.bettingStatus === "closed" ? "배팅 종료" : "대기"}</b>}</header>
+    <header><div><strong>{teamA?.name} <small>vs</small> {teamB?.name}</strong><span>{match.roundLabel} · {formatDate(match.scheduledAt)}</span></div>{isLocked ? <b className="result-locked">🔒 운영 잠금</b> : <b className={`betting-state ${match.bettingStatus}`}>{bettingLabel}</b>}</header>
     <div className="scrim-rosters"><span><b>BLUE</b>{names(teamA)}</span><span><b>RED</b>{names(teamB)}</span></div>
     <div className="scrim-control-actions">
-      {!isLocked && <><input type="datetime-local" value={scheduledAt} disabled={busy || match.status !== "scheduled"} onChange={(event) => setScheduledAt(event.target.value)} aria-label="내전 경기 일시" />
-      <button type="button" disabled={busy || match.status !== "scheduled" || scheduledAt === originalScheduledAt} onClick={() => command({ action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() }, "내전 경기 일정을 변경했습니다.")}>일정 저장</button>
-      {match.bettingStatus === "scheduled" && <button type="button" className="primary-button compact" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "open" }, "배팅을 시작했습니다. 공유 링크를 사용할 수 있습니다.")}>배팅 시작</button>}
-      {match.bettingStatus === "open" && <button type="button" className="accent-button" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "closed" }, "배팅을 종료했습니다.")}>배팅 종료</button>}</>}
+      {!isLocked && <><input type="datetime-local" value={scheduledAt} disabled={busy || !canEditSchedule} onChange={(event) => setScheduledAt(event.target.value)} aria-label={match.status === "completed" ? "진행 완료 경기 일시 정정" : "내전 경기 일시"} />
+      <button type="button" disabled={busy || !canEditSchedule || scheduledAt === originalScheduledAt} onClick={() => command({ action: "set_match_schedule", matchId: match.id, scheduledAt: new Date(scheduledAt).toISOString() }, match.status === "completed" ? "진행 완료 경기의 일정을 정정했습니다." : "내전 경기 일정을 변경했습니다.")}>{match.status === "completed" ? "완료 경기 일정 정정" : "일정 저장"}</button>
+      {match.status === "scheduled" && match.bettingStatus === "scheduled" && <button type="button" className="primary-button compact" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "open" }, "배팅을 시작했습니다. 공유 링크를 사용할 수 있습니다.")}>배팅 시작</button>}
+      {match.status === "scheduled" && match.bettingStatus === "open" && <button type="button" className="accent-button" disabled={busy} onClick={() => command({ action: "set_scrim_betting", matchId: match.id, status: "closed" }, "배팅을 종료했습니다.")}>배팅 종료</button>}</>}
       <button type="button" className="secondary-button" onClick={() => void shareOrCopy(matchPath, `${teamA?.name} vs ${teamB?.name} 내전 배팅`).then(window.alert).catch(() => undefined)}>영구 경기 링크 공유</button>
       <button type="button" className="text-button" onClick={() => void shareOrCopy(permanentPath, "내전 배팅 현황").then(window.alert).catch(() => undefined)}>전체 배팅 영구 링크</button>
       {canCorrect && !isLocked && <><button type="button" className="text-button" disabled={busy} onClick={() => { if (!window.confirm("등록된 결과·통계와 배팅을 모두 취소하고 배팅 대기 상태로 되돌릴까요?\n유료 배팅 포인트는 모두 환불되며, 다시 배팅을 시작할 수 있습니다.")) return; void command({ action: "rollback_scrim_match", matchId: match.id }, "내전 경기 결과와 배팅을 배팅 대기 상태로 되돌렸습니다."); }}>결과·배팅 롤백</button><button type="button" className="text-button" disabled={busy} onClick={() => { if (!window.confirm("이 내전 경기와 팀 구성, 배팅 기록을 삭제할까요?\n유료 배팅 포인트는 모두 환불되며 이 작업은 되돌릴 수 없습니다.")) return; void command({ action: "delete_scrim_match", matchId: match.id }, "내전 경기를 삭제하고 배팅 포인트를 환불했습니다."); }}>경기 삭제</button></>}
-      {canCorrect && !isLocked && match.status === "completed" && <button type="button" className="lock-match-button" disabled={busy} onClick={() => { if (!window.confirm("완료된 경기를 운영 잠금할까요?\n승리팀·일정·상세 통계·배팅·삭제를 더 이상 변경할 수 없으며 관리자만 해제할 수 있습니다.")) return; void command({ action: "lock_scrim_match", matchId: match.id }, "내전 경기를 운영 잠금했습니다."); }}>🔒 경기 잠금</button>}
+      {canCorrect && !isLocked && match.status === "completed" && <button type="button" className="lock-match-button" disabled={busy || !canLock} title={!bettingEnded ? "배팅을 먼저 종료해 주세요." : !settlementCompleted ? "배팅 정산을 먼저 완료해 주세요." : "일정 확인 후 경기를 잠급니다."} onClick={() => { if (!window.confirm("배팅 종료·정산과 경기 일정을 최종 확인했나요?\n잠그면 승리팀·일정·상세 통계·배팅·삭제를 더 이상 변경할 수 없으며 관리자만 해제할 수 있습니다.")) return; void command({ action: "lock_scrim_match", matchId: match.id }, "내전 경기를 운영 잠금했습니다."); }}>🔒 경기 잠금</button>}
       {isLocked && isAdmin && <button type="button" className="text-button unlock-match-button" disabled={busy} onClick={() => { if (!window.confirm("관리자 전용 작업입니다. 이 경기의 운영 잠금을 해제할까요?")) return; if (!window.confirm("최종 확인: 잠금 해제 후 결과와 배팅 정보를 다시 수정할 수 있습니다. 계속할까요?")) return; void command({ action: "unlock_scrim_match", matchId: match.id }, "내전 경기 운영 잠금을 해제했습니다."); }}>관리자 잠금 해제</button>}
     </div>
   </div>;

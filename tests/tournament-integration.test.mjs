@@ -460,6 +460,11 @@ test("scrim season supports ten registered players, free 100P, single picks, and
   const operatorData = await tournament.getDashboard(created.tournamentId, actors.get("admin"));
   assert.ok(operatorData.backups.some((backup) => backup.kind === "automatic"));
   assert.equal(operatorData.settlementSummaries.find((row) => row.matchId === match.id).state, "completed");
+  await tournament.setMatchSchedule(match.id, "2026-08-12T14:30:00.000Z", actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT scheduled_at FROM matches WHERE id = ?").get(match.id).scheduled_at, "2026-08-12T14:30:00.000Z");
+  sqlite.prepare("UPDATE matches SET betting_status = 'open' WHERE id = ?").run(match.id);
+  await assert.rejects(() => tournament.lockScrimMatch(match.id, actors.get("admin")), /배팅을 종료/);
+  sqlite.prepare("UPDATE matches SET betting_status = 'settled' WHERE id = ?").run(match.id);
   await tournament.lockScrimMatch(match.id, actors.get("admin"));
   assert.ok(sqlite.prepare("SELECT result_locked_at FROM matches WHERE id = ?").get(match.id).result_locked_at);
   await assert.rejects(() => tournament.setMatchSchedule(match.id, "2026-08-12T15:00:00.000Z", actors.get("admin")), /운영 잠금/);

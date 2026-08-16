@@ -2255,6 +2255,9 @@ export async function lockScrimMatch(matchId: string, actor: RequestUser) {
   await requireTournamentOperator(actor, match.tournamentId);
   if (match.resultLockedAt) return;
   if (match.status !== "completed" || !match.winnerId) throw new Error("결과가 완료된 내전 경기만 잠글 수 있습니다.");
+  if (match.bettingStatus !== "closed" && match.bettingStatus !== "settled") {
+    throw new Error("배팅을 종료한 뒤 경기를 잠가 주세요.");
+  }
   const [betCount] = await db.select({ count: sql<number>`count(*)` }).from(bets).where(and(
     eq(bets.matchId, match.id),
     ne(bets.status, "refunded"),
@@ -3349,7 +3352,7 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
     scheduleConfirmed: match.scheduleConfirmed,
   }, {
     scheduledAt: nextScheduledAt,
-    scheduleConfirmed: false,
+    scheduleConfirmed: match.phase === "scrim",
   });
 }
 
