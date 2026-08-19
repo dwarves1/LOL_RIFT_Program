@@ -1478,9 +1478,10 @@ function BracketView({ data, teamMap, isStaff, busy, command, matches: bracketMa
 function BracketCard({ match, teamMap, isStaff, busy, command }: { match: Match; teamMap: Map<string, Team>; isStaff: boolean; busy: boolean; command: SharedProps["command"] }) {
   const entries = [match.teamAId, match.teamBId].map((id) => id ? teamMap.get(id) : undefined);
   const isCancelled = match.status === "cancelled";
+  const matchLabel = match.matchNo === "F" ? "FINAL" : /^G[1-7]$/.test(match.matchNo) ? `${match.matchNo.slice(1)}경기` : match.matchNo;
   return (
     <article className={`bracket-card ${match.status}`}>
-      <header><strong>{match.matchNo === "F" ? "FINAL" : match.matchNo}</strong><span>{match.roundLabel} · BO{match.bestOf} · {isCancelled ? "경기 취소" : `${match.seriesScoreA}:${match.seriesScoreB}`}</span></header>
+      <header><strong>{matchLabel}</strong><span>{match.roundLabel} · BO{match.bestOf} · {isCancelled ? "경기 취소" : `${match.seriesScoreA}:${match.seriesScoreB}`}</span></header>
       {entries.map((team, index) => (
         <div className={team && match.winnerId === team.id ? "winner" : ""} key={team?.id ?? index}>
           <TeamMark team={team} small /><span>{team?.name ?? "결과 대기"}</span>{team && match.winnerId === team.id && <b>W</b>}

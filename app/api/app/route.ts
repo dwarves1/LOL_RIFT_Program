@@ -13,6 +13,7 @@ import {
   resetLolmen2026TestData,
   runPendingLolmen2026ManduAccountCleanup,
   runPendingLolmen2026DeploymentCleanup,
+  runPendingLolmen2026BracketRestructure,
   markLolmen2026ResultAssetsDeleted,
   createTiebreakerMatch,
   getDashboard,
@@ -93,6 +94,11 @@ export async function GET(request: Request) {
       }
     } catch (cleanupError) {
       console.error("Pending 2026 lolmen cleanup will be retried", cleanupError instanceof Error ? cleanupError.message : "unknown error");
+    }
+    try {
+      await runPendingLolmen2026BracketRestructure();
+    } catch (cleanupError) {
+      console.error("Pending 2026 lolmen bracket restructure will be retried", cleanupError instanceof Error ? cleanupError.message : "unknown error");
     }
     const url = new URL(request.url);
     const user = await getRequestUser(request);

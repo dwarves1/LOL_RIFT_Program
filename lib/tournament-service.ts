@@ -1367,6 +1367,7 @@ async function createAutomaticBackup(tournamentId: string, actor: RequestUser, r
 const LOLMEN_2026_RESET_ACTION = "lolmen_2026_test_data_reset";
 const LOLMEN_2026_ASSET_CLEANUP_ACTION = "lolmen_2026_result_assets_deleted";
 const LOLMEN_2026_MANDU_ACCOUNT_CLEANUP_ACTION = "lolmen_2026_mandu_account_linked_v1";
+const LOLMEN_2026_BRACKET_RESTRUCTURE_ACTION = "lolmen_2026_five_team_bracket_restructured_v1";
 const LOLMEN_2026_MANDU_CANONICAL_NAME = "물만두반 고기만두반";
 const LOLMEN_2026_MANDU_ALIASES = new Set([
   LOLMEN_2026_MANDU_CANONICAL_NAME,
@@ -2248,6 +2249,130 @@ export async function setScrimBetting(matchId: string, nextStatus: "open" | "clo
   return { sharePath: `/scrim/${encodeURIComponent(match.tournamentId)}/bet?match=${encodeURIComponent(match.id)}` };
 }
 
+/**
+ * Replaces an unplayed 2026 롤멘 bracket with the requested five-team
+ * placement ladder. League results, seeds, teams, players and points remain
+ * untouched. A backup and audit row make the one-time operation recoverable
+ * and idempotent.
+ */
+export async function replaceLolmen2026Bracket(tournamentId: string, actor: RequestUser) {
+  const tournament = await requireLolmen2026Tournament(tournamentId, actor, true);
+  const db = getDb();
+  const [completed] = await db.select({ id: auditLogs.id }).from(auditLogs).where(and(
+    eq(auditLogs.tournamentId, tournament.id),
+    eq(auditLogs.action, LOLMEN_2026_BRACKET_RESTRUCTURE_ACTION),
+  )).limit(1);
+  if (completed) return { alreadyCompleted: true, matchesCreated: 8 };
+
+  const tournamentTeams = await db.select().from(teams).where(eq(teams.tournamentId, tournament.id)).orderBy(asc(teams.seed));
+  if (tournamentTeams.length !== 5 || tournamentTeams.some((team, index) => team.seed !== index + 1)) {
+    throw new Error("1위부터 5위까지 확정된 다섯 팀이 필요합니다.");
+  }
+  const seedOrder = tournamentTeams.map((team) => team.id);
+  const bracketMatches = await db.select().from(matches).where(and(
+    eq(matches.tournamentId, tournament.id),
+    eq(matches.phase, "bracket"),
+  )).orderBy(asc(matches.sortOrder));
+  if (bracketMatches.some((match) => match.status !== "scheduled" || match.winnerId || match.loserId || match.resultLockedAt)) {
+    throw new Error("이미 진행되거나 잠긴 토너먼트 경기가 있어 대진을 자동 교체할 수 없습니다.");
+  }
+
+  const bracketMatchIds = bracketMatches.map((match) => match.id);
+  if (bracketMatchIds.length) {
+    const activityCounts = await Promise.all([
+      db.select({ count: sql<number>`count(*)` }).from(bets).where(inArray(bets.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(betSettlements).where(inArray(betSettlements.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(matchGames).where(inArray(matchGames.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(matchResultImages).where(inArray(matchResultImages.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(matchTeamStats).where(inArray(matchTeamStats.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(playerMatchStats).where(inArray(playerMatchStats.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(resultRevisions).where(inArray(resultRevisions.matchId, bracketMatchIds)),
+      db.select({ count: sql<number>`count(*)` }).from(draftSessions).where(inArray(draftSessions.matchId, bracketMatchIds)),
+    ]);
+    if (activityCounts.some(([row]) => Number(row?.count ?? 0) > 0)) {
+      throw new Error("기존 토너먼트 대진에 배팅·밴픽·경기 결과가 있어 자동 교체를 중단했습니다.");
+    }
+  }
+
+  await createAutomaticBackup(tournament.id, actor, "2026 롤멘 5팀 토너먼트 대진 교체 전 자동 백업");
+  const firstExisting = bracketMatches[0];
+  const leagueMatches = await db.select({ id: matches.id }).from(matches).where(and(
+    eq(matches.tournamentId, tournament.id),
+    eq(matches.phase, "league"),
+  ));
+  const bracketStart = firstExisting
+    ? isoAfter(firstExisting.scheduledAt, -(Math.max(1, firstExisting.sortOrder) - 1) * 90)
+    : isoAfter(tournament.startAt, leagueMatches.length * 60 + 180);
+  const definitions = buildFiveTeamPlacementDefinitions(seedOrder);
+  const bracketRows = definitions.map(([matchNo, roundLabel, sourceA, sourceB], index) => ({
+    id: uid("match"),
+    tournamentId: tournament.id,
+    phase: "bracket" as const,
+    matchNo,
+    roundLabel,
+    sourceA,
+    sourceB,
+    bestOf: FIVE_TEAM_PLACEMENT_BEST_OF[matchNo],
+    teamAId: sourceA.startsWith("seed:") ? sourceA.slice(5) : null,
+    teamBId: sourceB.startsWith("seed:") ? sourceB.slice(5) : null,
+    scheduledAt: isoAfter(bracketStart, index * 90),
+    scheduleConfirmed: false,
+    sortOrder: index + 1,
+  }));
+  const now = new Date().toISOString();
+  const statements: unknown[] = [
+    db.delete(matches).where(and(eq(matches.tournamentId, tournament.id), eq(matches.phase, "bracket"))),
+    db.update(tournaments).set({
+      status: "bracket",
+      bracketFormat: "winner_loser_split",
+      competitionFormat: "league_then_split",
+      advancingTeamCount: 5,
+      bracketBestOf: 3,
+      semifinalBestOf: 3,
+      finalBestOf: 5,
+    }).where(eq(tournaments.id, tournament.id)),
+    ...bracketRows.map((row) => db.insert(matches).values(row)),
+    db.insert(auditLogs).values({
+      id: uid("audit"),
+      tournamentId: tournament.id,
+      actorId: actor.id,
+      actorName: actor.displayName,
+      action: LOLMEN_2026_BRACKET_RESTRUCTURE_ACTION,
+      entityType: "tournament",
+      entityId: tournament.id,
+      beforeJson: JSON.stringify({
+        bracketFormat: tournament.bracketFormat,
+        competitionFormat: tournament.competitionFormat,
+        matches: bracketMatches.map((match) => ({ id: match.id, matchNo: match.matchNo, bestOf: match.bestOf })),
+      }),
+      afterJson: JSON.stringify({
+        bracketFormat: "winner_loser_split",
+        competitionFormat: "league_then_split",
+        seedOrder,
+        matches: bracketRows.map((match) => ({ id: match.id, matchNo: match.matchNo, bestOf: match.bestOf, sourceA: match.sourceA, sourceB: match.sourceB })),
+      }),
+      createdAt: now,
+    }),
+  ];
+  await db.batch(statements as never);
+  return { alreadyCompleted: false, matchesCreated: bracketRows.length };
+}
+
+/** Applies the explicitly requested production bracket change on first load. */
+export async function runPendingLolmen2026BracketRestructure() {
+  await ensureSchema();
+  const db = getDb();
+  const tournamentRows = await db.select().from(tournaments);
+  const target = tournamentRows.find((tournament) => (
+    tournament.competitionKind === "tournament"
+    && tournament.name.trim().normalize("NFKC") === "2026 롤멘 대회"
+  ));
+  if (!target) return null;
+  const teamCountRows = await db.select({ count: sql<number>`count(*)` }).from(teams).where(eq(teams.tournamentId, target.id));
+  if (Number(teamCountRows[0]?.count ?? 0) !== 5) return null;
+  return replaceLolmen2026Bracket(target.id, lolmen2026MaintenanceActor());
+}
+
 export async function lockScrimMatch(matchId: string, actor: RequestUser) {
   const db = getDb();
   const [match] = await db.select().from(matches).where(eq(matches.id, matchId)).limit(1);
@@ -2607,8 +2732,11 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
   const bracketStart = tournament.preliminaryFormat === "none"
     ? tournament.startAt
     : isoAfter(tournament.startAt, leagueMatches.length * 60 + 180);
-  const definitions: Array<[string, string, string, string]> = tournament.bracketFormat === "winner_loser_split"
-    ? buildWinnerLoserDefinitions(bracketSeeds)
+  const isFiveTeamPlacementBracket = tournament.bracketFormat === "winner_loser_split" && bracketSeeds.length === 5;
+  const definitions: Array<[string, string, string, string]> = isFiveTeamPlacementBracket
+    ? buildFiveTeamPlacementDefinitions(bracketSeeds)
+    : tournament.bracketFormat === "winner_loser_split"
+      ? buildWinnerLoserDefinitions(bracketSeeds)
     : buildSingleEliminationDefinitions(bracketSeeds);
 
   const bracketRows = definitions.map(([matchNo, roundLabel, sourceA, sourceB], index) => ({
@@ -2619,7 +2747,9 @@ async function createBracketInternal(tournamentId: string, seedOrder: string[], 
       roundLabel,
       sourceA,
       sourceB,
-      bestOf: matchNo === "F" || roundLabel === "최종 결승"
+      bestOf: isFiveTeamPlacementBracket
+        ? FIVE_TEAM_PLACEMENT_BEST_OF[matchNo]
+        : matchNo === "F" || roundLabel === "최종 결승"
         ? tournament.finalBestOf
         : roundLabel.includes("준결승") || roundLabel.includes("조 결승")
           ? tournament.semifinalBestOf
@@ -3354,6 +3484,32 @@ export async function setMatchSchedule(matchId: string, scheduledAt: string, act
     scheduledAt: nextScheduledAt,
     scheduleConfirmed: match.phase === "scrim",
   });
+}
+
+const FIVE_TEAM_PLACEMENT_BEST_OF: Record<string, number> = {
+  G1: 3,
+  G2: 3,
+  G3: 1,
+  G4: 1,
+  G5: 3,
+  G6: 1,
+  G7: 3,
+  F: 5,
+};
+
+function buildFiveTeamPlacementDefinitions(seedOrder: string[]): Array<[string, string, string, string]> {
+  if (seedOrder.length !== 5) throw new Error("5팀 순위 결정 대진에는 정확히 다섯 팀이 필요합니다.");
+  const [seed1, seed2, seed3, seed4, seed5] = seedOrder;
+  return [
+    ["G1", "오프닝 1경기", `seed:${seed1}`, `seed:${seed4}`],
+    ["G2", "오프닝 2경기", `seed:${seed2}`, `seed:${seed3}`],
+    ["G3", "패자전 3경기", "loser:G1", "loser:G2"],
+    ["G4", "5위 결정 4경기", "loser:G3", `seed:${seed5}`],
+    ["G5", "승자전 5경기", "winner:G1", "winner:G2"],
+    ["G6", "4위 결정 6경기", "winner:G3", "winner:G4"],
+    ["G7", "3위 결정 7경기", "loser:G5", "winner:G6"],
+    ["F", "최종 결승", "winner:G5", "winner:G7"],
+  ];
 }
 
 export async function setMatchBestOf(matchId: string, bestOf: number, actor: RequestUser) {

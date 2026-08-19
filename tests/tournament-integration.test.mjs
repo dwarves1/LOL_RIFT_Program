@@ -211,6 +211,36 @@ test("five competition formats create and progress with the configured BO rules"
   assert.deepEqual(data.teams.filter((team) => team.seed).sort((a, b) => a.seed - b.seed).map((team) => team.id), manualSeedOrder);
 });
 
+test("2026 롤멘 five-team bracket follows the requested placement ladder and BO rules", async () => {
+  const created = await createCompetition("2026 롤멘 대진 테스트", "league_then_bracket", 5);
+  let data = await dashboard(created.tournamentId);
+  for (const match of data.matches.filter((item) => item.phase === "league")) {
+    await tournament.setMatchWinner(match.id, match.teamAId, actors.get("admin"));
+  }
+  data = await dashboard(created.tournamentId);
+  const seedOrder = data.standings.map((row) => row.teamId);
+  await tournament.createBracket(created.tournamentId, seedOrder, actors.get("admin"));
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM matches WHERE tournament_id = ? AND phase = 'bracket'").get(created.tournamentId).count, 4);
+
+  const replaced = await tournament.replaceLolmen2026Bracket(created.tournamentId, actors.get("admin"));
+  assert.deepEqual(replaced, { alreadyCompleted: false, matchesCreated: 8 });
+  const rows = sqlite.prepare("SELECT match_no, source_a, source_b, best_of FROM matches WHERE tournament_id = ? AND phase = 'bracket' ORDER BY sort_order").all(created.tournamentId).map((row) => ({ ...row }));
+  assert.deepEqual(rows, [
+    { match_no: "G1", source_a: `seed:${seedOrder[0]}`, source_b: `seed:${seedOrder[3]}`, best_of: 3 },
+    { match_no: "G2", source_a: `seed:${seedOrder[1]}`, source_b: `seed:${seedOrder[2]}`, best_of: 3 },
+    { match_no: "G3", source_a: "loser:G1", source_b: "loser:G2", best_of: 1 },
+    { match_no: "G4", source_a: "loser:G3", source_b: `seed:${seedOrder[4]}`, best_of: 1 },
+    { match_no: "G5", source_a: "winner:G1", source_b: "winner:G2", best_of: 3 },
+    { match_no: "G6", source_a: "winner:G3", source_b: "winner:G4", best_of: 1 },
+    { match_no: "G7", source_a: "loser:G5", source_b: "winner:G6", best_of: 3 },
+    { match_no: "F", source_a: "winner:G5", source_b: "winner:G7", best_of: 5 },
+  ]);
+  const format = { ...sqlite.prepare("SELECT bracket_format, competition_format, advancing_team_count FROM tournaments WHERE id = ?").get(created.tournamentId) };
+  assert.deepEqual(format, { bracket_format: "winner_loser_split", competition_format: "league_then_split", advancing_team_count: 5 });
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM tournament_backups WHERE tournament_id = ? AND kind = 'automatic'").get(created.tournamentId).count > 0, true);
+  assert.deepEqual(await tournament.replaceLolmen2026Bracket(created.tournamentId, actors.get("admin")), { alreadyCompleted: true, matchesCreated: 8 });
+});
+
 test("signed-in viewers can send feedback and only administrators can manage it", async () => {
   const created = await createCompetition("QA 피드백 대회", "league_only", 2);
   const sender = actors.get("outsider");
