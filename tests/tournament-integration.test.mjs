@@ -195,6 +195,20 @@ test("five competition formats create and progress with the configured BO rules"
     data = await completeReadyBracket(created.tournamentId);
     assert.equal(data.tournament.status, "completed");
   }
+
+  const tiedBracket = await createCompetition("QA 동률 허용 토너먼트", "league_then_bracket", 3);
+  data = await dashboard(tiedBracket.tournamentId);
+  const [tiedAB, tiedAC, tiedBC] = data.matches.filter((match) => match.phase === "league");
+  await tournament.setMatchWinner(tiedAB.id, tiedAB.teamAId, actors.get("admin"));
+  await tournament.setMatchWinner(tiedAC.id, tiedAC.teamBId, actors.get("admin"));
+  await tournament.setMatchWinner(tiedBC.id, tiedBC.teamAId, actors.get("admin"));
+  data = await dashboard(tiedBracket.tournamentId);
+  assert.ok(data.standings.every((row) => row.tied));
+  const manualSeedOrder = [data.standings[2].teamId, data.standings[0].teamId, data.standings[1].teamId];
+  await tournament.createBracket(tiedBracket.tournamentId, manualSeedOrder, actors.get("admin"));
+  data = await dashboard(tiedBracket.tournamentId);
+  assert.equal(data.matches.filter((match) => match.phase === "bracket").length, 2);
+  assert.deepEqual(data.teams.filter((team) => team.seed).sort((a, b) => a.seed - b.seed).map((team) => team.id), manualSeedOrder);
 });
 
 test("signed-in viewers can send feedback and only administrators can manage it", async () => {

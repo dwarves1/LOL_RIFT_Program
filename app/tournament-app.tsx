@@ -1307,6 +1307,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
   const allLeagueDone = regularMatches.length > 0 && regularMatches.every((match) => match.status === "completed" || match.status === "cancelled");
   const hasBracket = data.summary.bracketTotal > 0;
   const canOperate = data.viewer?.role === "operator" || data.viewer?.role === "admin";
+  const hasTiedStandings = data.standings.some((row) => row.tied);
   const orderRows = seedOrder.map((id) => data.standings.find((row) => row.teamId === id)!).filter(Boolean);
   const selectedTeam = data.teams.find((team) => team.id === selectedTeamId);
 
@@ -1320,6 +1321,11 @@ function StandingsView({ data, busy, command }: SharedProps) {
     if (target < 0 || target >= next.length) return;
     [next[index], next[target]] = [next[target], next[index]];
     setSeedOrder(next);
+  }
+
+  function createBracketFromCurrentSeeds() {
+    if (hasTiedStandings && !window.confirm("동률 팀이 남아 있습니다.\n현재 표시된 시드 순서로 토너먼트 대진을 생성할까요?")) return;
+    void command({ action: "create_bracket", tournamentId: data.tournament!.id, seedOrder: seedOrder.slice(0, data.tournament?.advancingTeamCount ?? seedOrder.length) }, "토너먼트 대진을 확정했습니다.");
   }
 
   return (
@@ -1354,7 +1360,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
             <div className="seed-lock success"><span>✓</span><strong>시드 확정 완료</strong><p>토너먼트 대진에 반영되었습니다.</p></div>
           ) : (
             <>
-              <p className="seed-help">동률 팀이 있다면 화살표로 최종 순서를 조정하세요.</p>
+              <p className="seed-help">동률 팀은 화살표로 순서를 조정할 수 있습니다. 순위 구분이 필요하지 않다면 현재 순서 그대로 대진을 생성해도 됩니다.</p>
               <div className="seed-list">
                 {orderRows.map((row, index) => (
                   <div key={row.teamId}>
@@ -1364,7 +1370,7 @@ function StandingsView({ data, busy, command }: SharedProps) {
                   </div>
                 ))}
               </div>
-              {canOperate && data.tournament?.bracketFormat !== "none" && <button className="primary-button wide" disabled={busy || data.standings.some((row) => row.tied)} onClick={() => command({ action: "create_bracket", tournamentId: data.tournament!.id, seedOrder: seedOrder.slice(0, data.tournament?.advancingTeamCount ?? seedOrder.length) }, "토너먼트 대진을 확정했습니다.")}>상위 {data.tournament?.advancingTeamCount ?? seedOrder.length}팀 본선 대진 생성</button>}
+              {canOperate && data.tournament?.bracketFormat !== "none" && <button className="primary-button wide" disabled={busy} onClick={createBracketFromCurrentSeeds}>상위 {data.tournament?.advancingTeamCount ?? seedOrder.length}팀 본선 대진 생성</button>}
               {data.tournament?.bracketFormat === "none" && <div className="seed-lock success"><span>✓</span><strong>리그전 종료</strong><p>리그 순위가 최종 결과입니다.</p></div>}
             </>
           )}
