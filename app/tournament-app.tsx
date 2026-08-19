@@ -2,7 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { isPredictionOpen } from "../lib/match-rules";
+import { isPredictionOpen, isUpcomingSchedule } from "../lib/match-rules";
 import { ProfileModal } from "./profile-modal";
 import { ResultDetailModal, ResultReviewModal, type ResultPlayerStat } from "./result-modal";
 import { DraftView, MatchDraftCreator } from "./draft-view";
@@ -724,12 +724,13 @@ export function TournamentApp({
   const teamMap = new Map(data.teams.map((team) => [team.id, team]));
   const leagueMatches = data.matches.filter((match) => match.phase === "league" || match.phase === "scrim");
   const bracketMatches = data.matches.filter((match) => match.phase === "bracket");
-  const upcoming = data.matches
-    .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId)
-    .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
-  // Prediction availability is refreshed with the dashboard polling cycle.
+  // Next Match must never be occupied by an unresolved schedule whose date is already in the past.
   // eslint-disable-next-line react-hooks/purity
   const predictionNow = Date.now();
+  const upcoming = data.matches
+    .filter((match) => match.status === "scheduled" && match.teamAId && match.teamBId && isUpcomingSchedule(match.scheduledAt, predictionNow))
+    .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+  // Prediction availability is refreshed with the dashboard polling cycle.
   const predictionMatches = upcoming.filter((match) => isScrim
     ? match.bettingStatus === "open"
     : match.scheduleConfirmed && isPredictionOpen(match.scheduledAt, predictionNow));

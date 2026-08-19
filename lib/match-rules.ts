@@ -12,3 +12,8 @@ export function isPredictionOpen(scheduledAt: string, now = Date.now()) {
   const cutoff = predictionClosesAt(scheduledAt);
   return Number.isFinite(cutoff) && now < cutoff;
 }
+
+export function isUpcomingSchedule(scheduledAt: string, now = Date.now()) {
+  const scheduledTime = new Date(scheduledAt).getTime();
+  return Number.isFinite(scheduledTime) && scheduledTime > now;
+}
